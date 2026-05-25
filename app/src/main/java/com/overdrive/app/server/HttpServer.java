@@ -116,6 +116,50 @@ public class HttpServer {
             } catch (Exception e) {
                 CameraDaemon.log("Could not extract BYD Bangcle tables: " + e.getMessage());
             }
+
+            // Extract default screen deterrent GIF if not already configured
+            try {
+                org.json.JSONObject survCfg = com.overdrive.app.config.UnifiedConfigManager.getSurveillance();
+                String existingDeterrentPath = survCfg.optString("screenDeterrentImagePath", "");
+                
+                File deterrentDir = new File("/data/local/tmp/.overdrive");
+                if (!deterrentDir.exists()) {
+                    deterrentDir.mkdirs();
+                    try { deterrentDir.setReadable(true, false); deterrentDir.setExecutable(true, false); } catch (Exception ignored) {}
+                }
+                
+                File defaultDeterrentFile = new File(deterrentDir, "screen_deterrent_asset.gif");
+                
+                // If there's no custom deterrent already configured and the default isn't there, copy it
+                if (existingDeterrentPath.isEmpty() && !defaultDeterrentFile.exists()) {
+                    boolean success = false;
+                    try (InputStream in = assetManager.open("deterrent/default.gif");
+                         FileOutputStream fos = new FileOutputStream(defaultDeterrentFile)) {
+                        byte[] buf = new byte[8192];
+                        int n;
+                        while ((n = in.read(buf)) != -1) {
+                            fos.write(buf, 0, n);
+                        }
+                        success = true;
+                    } catch (java.io.FileNotFoundException fnfe) {
+                        // Asset might not exist, silently ignore
+                    }
+                    
+                    if (success) {
+                        try { defaultDeterrentFile.setReadable(true, false); } catch (Exception ignored) {}
+                        CameraDaemon.log("Extracted default screen deterrent GIF to " + defaultDeterrentFile.getAbsolutePath());
+                        
+                        // Update configuration to point to the new default GIF
+                        java.util.Map<String, Object> updates = new java.util.HashMap<>();
+                        updates.put("screenDeterrentImagePath", defaultDeterrentFile.getAbsolutePath());
+                        updates.put("screenDeterrentHasImage", true);
+                        com.overdrive.app.config.UnifiedConfigManager.updateValues("surveillance", updates);
+                    }
+                }
+            } catch (Exception e) {
+                CameraDaemon.log("Could not extract default screen deterrent: " + e.getMessage());
+            }
+            
             
             CameraDaemon.log("Web assets extracted to " + WEB_ROOT);
         } catch (Exception e) {
