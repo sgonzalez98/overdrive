@@ -8,9 +8,9 @@
   "app": {
     "name": "OverDrive",
     "tagline": "Sistema de vigilância",
-    "live_view_title": "Visualização em directo - OverDrive",
+    "live_view_title": "Visualização ao vivo - OverDrive",
     "events_title": "Eventos - OverDrive",
-    "surveillance_title": "Supervisão - OverDrive",
+    "surveillance_title": "Vigilância - OverDrive",
     "recordings_title": "Registros - OverDrive",
     "performance_title": "Desempenho - OverDrive",
     "abrp_title": "ABRP - OverDrive",
@@ -19,9 +19,9 @@
     "notifications_title": "Notificações - OverDrive",
     "vehicle_control_title": "Controle do veículo - OverDrive",
     "login_title": "Login - OverDrive",
-    "byd_cloud_title": "BYD Nuvem - OverDrive",
+    "byd_cloud_title": "Nuvem BYD - OverDrive",
     "telegram_title": "Telegram - OverDrive",
-    "dashboard_title": "Painel de controlo - OverDrive"
+    "dashboard_title": "Painel de controle - OverDrive"
   },
   "nav": {
     "dashboard": "Painel",
@@ -36,7 +36,7 @@
     "notifications": "Notificações",
     "vehicle_control": "Controle do veículo",
     "about": "Sobre",
-    "byd_cloud": "BYD Cloud",
+    "byd_cloud": "Nuvem BYD",
     "integrations_group": "Integrações",
     "diagnostics_group": "Diagnósticos",
     "settings_group": "Configurações",
@@ -128,14 +128,14 @@
     "saving": "Salvar..."
   },
   "errors": {
-    "generic": "Alguma coisa correu mal.",
+    "generic": "Algo correu mal.",
     "network": "Erro de rede",
-    "save_failed": "Não consegui salvar",
-    "load_failed": "Falha em carregamento",
-    "delete_failed": "Não conseguiu excluir",
+    "save_failed": "Não foi possível salvar",
+    "load_failed": "Falha ao carregar",
+    "delete_failed": "Não foi possível excluir",
     "not_found": "Não encontrada",
     "unauthorized": "Não autorizado",
-    "timeout": "Pedido com prazo",
+    "timeout": "Tempo limite esgotado",
     "server_error": "Erro do servidor"
   },
   "confirm": {
@@ -144,10 +144,10 @@
     "are_you_sure": "- Tens a certeza? - Sim."
   },
   "toast": {
-    "saved": "Salvado",
-    "applied": "Aplicação",
-    "deleted": "Exclusão",
-    "copied": "Copiado para clipboard",
+    "saved": "Salvo",
+    "applied": "Aplicado",
+    "deleted": "Excluído",
+    "copied": "Copiado para o clipboard",
     "fallback_success": "Salvo",
     "fallback_error": "Algo deu errado",
     "fallback_warning": "Aviso",
@@ -165,53 +165,53 @@
     "origin_banner": "As notificações push requerem Zrok ou um proxy reverso. Os túneis rápidos Cloudflare alteram cada reinicialização e invalidariam cada assinatura. Tailscale serve sobre HTTP simples e não pode ser usado para Web Push a menos que use um proxy reverso. Abra o painel do seu Zrok reservado ou proxy reverso URL no seu telefone, Adicione à tela inicial, e volte aqui para ativar.",
     "backend_banner": "Notificações backend não iniciado. Reservar um Zrok URL através da tela de demônios e reiniciar o demônio para habilitar a entrega push.",
     "push_delivery": "Entrega de empurrão",
-    "push_delivery_sub": "Abilita alertas no dispositivo que você está usando atualmente. Cada telefone que você instalar o painel deve ser habilitado aqui uma vez.",
+    "push_delivery_sub": "Habilita alertas no dispositivo que você está usando atualmente. Cada telefone que você instalar o painel deve ser habilitado aqui uma vez.",
     "enable_btn": "Ativar neste dispositivo",
     "test_btn": "Enviar teste",
     "disable_btn": "Desativar neste dispositivo",
     "categories": "Categorias",
-    "categories_sub": "Selecione quais tipos de alertas são empurrados para este dispositivo. Cada categoria dispara quando a unidade principal detecta o evento correspondente; o que o desencadeia depende das configurações do daemon relacionado.",
+    "categories_sub": "Selecione quais tipos de alertas são enviados para este dispositivo. Cada categoria dispara quando a unidade principal detecta o evento correspondente; o que o desencadeia depende das configurações do serviço relacionado.",
     "registered_devices": "Dispositivos registados",
     "devices_sub": "Todos os telefones que habilitaram notificações push aparecem aqui. Use Remove para desinscrever um dispositivo. Desativar neste dispositivo acima também cancela o navegador atual localmente, enquanto Remove é apenas do lado do servidor.",
-    "no_devices": "Ainda não há aparelhos registados.",
+    "no_devices": "Ainda não há aparelhos registrados.",
     "perm_zrok_required": "A entrega de push requer Zrok ou um proxy inverso  ver banner acima.",
     "perm_unsupported": "Notificações não suportadas neste navegador",
     "perm_unsupported_install": "Notificações não suportadas. Se estiver usando Safari, tente adicionar à tela inicial para obter notificações",
     "perm_granted": "Os equipamentos devem ser equipados com um sistema de controlo de dados.",
     "perm_denied": "As notificações estão bloqueadas.",
     "perm_default": "As notificações ainda não estão ativadas.",
-    "backend_not_ready": "O retrocesso não está pronto.",
-    "categories_load_failed": "Não conseguiu carregar categorias.",
-    "categories_load_error": "Categoria de carregamento falhado: {error}",
+    "backend_not_ready": "O backend não está pronto.",
+    "categories_load_failed": "Não foi possível carregar as categorias.",
+    "categories_load_error": "Falha ao carregar as categorias: {error}",
     "no_categories": "Nenhuma categoria registrada.",
     "enable_first": "Primeiro, ativar as notificações neste dispositivo.",
-    "save_pref_failed": "Não conseguiu salvar a preferência",
+    "save_pref_failed": "Não foi possível salvar a preferência",
     "remove_device_confirm": "Remover este dispositivo das notificações?",
-    "remove_device_failed": "Não conseguiu remover o dispositivo",
+    "remove_device_failed": "Não foi possível remover o dispositivo",
     "unnamed_device": "Dispositivo sem nome",
     "device_last_seen": "Última vez visto {time}",
     "device_never": "Nunca",
     "device_remove": "Remover",
     "pwa_not_loaded": "PWA bootstrap não carregado instalar na tela inicial primeiro.",
-    "enable_could_not": "Não pôde habilitar: {reason}",
+    "enable_could_not": "Não foi possível habilitar: {reason}",
     "enable_success": "Notificações push habilitadas neste dispositivo.",
-    "enable_failed": "Ativar falhado: {error}",
+    "enable_failed": "Falha na ativação: {error}",
     "subscribe_browser_error": "Seu navegador recusou a assinatura push: {error}. Tente um navegador diferente — Samsung Internet sem Google Play Services, Brave com escudos habilitados e Edge durante interrupções são todos conhecidos por falhar aqui.",
     "tunnel_unreachable": "Não foi possível alcançar a head unit. A URL do Zrok ou do reverse-proxy parou de resolver — verifique se o túnel está ativo e recarregue a página.",
     "sev_critical": "Crítico: alerta de tudo, bandeira pegajosa, vibração mais longa, ignora horas de silêncio.",
     "sev_warn": "Aviso: vibração curta, bandeira padrão, algo para ver em breve.",
     "sev_auto": "Auto: a gravidade é decidida por evento a partir dos dados (vaga lenta → aviso, vazamento rápido → crítico).",
     "sev_info": "Informações: bandeira silenciosa, sem vibração  reservada para confirmações.",
-    "tab_push": "Empurra",
+    "tab_push": "Envio",
     "tab_telegram": "Telegram",
     "tab_devices": "Dispositivos",
     "telegram": "Entrega Telegram",
-    "telegram_sub": "Enviar eventos de vigilância para um bate-papo Telegram emparelhado. Aparar o bot nas configurações do daemon Telegram; os toggles abaixo decidem quais severidades atingem o bate-papo.",
+    "telegram_sub": "Enviar eventos de vigilância para um bate-papo Telegram emparelhado. Ajustar o bot nas configurações do serviço Telegram; os toggles abaixo decidem quais eventos atingem o bate-papo.",
     "telegram_delivery_sub": "Independentemente do filtro por nível acima, estas categorias inteiras são ligadas ou desligadas.",
     "vehicle_layout": "Layout do veículo",
-    "vehicle_layout_sub": "Escolha de que lado do carro o motorista se senta. Isso define se as notificações de porta rotulam as portas dianteiras como «Dianteira esq.» ou «Dianteira dir.». Salva imediatamente e vale a partir do próximo evento de porta, sem reiniciar o daemon.",
+    "vehicle_layout_sub": "Escolha de que lado do carro o motorista se senta. Isso define se as notificações de porta rotulam as portas dianteiras como «Dianteira esq.» ou «Dianteira dir.». Salva imediatamente e vale a partir do próximo evento de porta, sem reiniciar o serviço.",
     "drive_lhd": "Volante à esquerda",
-    "drive_lhd_sub": "O motorista senta-se à esquerda (boa parte da Europa, América do Norte, China).",
+    "drive_lhd_sub": "O motorista senta-se à esquerda (boa parte da Europa, América do Sul, América do Norte, China).",
     "drive_rhd": "Volante à direita",
     "drive_rhd_sub": "O motorista senta-se à direita (Reino Unido, Austrália, Índia, Japão).",
     "drive_save_failed": "Não foi possível salvar o layout do veículo",
@@ -226,39 +226,39 @@
       "excellent": "Excelente Condutor",
       "good": "Bom Condutor",
       "average": "Condutor médio",
-      "poor": "Pobre Condutor",
+      "poor": "Condutor ruim",
       "needs_improvement": "Necessidades de Melhoria"
     },
     "tier_desc": {
-      "excellent": "Excelentes hábitos de condução: você maximiza a precipitação, mantém as entradas de pedal suaves e mantém velocidades consistentes.",
-      "good": "Uma condução sólida com espaço para crescer, frenagem dura ocasional ou flutuações de velocidade reduzem a pontuação.",
-      "average": "Mudanças frequentes de velocidade ou uso inconsistente de pedais estão a custar-lhe o alcance.",
-      "poor": "Aceleração pesada e frenagem tardia reduzem significativamente o seu alcance."
+      "excellent": "Excelentes hábitos de condução: você maximiza a precipitação, mantém o pé suave e mantém velocidades consistentes.",
+      "good": "Uma condução sólida com espaço para crescer, frenagem brusca ocasional ou flutuações de velocidade reduzem a pontuação.",
+      "average": "Mudanças frequentes de velocidade ou uso inconsistente de pedais estão a dificultar seu progresso.",
+      "poor": "Aceleração pesada e frenagem tardia reduzem significativamente o seu progresso."
     },
     "score_summary": "{label}  {score}/100",
     "weakest_tip": " Área mais fraca: {area} ({val}/100). {tip}",
     "drive_more_for_tips": " Faça mais viagens para obter sugestões personalizadas de melhoria.",
     "score_descriptors": {
-      "excellent_zone": "039 Pobre",
+      "excellent_zone": "039 Fraca",
       "average_zone": "4059 Média",
       "good_zone": "6079 Boa",
       "high_zone": "80100 Excelente"
     },
     "criteria": {
       "anticipation": {
-        "label": "Anticipação",
-        "desc": "Como é que você vê bem o trânsito à frente e levanta o acelerador cedo antes de frear.",
-        "tip": "Desligue o pedal 3 a 5 segundos antes do normal."
+        "label": "Antecipação",
+        "desc": "Você vê bem o trânsito à frente e para de acelerar cedo ,antes de frear.",
+        "tip": "Tire o pé do acelerador 3 a 5 segundos antes do costume."
       },
       "smoothness": {
         "label": "Suavidade",
-        "desc": "Quão gradualmente é aplicado e liberado o acelerador e os pedais de travão.",
-        "tip": "Finge que há um copo de água no painel e as transições suaves mantêm-no estável."
+        "desc": "Quão gradualmente é aplicado e liberado o acelerador e o freio.",
+        "tip": "Finge que há um copo de água no painel e as transições suaves ocorrerão."
       },
       "speed_discipline": {
         "label": "Disciplina de velocidade",
         "desc": "Quão consistentemente mantém velocidades adequadas sem ultrapassar frequentemente.",
-        "tip": "Usar controlo de cruzeiro nas rodovias. Ficar dentro do limite {limit} economiza energia."
+        "tip": "Usar controlo de cruzeiro nas rodovias. Ficar dentro do limite de {limit} economiza energia."
       },
       "efficiency": {
         "label": "Eficiência",
@@ -268,20 +268,20 @@
       "consistency": {
         "label": "Consistência",
         "desc": "O seu estilo de condução é uniforme durante toda a viagem.",
-        "tip": "Escolha um estilo de condução e segue-o."
+        "tip": "Escolha um estilo de condução e siga nela."
       }
     },
     "speed_label": {
       "city": "Cidade",
-      "suburban": "Suburbanos",
+      "suburban": "Suburbano",
       "highway": "Estrada"
     },
     "stored": {
       "one": "{count} viagem armazenada",
       "other": "{count} viagens armazenadas"
     },
-    "no_trips_yet": "Ainda não registaram viagens.",
-    "no_trips_hint": "Habilitar análises de viagens e começar a conduzir para ver suas viagens aqui",
+    "no_trips_yet": "Ainda não há viagens registradas.",
+    "no_trips_hint": "Habilitar análises de viagens e começar a dirigir para ver suas viagens aqui",
     "summary": {
       "trips": "Viagens",
       "avg_score": "Avg Score",
@@ -292,7 +292,7 @@
     },
     "card": {
       "driver_score": "Resultados do motorista",
-      "personalized_range": "Rango personalizado",
+      "personalized_range": "Alcance personalizado",
       "cost_per_km": "Custo por km",
       "cost_per": "Custo por",
       "score_tooltip": "A sua pontuação geral de eficiência na condução baseia-se em 5 critérios: antecipação, suavidade, disciplina da velocidade, eficiência e consistência.",
@@ -322,7 +322,7 @@
       "distance_unit_desc": "Distâncias e velocidades de exibição em km ou milhas",
       "unit_km": " km",
       "unit_miles": "Milhas",
-      "storage_location": "Localização de armazenamento",
+      "storage_location": "Localização do armazenamento",
       "storage_location_desc": "Escolher onde guardar telemetria de viagem",
       "storage_internal": "Interno",
       "storage_sd": "Cartão SD",
@@ -355,11 +355,11 @@
       "bg_monitor": "Monitor de fundo",
       "last_cleanup": "Última limpeza",
       "reserved": "Espaço reservado para condução excessiva",
-      "reserved_desc": "Mantenha isto muito livre no cartão SD",
+      "reserved_desc": "Mantenha imeste espaço livre no cartão SD",
       "protect_recent": "Proteger arquivos recentes",
       "protect_recent_desc": "Não apague arquivos dashcam mais recentes do que isto.",
       "min_keep": "Mantenha arquivos mínimos",
-      "min_keep_desc": "Mantenha sempre pelo menos tantos ficheiros mais recentes.",
+      "min_keep_desc": "Mantenha sempre pelo menos os arquivos mais recentes.",
       "cleanup_now": "️ Limpe agora",
       "total_freed": "Liberdade total",
       "files_deleted_label": "Arquivos excluídos"
@@ -372,14 +372,14 @@
       "avg_kmh": "Avg km/h",
       "max_kmh": "Max km/h",
       "start_soc": "Iniciar o SoC",
-      "start_fuel": "Começar combustível",
+      "start_fuel": "Combustível inicial",
       "end_fuel": "Combustível final",
-      "litres_used": "Petróleo usado",
+      "litres_used": "Combustível usado",
       "temp_c": "Temperatura °C",
       "cost": "Custo",
       "elev_up": "Elev ↑",
       "elev_down": "Elev ↓",
-      "delete_trip": "Excluir Trip"
+      "delete_trip": "Excluir Viagem"
     },
     "timeline": {
       "title": "Linha de tempo da viagem",
@@ -389,12 +389,12 @@
       "soc": "SOP",
       "speed_pedal_title": "Tempo de velocidade e pedal",
       "legend_speed": "Velocidade",
-      "legend_accel": "Acelerar",
-      "legend_brake": "Fresca",
+      "legend_accel": "Acelerador",
+      "legend_brake": "Freio",
       "legend_soc": "% de sódio",
       "accelerating": "Aceleração",
       "coasting": "Cotação",
-      "braking": "Frescação"
+      "braking": "Frenagem"
     },
     "route": {
       "title": "Rota",
@@ -417,14 +417,14 @@
     "scores": {
       "breakdown_title": "O que conduz à degradação do DNA",
       "tap_for_coaching": "Toque as filas para coaching ",
-      "anticipation": "Anticipação",
+      "anticipation": "Antecipação",
       "smoothness": "Suavidade",
       "speed_discipline": "Disciplina de velocidade",
       "efficiency": "Eficiência",
       "consistency": "Consistência",
-      "anticipation_text": "Medem o nível do tráfego que se encontra à frente e levantam o acelerador cedo antes de frear.",
-      "anticipation_tip": " Dica: Desligue o pedal 35 segundos antes do habitual.",
-      "smoothness_text": "Percebe a sua aplicação gradual e libera os pedais do acelerador e dos travões.",
+      "anticipation_text": "Mede o nível do tráfego que se encontra à frente e tira o pé do acelerador cedo, antes de frear.",
+      "anticipation_tip": " Dica: tire o pé do avelerador 3 a 5 segundos antes do habitual.",
+      "smoothness_text": "Percebe a sua aplicação gradual e libera os pedais do acelerador e dos freios.",
       "smoothness_tip": "Sugestão: fingir que há um copo de água no painel.",
       "speed_disc_text": "Avalia a consistência com que mantém as velocidades adequadas.",
       "speed_disc_tip": " Dica: Use o controle de cruzeiro nas rodovias. Mantendo dentro de 5 km/h do limite economiza energia significativa.",
