@@ -140,8 +140,8 @@
     "rate_limited": "Một lệnh vẫn đang tiến hành  chờ vài giây",
     "not_supported": "Máy điều khiển này không có sẵn ngay bây giờ.",
     "find_car_label": "Tìm xe",
-    "battery_heat_label": "Thức nóng",
-    "close_all_windows_label": "tất cả các cửa sổ đóng cửa"
+    "battery_heat_label": "Nhiệt độ pin",
+    "close_all_windows_label": "Đóng tất cả các cửa sổ"
   },
   "messages": {
     "logged_out": "Tham gia.",
