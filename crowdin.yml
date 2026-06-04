@@ -18,12 +18,12 @@ api_token_env: CROWDIN_PERSONAL_TOKEN
 base_path: "."
 preserve_hierarchy: true
 
-# Locale code mapping.
-# Crowdin's BCP-47 codes → our on-disk file/directory naming.
-#   * "locale"               drives JSON file names (e.g. zh-CN.json, pt-BR.json)
-#   * "android_code"         drives Android values-* directories (e.g. values-zh-rCN)
-# Crowdin already maps android_code correctly for most locales; the mapping
-# below only overrides where our naming differs from Crowdin defaults.
+# Placeholders used below:
+#   %locale%        BCP-47-ish locale code Crowdin uses by default (zh-CN,
+#                   zh-TW, pt-BR, nb, de, fr, ...). Matches our JSON file
+#                   names already; no language mapping needed.
+#   %android_code%  Android values-* qualifier (zh-rCN, pt-rBR, nb, de, fr,
+#                   ...). Matches our values-{qualifier}/ directory layout.
 
 files:
   # ─── Web catalog (consumed by the WebView shell via /i18n/{lang}.json) ───
@@ -31,28 +31,14 @@ files:
     translation: /app/src/main/assets/web/i18n/%locale%.json
     type: json
     update_option: update_as_unapproved
-    languages_mapping:
-      locale:
-        zh-CN: zh-CN
-        zh-TW: zh-TW
-        pt-BR: pt-BR
-        nb-NO: nb
 
   # ─── Server-side error / SRT strings (Messages.java + SrtWriter.java) ───
   - source: /app/src/main/assets/server-i18n/en.json
     translation: /app/src/main/assets/server-i18n/%locale%.json
     type: json
     update_option: update_as_unapproved
-    languages_mapping:
-      locale:
-        zh-CN: zh-CN
-        zh-TW: zh-TW
-        pt-BR: pt-BR
-        nb-NO: nb
 
   # ─── Native Android XML (res/values-{lang}/strings.xml) ───
-  # Crowdin's android_code emits the "rXX" region tag automatically,
-  # so values-zh-rCN, values-pt-rBR, etc. fall out without overrides.
   - source: /app/src/main/res/values/strings.xml
     translation: /app/src/main/res/values-%android_code%/strings.xml
     type: android
