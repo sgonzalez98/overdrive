@@ -1,0 +1,60 @@
+# Crowdin configuration for Overdrive.
+#
+# Project: https://crowdin.com/project/overdrive
+# Free Open Source plan (project is MIT-licensed and public).
+#
+# Used by:
+#   - Crowdin GitHub integration (auto-imports source changes, opens PRs with
+#     translations against this repo's main branch)
+#   - The crowdin CLI (manual upload/download from a developer laptop)
+#
+# Auth:
+#   The CLI reads CROWDIN_PERSONAL_TOKEN from the environment. Generate one at
+#   https://crowdin.com/settings#api-key and export it before running CLI commands.
+#   Do NOT commit the token here.
+
+project_id: "902765"
+api_token_env: CROWDIN_PERSONAL_TOKEN
+base_path: "."
+preserve_hierarchy: true
+
+# Locale code mapping.
+# Crowdin's BCP-47 codes → our on-disk file/directory naming.
+#   * "locale"               drives JSON file names (e.g. zh-CN.json, pt-BR.json)
+#   * "android_code"         drives Android values-* directories (e.g. values-zh-rCN)
+# Crowdin already maps android_code correctly for most locales; the mapping
+# below only overrides where our naming differs from Crowdin defaults.
+
+files:
+  # ─── Web catalog (consumed by the WebView shell via /i18n/{lang}.json) ───
+  - source: /app/src/main/assets/web/i18n/en.json
+    translation: /app/src/main/assets/web/i18n/%locale%.json
+    type: json
+    update_option: update_as_unapproved
+    languages_mapping:
+      locale:
+        zh-CN: zh-CN
+        zh-TW: zh-TW
+        pt-BR: pt-BR
+        nb-NO: nb
+
+  # ─── Server-side error / SRT strings (Messages.java + SrtWriter.java) ───
+  - source: /app/src/main/assets/server-i18n/en.json
+    translation: /app/src/main/assets/server-i18n/%locale%.json
+    type: json
+    update_option: update_as_unapproved
+    languages_mapping:
+      locale:
+        zh-CN: zh-CN
+        zh-TW: zh-TW
+        pt-BR: pt-BR
+        nb-NO: nb
+
+  # ─── Native Android XML (res/values-{lang}/strings.xml) ───
+  # Crowdin's android_code emits the "rXX" region tag automatically,
+  # so values-zh-rCN, values-pt-rBR, etc. fall out without overrides.
+  - source: /app/src/main/res/values/strings.xml
+    translation: /app/src/main/res/values-%android_code%/strings.xml
+    type: android
+    update_option: update_as_unapproved
+    translate_attributes: 0
