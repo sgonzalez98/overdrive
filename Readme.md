@@ -9,7 +9,13 @@
   <a href="https://www.overdrive.qd.je">Website</a> •
   <a href="https://discord.gg/PZutk9fg4h">Discord</a> •
   <a href="#features">Features</a> •
-  <a href="#quick-start-use-pre-built-apk">Setup Guide</a>
+  <a href="#quick-start-use-pre-built-apk">Setup Guide</a> •
+  <a href="#translations">Translate</a>
+</p>
+<p align="center">
+  <a href="https://crowdin.com/project/overdrive">
+    <img src="https://badges.crowdin.net/overdrive/localized.svg" alt="Crowdin localization status">
+  </a>
 </p>
 
 Free, open-source dashcam and sentry mode app built specifically for BYD vehicles with DiLink v3. All data stays on your device — no cloud, no accounts, no subscriptions.
@@ -194,10 +200,29 @@ If you want to use Zrok tunneling for remote access, you need your own Zrok invi
 - No cloud upload — remote viewing is direct via tunnels
 - Open source — audit the code yourself
 
+## Translations
+
+OverDrive's UI is translated through [Crowdin](https://crowdin.com/project/overdrive). The app currently ships in **16 languages** (English, German, Spanish, French, Hindi, Italian, Japanese, Korean, Dutch, Norwegian Bokmål, Brazilian Portuguese, Russian, Thai, Turkish, Vietnamese, Simplified Chinese, Traditional Chinese), with another ~14 languages open for community translation (Polish, Czech, Romanian, Catalan, Swedish, Finnish, Danish, Greek, Hungarian, Hebrew, Arabic, Serbian, Ukrainian, Afrikaans).
+
+### How to help
+
+1. Sign up at [crowdin.com](https://crowdin.com) (free).
+2. Visit the [OverDrive project](https://crowdin.com/project/overdrive) and click **Join**.
+3. Pick a language and translate strings directly in Crowdin's web editor — **no GitHub or coding required**.
+
+New strings get auto-pre-translated by AI; translators just need to review and correct rather than start from scratch. Brand names (BYD, OverDrive, Tailscale, etc.) are protected — Crowdin's glossary marks them "do not translate".
+
+When you save translations they enter as suggestions. Once enough community translators agree, or a proofreader approves, they land in the next release via an automated pull request.
+
+### Want proofreader access?
+
+If you've contributed substantial translations for a language, open an issue or DM the maintainer for **Proofreader** role — that lets you approve translations directly without waiting for review.
+
 ## Community
 
 - [Discord Server](https://discord.gg/PZutk9fg4h)
 - [Report Issues](https://github.com/yash-srivastava/Overdrive-release/issues)
+- [Translate on Crowdin](https://crowdin.com/project/overdrive)
 
 ## Acknowledgments
 
