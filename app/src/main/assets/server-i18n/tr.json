@@ -140,8 +140,8 @@
     "rate_limited": "Bir komut hala devam ediyor  birkaç saniye bekleyin",
     "not_supported": "Bu kontrol şu anda kullanılamıyor.",
     "find_car_label": "Arabayı bul .",
-    "battery_heat_label": "Sıcaklık Battery",
-    "close_all_windows_label": "Tüm pencereler kapatıldı"
+    "battery_heat_label": "Batarya ısısı",
+    "close_all_windows_label": "Tüm pencereleri kapat ."
   },
   "messages": {
     "logged_out": "Çıkış .",
