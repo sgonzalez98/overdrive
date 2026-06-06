@@ -69,6 +69,16 @@
     <string name="overlay_rec_inactive_label">REC</string>
     <string name="overlay_trip_inactive_label">TRIP</string>
     <string name="overlay_mic_inactive_label">MIC</string>
+    <!-- Quick-action chips revealed by tapping the REC pill: switch
+         recording mode without opening the app. Short labels read fine
+         cross-locale (matches existing REC/MIC/TRIP precedent), so
+         translatable=false to avoid bloating the i18n catalog. The
+         _cd content-descriptions are real prose and ARE translatable —
+         they go through the NLLB pipeline like every other a11y string. -->
+    <string name="overlay_mode_off_cd">Stop recording</string>
+    <string name="overlay_mode_continuous_cd">Continuous recording</string>
+    <string name="overlay_mode_drive_cd">Drive-mode recording</string>
+    <string name="overlay_mode_proximity_cd">Proximity-guard recording</string>
     <!-- item_log_entry placeholders (timestamp/tag/message are runtime, but these are
          placeholder/preview text used at design time and visible in some empty states) -->
     <string name="log_entry_default_timestamp">12:34:56</string>
@@ -533,6 +543,15 @@
     <!-- StatusOverlayService persistent notification (foreground service) -->
     <string name="status_overlay_notif_title">OverDrive Status</string>
     <string name="status_overlay_notif_text">Status overlay active</string>
+    <!-- DaemonKeepaliveService persistent notification (foreground service)
+         and the group-summary row that collapses Overdrive's three FGS
+         notifications into one shade entry. The summary text is intentionally
+         generic so it stays accurate whether all three services are running
+         or only the keepalive survived an OOM respawn. -->
+    <string name="daemon_keepalive_notif_title">Overdrive Active</string>
+    <string name="daemon_keepalive_notif_text">Monitoring vehicle systems</string>
+    <string name="overdrive_status_summary_title">Overdrive</string>
+    <string name="overdrive_status_summary_text">Background services running</string>
     <!-- ============================================================== -->
     <!-- M3 Revamp: navigation rail + settings sub-rail + theme picker  -->
     <!-- ============================================================== -->
@@ -552,6 +571,7 @@
     <string name="settings_section_daemons">Daemons</string>
     <string name="settings_section_privacy">Privacy &amp; data</string>
     <string name="settings_section_overlay">Status overlay</string>
+    <string name="settings_section_security">Security</string>
     <string name="settings_overlay_subtitle">Choose which segments of the floating status pill stay visible.</string>
     <string name="settings_overlay_camera_title">Camera indicator</string>
     <string name="settings_overlay_camera_subtitle">Show the REC / PROX badge while recording is active.</string>
@@ -769,6 +789,73 @@
     <string name="settings_privacy_storage_count_format">%1$d clip</string>
     <string name="settings_privacy_storage_count_format_plural">%1$d clips</string>
     <string name="settings_privacy_reset_subtitle">Choose categories: recordings, events, daemon configs, cached telemetry…</string>
+    <!-- Settings → Security pane copy + PIN unlock screen.
+         The lock guards the OverDrive UI only. Cam daemon, AccSentry,
+         surveillance, recording, Telegram alerts, status overlay, and the
+         deterrent screen all run independently regardless of this state. -->
+    <string name="settings_security_title">Security</string>
+    <string name="settings_security_subtitle">Lock the OverDrive app so passengers and valets can\'t open it without your PIN.</string>
+    <string name="settings_security_stance_title">UI lock only</string>
+    <string name="settings_security_stance_body">Surveillance, recording, deterrent, alerts, and background services keep running while the app is locked. The PIN gates the OverDrive interface, nothing else.</string>
+    <string name="settings_security_overline_lock">App lock</string>
+    <string name="settings_security_overline_recovery">If you forget your PIN</string>
+    <string name="settings_security_toggle_title">Require PIN</string>
+    <string name="settings_security_toggle_subtitle_off">Off — anyone can open OverDrive.</string>
+    <string name="settings_security_toggle_subtitle_on">On — PIN required to open OverDrive.</string>
+    <string name="settings_security_change_title">Change PIN</string>
+    <string name="settings_security_change_subtitle">Confirm current PIN, then set a new one.</string>
+    <string name="settings_security_autolock_title">Auto-lock</string>
+    <string name="settings_security_autolock_immediate">Lock immediately</string>
+    <string name="settings_security_autolock_1min">After 1 minute</string>
+    <string name="settings_security_autolock_5min">After 5 minutes</string>
+    <string name="settings_security_autolock_15min">After 15 minutes</string>
+    <string name="settings_security_autolock_never">Never auto-lock by time</string>
+    <string name="settings_security_recovery_title">ADB recovery</string>
+    <string name="settings_security_recovery_body">Forgotten PIN can be cleared from a host machine over USB debugging without a factory reset. Run this command, then reopen the app.</string>
+    <!-- Verbatim ADB command. translatable=false so the i18n pipeline
+         doesn't localize the literal path/command — translators following
+         Crowdin would otherwise risk breaking the only recovery path. -->
+    <string name="settings_security_dialog_set_title">Set PIN</string>
+    <string name="settings_security_dialog_set_body">Pick a 4–8 digit PIN. You\'ll need this every time you open the app.</string>
+    <string name="settings_security_dialog_disable_title">Turn off PIN lock?</string>
+    <string name="settings_security_dialog_disable_body">Confirm your current PIN to turn off the app lock.</string>
+    <string name="settings_security_dialog_change_step1_title">Confirm current PIN</string>
+    <string name="settings_security_dialog_change_step1_body">Enter your current PIN, then you\'ll set a new one.</string>
+    <string name="settings_security_action_set">Set PIN</string>
+    <string name="settings_security_action_disable">Turn off lock</string>
+    <string name="settings_security_action_continue">Continue</string>
+    <string name="settings_security_pin_hint">PIN</string>
+    <string name="settings_security_pin_confirm_hint">Confirm PIN</string>
+    <string name="settings_security_error_length">PIN must be 4 to 8 digits</string>
+    <string name="settings_security_error_numeric">Digits only</string>
+    <string name="settings_security_error_mismatch">PINs don\'t match</string>
+    <string name="settings_security_error_wrong">Wrong PIN</string>
+    <string name="settings_security_error_locked_out">Too many attempts. Try again in a moment.</string>
+    <string name="settings_security_error_persist">Couldn\'t save the PIN. Try again.</string>
+    <string name="settings_security_toast_set_ok">PIN set. App lock is on.</string>
+    <string name="settings_security_toast_disable_ok">App lock turned off.</string>
+    <!-- PIN unlock screen (PinLockActivity). Shown over MainActivity when
+         the app lock is enabled and the session isn\'t fresh. -->
+    <string name="pin_lock_title">Enter PIN</string>
+    <string name="pin_lock_title_unlocked">Unlocked</string>
+    <string name="pin_lock_subtitle_default">Unlock OverDrive to continue.</string>
+    <string name="pin_lock_subtitle_wrong">Wrong PIN. Try again.</string>
+    <string name="pin_lock_subtitle_locked_out">Too many attempts. Try again shortly.</string>
+    <!-- %1$s is a formatted countdown like "30s" or "2:45". -->
+    <string name="pin_lock_subtitle_locked_out_countdown">Locked. Try again in %1$s.</string>
+    <string name="pin_lock_lockout_seconds">%1$ds</string>
+    <string name="pin_lock_lockout_minutes">%1$d:%2$02d</string>
+    <!-- Lock-screen recovery hint. Two-part: a translatable prose prefix
+         and a translatable=false literal command (reuses the same
+         settings_security_recovery_command resource so a future edit to
+         the command stays in sync across both surfaces). The lock screen
+         concatenates them at runtime via String.format. -->
+    <string name="pin_lock_recovery_hint_prefix">Forgot your PIN? Run from a connected computer:\n%1$s</string>
+    <string name="pin_lock_backspace_cd">Backspace</string>
+    <plurals name="pin_lock_dot_a11y">
+        <item quantity="one">%1$d digit entered</item>
+        <item quantity="other">%1$d digits entered</item>
+    </plurals>
     <!-- Place tagging (reverse geocoding) — recording row chip fallback. -->
     <string name="recording_unknown_location">No location</string>
     <!-- ============================================================== -->
@@ -836,4 +923,50 @@
         <item quantity="one">%1$d hr</item>
         <item quantity="other">%1$d hr</item>
     </plurals>
+    <!-- ============================================================
+         RoadSense — road-hazard detection feature
+         ============================================================ -->
+    <string name="rail_roadsense">RoadSense</string>
+    <string name="roadsense_title">RoadSense</string>
+    <string name="roadsense_pill_scanning">Scanning</string>
+    <string name="roadsense_pill_idle">RoadSense</string>
+    <string name="roadsense_status_idle">Idle</string>
+    <!-- VEHICLE calibration (suspension-learning) — the green/orange/red dot. Worded
+         about the car, not the route, since that's what maturity actually measures. -->
+    <string name="roadsense_cal_learning">Learning your vehicle</string>
+    <string name="roadsense_cal_ready">Vehicle calibrated</string>
+    <string name="roadsense_cal_partial">Calibration improving</string>
+    <!-- Idle caption — ROUTE coverage (distinct from vehicle calibration). "Clear
+         ahead" only when we've actually mapped this stretch; "New road" when we
+         haven't, so an unsurveyed road isn't mistaken for confirmed-safe. -->
+    <string name="roadsense_clear_ahead">Clear ahead</string>
+    <string name="roadsense_road_mapped">Road mapped · clear</string>
+    <string name="roadsense_road_new">New road · learning</string>
+    <string name="roadsense_unit_meters">m</string>
+    <string name="roadsense_dash_distance">—</string>
+    <string name="roadsense_warn_label">Warn</string>
+    <string name="roadsense_toggle_audio">Audio</string>
+    <string name="roadsense_toggle_visual">Visual</string>
+    <!-- severity / type readouts (formatted at runtime) -->
+    <string name="roadsense_sev_minor">Minor</string>
+    <string name="roadsense_sev_moderate">Moderate</string>
+    <string name="roadsense_sev_severe">Severe</string>
+    <string name="roadsense_type_breaker">Speed breaker</string>
+    <string name="roadsense_type_pothole">Pothole</string>
+    <string name="roadsense_type_hazard">Hazard</string>
+    <string name="roadsense_type_rough">Rough section</string>
+    <!-- "Moderate · Pothole" style line -->
+    <string name="roadsense_hazard_format">%1$s · %2$s</string>
+    <!-- Zone readouts (D-032): cluster of hazards announced as one. -->
+    <!-- "3 bumps ahead" — %1$d = count -->
+    <string name="roadsense_zone_count">%1$d bumps ahead</string>
+    <!-- "Rough section · 40 m" — %1$d = length in metres -->
+    <string name="roadsense_zone_rough">Rough section · %1$d m</string>
+    <!-- Calibration-Mode confirm card (R-OVL-6) -->
+    <string name="roadsense_confirm_prompt">Was this a hazard?</string>
+    <string name="roadsense_confirm_reject">Not a hazard</string>
+    <string name="roadsense_confirm_accept">Confirm</string>
+    <!-- content descriptions -->
+    <string name="roadsense_cd_cal_level">Route calibration level</string>
+    <string name="roadsense_cd_direction">Direction to next hazard</string>
 </resources>
