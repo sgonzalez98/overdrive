@@ -27,7 +27,23 @@
 // Bump CACHE_VERSION whenever any precached asset changes (vendor JS bump,
 // new GLB, ev-card-3d.js logic change). The activate handler deletes any
 // cache whose name doesn't match, so old assets are reclaimed.
-const CACHE_VERSION = 'overdrive-3d-v1';
+//
+// v2: ev-card-sprite-cache.js shipped its v3 layout-readiness gate
+// (clientWidth/Height>0 before keying). Without bumping CACHE_VERSION the
+// SW kept serving the v1-precached, pre-fix sprite-cache.js to existing
+// installs — so daemon-restart reloads still painted the wide dashboard
+// hero sprite into the narrow sidebar canvas (looked compressed), and
+// only a hard refresh (which bypasses the SW) cleared it. Bumping forces
+// a fresh precache on next visit and reaps overdrive-3d-v1.
+//
+// v3: dashboard refactor added the 'three-quarter' hero view —
+// ev-card-3d.js gained the new camera/rotation branch AND
+// ev-card-sprite-cache.js buildKey() now keys 'three-quarter' as a
+// distinct bucket (was collapsed to 'side'). BOTH files are precached;
+// without this bump the SW would keep serving the old bytes to existing
+// installs, so the hero would render side-framed (no three-quarter
+// branch) and re-introduce the wrong-sprite-into-canvas symptom.
+const CACHE_VERSION = 'overdrive-3d-v3';
 
 // Static, APK-bundled assets that the EV card needs on every page.
 // Same-origin only — the daemon serves these with public, max-age=86400,

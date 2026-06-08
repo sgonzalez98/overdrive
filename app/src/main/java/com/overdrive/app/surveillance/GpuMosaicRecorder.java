@@ -324,7 +324,7 @@ public class GpuMosaicRecorder {
     // Dedicated windshield camera native aspect (1920x1080 = 16:9). Used to
     // crop it vertically into the dashcam top band without stretch.
     private static final float WINDSHIELD_SOURCE_ASPECT = 1.7777778f;
-    
+
     // Fullscreen quad vertices (NDC coordinates)
     private static final float[] VERTEX_COORDS = {
         -1.0f, -1.0f,  // Bottom-left
@@ -577,10 +577,6 @@ public class GpuMosaicRecorder {
         uRecordLayoutLocation = GLES20.glGetUniformLocation(programId, "uRecordLayout");
         uWindshieldTexLocation = GLES20.glGetUniformLocation(programId, "uWindshieldTex");
         uWindshieldReadyLocation = GLES20.glGetUniformLocation(programId, "uWindshieldReady");
-        // Force both deferred uniforms to be re-pushed on the first frame of
-        // this (possibly reinitialized) program object.
-        apaModeUniformDirty.set(true);
-        recordLayoutUniformDirty.set(true);
 
         GlUtil.checkGlError("glGetLocation");
         
@@ -637,6 +633,9 @@ public class GpuMosaicRecorder {
         // an EGL recovery (release → init) doesn't pin the new programId at
         // layout 0 when the field-level cameraLayout != 0.
         apaModeUniformDirty.set(true);
+        // Same EGL-recovery discipline for the recording composition layout:
+        // re-push uRecordLayout on the next frame of the fresh program object.
+        recordLayoutUniformDirty.set(true);
 
         logger.info("GpuMosaicRecorder initialized (encoder codec=" +
             (encoder.isHevcCodec() ? "H.265" : "H.264") + ")");

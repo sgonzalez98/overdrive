@@ -71,7 +71,20 @@ public class RecordingModeManager {
     // Without this, a duplicate-event guard keyed only on accIsOn locks us out
     // of retrying activation on the next ACC ON IPC.
     private volatile boolean modeActive = false;
-    
+
+    // True when the resync ticker has determined the current CONTINUOUS/DRIVE
+    // activation is WEDGED (pipeline running + modeActive true, but the encoder
+    // never publishes frames / the pending-record prefix is stuck — see
+    // pendingPrefixStuck/encoderStalled in the resync tick). modeActive alone
+    // can't express this: a stuck activation re-affirms modeActive=true on every
+    // wedge-retry, so a status surface gated only on modeActive would paint a
+    // false "recording" forever. Exported via isRecordingWedged() so the status
+    // overlay / web card can fall back to the RED fault state instead of GREEN.
+    // PROXIMITY_GUARD is excluded (it records on triggers, so not-recording is
+    // its normal state). Recomputed every resync tick; retains its last value
+    // between ticks (slow-moving signal).
+    private volatile boolean recordingWedged = false;
+
     public RecordingModeManager(Context context, GpuSurveillancePipeline pipeline) {
         this.context = context;
         this.pipeline = pipeline;
@@ -561,6 +574,16 @@ public class RecordingModeManager {
                     && (!recordingHealthy || pendingPrefixStuck || encoderStalled)
                     && !inRotationGrace
                     && currentMode != Mode.PROXIMITY_GUARD;
+            // Publish the wedge truth for status surfaces (overlay pill / web
+            // card). This is the SAME signal that drives the wedge-retry below,
+            // so the dashcam indicator can never show a false "recording" while
+            // the encoder is structurally stuck. Cleared as soon as the wedge
+            // condition no longer holds (recording actually latched, or mode
+            // stopped). Don't latch during the rotation grace window — a normal
+            // between-segments flicker is not a wedge.
+            if (!inRotationGrace) {
+                recordingWedged = wedgeDetected;
+            }
             if (inRotationGrace && modeActive && !recordingHealthy
                     && currentMode != Mode.PROXIMITY_GUARD) {
                 logger.info("Wedge check skipped (" + reason + ") — segment rotated "
@@ -1768,6 +1791,19 @@ public class RecordingModeManager {
     }
 
     /**
+     * True when the configured CONTINUOUS/DRIVE_MODE activation is wedged —
+     * the pipeline is running and {@link #modeActive} is true, but the encoder
+     * is structurally stuck (pending-record prefix never resolves / no encoded
+     * frames for &gt;15s). Status surfaces use this to distinguish "recording is
+     * spinning up" (show active) from "we think we're recording but nothing is
+     * being written" (show fault). Always false for PROXIMITY_GUARD. See the
+     * resync tick's {@code wedgeDetected} computation.
+     */
+    public boolean isRecordingWedged() {
+        return recordingWedged;
+    }
+
+    /**
      * Number of consecutive failed GearMonitor.start() retries from the
      * resync ticker. 0 = healthy or never attempted; &gt;0 = HAL flaky;
      * == {@link #GEAR_MONITOR_RETRY_CAP} = retries suppressed until next
@@ -2034,6 +2070,10 @@ public class RecordingModeManager {
         // Whatever was active is no longer active. Set this up front so the
         // duplicate-event guard in onAccStateChanged() will allow re-activation.
         modeActive = false;
+        // A deactivated mode can't be wedged — clear immediately rather than
+        // waiting for the next resync tick, so the status surfaces don't show
+        // a stale fault after a clean stop (mode change / gear-to-P / ACC off).
+        recordingWedged = false;
 
         // Check if surveillance should be preserved — don't stop pipeline during ACC OFF
         // (surveillance/sentry mode needs the pipeline running).

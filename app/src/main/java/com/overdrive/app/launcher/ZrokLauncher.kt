@@ -137,18 +137,12 @@ class ZrokLauncher(
                 "    echo \"[\$(date)] Tunnel disabled by user (sentinel file exists). Exiting watchdog.\" >> \"\$LOG_FILE\"",
                 "    exit 0",
                 "  fi",
-                // Truncate log if it has grown past 2MB. Mirrors the
-                // AccSentry watchdog's rotation guard. Without this, a
-                // long-running watchdog where the edge flaps frequently
-                // (one log line per failed probe) can let zrok.log grow
-                // unbounded across multi-day parks. Truncate (not delete)
-                // so any tooling tail-watching the file keeps its handle.
-                "  if [ -f \"\$LOG_FILE\" ]; then",
-                "    SIZE=\$(stat -c%s \"\$LOG_FILE\" 2>/dev/null || echo 0)",
-                "    if [ \"\$SIZE\" -gt 2097152 ]; then",
-                "      echo \"[\$(date)] Log rotated (was \${SIZE} bytes)\" > \"\$LOG_FILE\"",
-                "    fi",
-                "  fi",
+                // Catch a zrok.log left oversized by a previous run before we
+                // restart the share. Real-time bounding during the share's life
+                // is handled by the log poller co-process added after ZROK_PID
+                // below (alongside the edge-stale probe). Shared helper +
+                // constant with the daemon watchdogs — single rotation policy.
+                *DaemonLauncher.logRotateGuardLines().toTypedArray(),
                 "  echo \"[\$(date)] Starting zrok share...\" >> \"\$LOG_FILE\"",
                 "  START_EPOCH=\$(awk '{print int(\$1)}' /proc/uptime 2>/dev/null || date +%s)",
                 "",
@@ -158,6 +152,12 @@ class ZrokLauncher(
                 // not a wrapper shell whose death would orphan zrok to init.
                 "  $zrokInvocation >> \"\$LOG_FILE\" 2>&1 &",
                 "  ZROK_PID=\$!",
+                "",
+                // Log-size poller: bounds zrok.log in real time for the whole
+                // life of the share (the edge can flap once a minute, one log
+                // line per failed probe → unbounded across multi-day parks).
+                // Truncates in place on the shared cadence; killed after wait.
+                *DaemonLauncher.logRotateCoprocessLines("ZROK_PID", "ROTATE_PID").toTypedArray(),
                 "",
                 // Edge-stale probe loop. Lives only as long as ZROK_PID.
                 // Reads unique_name fresh each tick (it can change after a
@@ -225,10 +225,12 @@ class ZrokLauncher(
                 // confirmed edge-stale.
                 "  wait \$ZROK_PID",
                 "  EXIT_CODE=\$?",
-                // Probe may already have exited via kill -0 returning 1;
-                // kill is harmless on dead pid. wait reaps the zombie.
+                // Probe + log poller may already have exited via kill -0
+                // returning 1; kill is harmless on dead pid. wait reaps zombies.
                 "  kill \$PROBE_PID 2>/dev/null",
                 "  wait \$PROBE_PID 2>/dev/null",
+                "  kill \$ROTATE_PID 2>/dev/null",
+                "  wait \$ROTATE_PID 2>/dev/null",
                 "",
                 "  END_EPOCH=\$(awk '{print int(\$1)}' /proc/uptime 2>/dev/null || date +%s)",
                 "  UPTIME_SEC=\$((END_EPOCH - START_EPOCH))",

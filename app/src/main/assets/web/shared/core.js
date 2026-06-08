@@ -721,6 +721,12 @@ BYD.core = {
                 BYD.surveillance.updateFromStatus(status);
             }
 
+            // Notify recording module if exists — drives the Recording Status
+            // card (badge + Current State) on recording.html from live state.
+            if (BYD.recording && BYD.recording.updateFromStatus) {
+                BYD.recording.updateFromStatus(status);
+            }
+
             return status;
         } catch (e) {
             this.pollFailureCount++;

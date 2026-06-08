@@ -9,7 +9,7 @@ import java.util.List;
  * Single-Pass Kinematic Scoring Engine for Driving DNA.
  *
  * Processes the entire telemetry array in ONE pass, computing all five Driving DNA
- * scores, micro-moments, speed histogram, avg/max speed, and kinematic state
+ * scores, micro-moments, avg/max speed, and kinematic state
  * classification simultaneously. On a 2-hour 5Hz drive (36,000 samples), this
  * touches the array exactly once — critical for constrained car head unit hardware
  * where cache thrashing and memory bandwidth are real concerns.
@@ -20,12 +20,36 @@ import java.util.List;
  *   3. Micro-moments (launches, coast-brake, smoothness) are extracted inline
  *      using state machines rather than separate passes
  *
- * Scoring axes:
- *   - Anticipation: EV-aware coast gap detection (accel < 5% = regen lift-off)
- *   - Smoothness: Pedal jerk integral (sum of |Δaccel| + |Δbrake| per second)
- *   - Speed Discipline: Rolling-window speed stddev via naive sum-of-squares variance
- *   - Efficiency: kWh/km with state-dependent baselines (falls back to SoC-based)
- *   - Consistency: Percentage deviation from rolling 10-trip average
+ * Scoring axes (all five computed in the single pass):
+ *   - Anticipation: EV-aware coast gap detection (accel < 5% = regen lift-off);
+ *     credits coasts that end via brake, power re-application, light throttle, OR
+ *     rolling to a stop — so one-pedal driving is rewarded, not penalized.
+ *   - Smoothness: mean per-driving-sample pedal jerk (|Δaccel| + |Δbrake|),
+ *     idle samples excluded, each sample's jerk winsorized so one panic stop
+ *     can't crater the score.
+ *   - Speed Discipline: rolling-window speed stddev, GPS spikes winsorized.
+ *   - Efficiency: kWh/km against a single state-dependent band. The caller
+ *     (TripAnalyticsManager) resolves energy — BMS kWh or SoC×nominal-capacity —
+ *     into trip.energyPerKm BEFORE this runs, so there is exactly one unit axis.
+ *   - Consistency: INTRA-trip behavioral uniformity — the coefficient of
+ *     variation of per-window pedal demand (Welford, single-pass). Erratic
+ *     "slam-then-coast" driving raises CV → lowers the score; a steady profile
+ *     (uniformly calm OR uniformly assertive) scores high. This matches the
+ *     user-facing definition and replaces the old trip-to-trip efficiency
+ *     deviation (which was unit-confused and stuck at 0).
+ *
+ * Normalization & confidence
+ * ───────────────────────────
+ * Every axis maps its metric through {@link #smoothScore} (a logistic S-curve)
+ * instead of a linear (1 - x/max) clamp, so real drivers spread across the
+ * range rather than piling at the 0/100 rails. Each axis also computes a
+ * coverage∈[0,1] — how much of the trip actually exercised that axis — and the
+ * final score is shrunk toward the neutral 50 by coverage:
+ *
+ *     final = round(50 + coverage * (raw - 50))
+ *
+ * So a trip that couldn't measure an axis lands honestly near 50 (no magic
+ * sentinel), and overall = mean/5 stays meaningful. Coverage is logged.
  *
  * All scores are integers in [0, 100] where 100 is optimal.
  */
@@ -36,20 +60,45 @@ public class TripScoreEngine {
     // ==================== Constants ====================
 
     private static final int MIN_SAMPLES = 30;
-    private static final int MIN_COAST_TRANSITIONS = 3;
     private static final double MAX_COAST_GAP_SECONDS = 30.0;
     private static final int MIN_DRIVING_SPEED = 3;
     private static final double MIN_EFFICIENCY_DISTANCE = 0.5;
-    private static final int MIN_RECENT_TRIPS_FOR_CONSISTENCY = 2;
     private static final int LAUNCH_PROFILE_SAMPLES = 50;
-    private static final int HISTOGRAM_BUCKET_WIDTH = 10;
-    private static final int HISTOGRAM_BUCKET_COUNT = 11;
     private static final int DEFAULT_SCORE = 50;
+
+    // ── Logistic scoring (smoothScore) ──
+    // SMOOTH_K is solved so that value==good → ~85 and value==bad → ~15:
+    //   1/(1+e^{-k}) = 0.85  ⇒  k = ln(0.85/0.15) ≈ 1.7346
+    private static final double SMOOTH_K = 1.7346;
+    private static final double NEUTRAL_SCORE = 50.0;
+    // Where "excellent" (→85) sits relative to each axis's "acceptable ceiling"
+    // (→15). Lower-is-better axes treat `bad` as the ceiling and good = ceiling×frac.
+    private static final double SMOOTH_GOOD_FRAC_JERK = 0.40;     // smoothness
+    private static final double SMOOTH_GOOD_FRAC_STDDEV = 0.45;   // speed discipline
+    private static final double ANTICIPATION_GOOD_FRAC = 0.25;    // gap≥target→excellent, ≤25%→poor
+
+    // Anticipation coverage: ~one credited coast every 2 km is "fully measured".
+    private static final double COASTS_PER_KM = 0.5;
+
+    // Smoothness: per-sample combined pedal swing cap (winsorize one panic stop).
+    // A single 5Hz tick physically can't swing both pedals more than this much.
+    private static final double JERK_CAP_PER_SAMPLE = 60.0;
+    // Fraction of trip samples that must be "driving jerk" samples for full coverage.
+    private static final double SMOOTH_MIN_DRIVING_FRACTION = 0.30;
+
+    // Speed discipline: clip GPS/CAN speed spikes before they inflate variance.
+    private static final int SPEED_WINSOR_CAP = 200;
+
+    // Consistency (intra-trip behavioral uniformity): CV of per-window pedal demand.
+    private static final double CONS_GOOD_CV = 0.25;   // ≤25% swing around mean → uniform
+    private static final double CONS_BAD_CV = 0.80;    // ~80% swing → erratic
+    private static final int CONS_MIN_WINDOWS = 4;     // need a few windows to talk uniformity
+    private static final double CONS_MIN_MEAN_INTENSITY = 1.0; // guard CV div-by-~0 on idle trips
 
     // Speed discipline window: 30 samples at 5Hz = 6 seconds
     private static final int SD_WINDOW_SIZE = 30;
     private static final int SD_WINDOW_STEP = 15; // 50% overlap
-    private static final int SD_MIN_DRIVING = 15;  // At least half must be driving
+    private static final int SD_MIN_DRIVING = 6;   // ≥1.2s of motion qualifies a window
 
     // Pedal smoothness window: 10 samples at 5Hz = 2 seconds
     private static final int SMOOTH_WINDOW_SIZE = 10;
@@ -119,12 +168,14 @@ public class TripScoreEngine {
         double lastValidAlt = Double.NaN;
         int altSampleCounter = 0;
 
-        // ── Accumulators: speed histogram ──
-        int[] histCounts = new int[HISTOGRAM_BUCKET_COUNT];
-
         // ── Accumulators: pedal jerk (smoothness score) ──
-        double pedalJerkSum = 0;
-        int lastAccel = 0, lastBrake = 0;
+        // Only sums jerk between two consecutive DRIVING samples, each sample's
+        // contribution winsorized at JERK_CAP_PER_SAMPLE, and normalized per
+        // driving-sample (not wall-clock) so the metric is idle- and
+        // polling-jitter-invariant.
+        double drivingJerkSum = 0;
+        int drivingJerkSamples = 0;
+        int lastAccel = 0, lastBrake = 0, lastSpeed = 0;
 
         // ── State machine: coast gap (anticipation score) ──
         Long coastStartTime = null;
@@ -141,8 +192,10 @@ public class TripScoreEngine {
         // ── State machine: coast-brake events (micro-moments) ──
         Long mmCoastStartTime = null;
 
-        // ── Rolling window: speed discipline (naive sum-of-squares variance) ──
-        // We use a circular buffer of speed values for the window
+        // ── Rolling window: speed discipline (sum-of-squares variance) ──
+        // We use a circular buffer of speed values for the window. Speeds are
+        // winsorized at SPEED_WINSOR_CAP on insertion so a single GPS/CAN spike
+        // can't inflate the window variance quadratically.
         int[] sdWindowSpeeds = new int[SD_WINDOW_SIZE];
         boolean[] sdWindowIsDriving = new boolean[SD_WINDOW_SIZE];
         int sdWindowDrivingCount = 0;
@@ -151,6 +204,24 @@ public class TripScoreEngine {
         double sdTotalScore = 0;
         int sdWindowCount = 0;
         int sdStepCounter = 0;
+        int sdDrivingSampleTotal = 0; // for speed-discipline coverage
+
+        // ── Consistency (intra-trip behavioral uniformity) ──
+        // Per-window mean pedal demand (accel+brake) over the DRIVING samples in
+        // the window, accumulated on the SAME circular buffer cadence as speed
+        // discipline, then fed through Welford online mean/variance so we get the
+        // coefficient of variation of the driver's "intensity profile" across the
+        // trip in a single pass. The accel/brake sums are gated on isDriving (and
+        // divided by the driving count) so idle dwell at lights can't dilute the
+        // intensity — same population the window qualifies on.
+        int[] sdWindowAccel = new int[SD_WINDOW_SIZE];
+        int[] sdWindowBrake = new int[SD_WINDOW_SIZE];
+        double sdWindowAccelSum = 0;
+        double sdWindowBrakeSum = 0;
+        // Welford accumulators over the stream of per-window intensities:
+        int consWindowCount = 0;
+        double consMean = 0;
+        double consM2 = 0;
 
         // ── Rolling window: pedal smoothness (micro-moments) ──
         int[] smoothWindowAccel = new int[SMOOTH_WINDOW_SIZE];
@@ -173,14 +244,13 @@ public class TripScoreEngine {
             sumSpeed += speed;
             if (speed > maxSpeed) maxSpeed = speed;
 
-            // ── 2. Speed histogram ──
-            int bucket = speed / HISTOGRAM_BUCKET_WIDTH;
-            if (bucket >= HISTOGRAM_BUCKET_COUNT) bucket = HISTOGRAM_BUCKET_COUNT - 1;
-            histCounts[bucket]++;
-
-            // ── 3. Kinematic state: stop counting ──
+            // ── 2. Kinematic state: stop counting ──
+            // Count a stop when the car drops to a near-standstill (≤1 km/h, not
+            // exact 0) after having been driving — creep-to-a-crawl in gridlock
+            // and sensors that floor at 1 km/h never hit a clean 0 but are still
+            // stops. wasMoving arms once above the driving threshold.
             if (speed > MIN_DRIVING_SPEED) wasMoving = true;
-            if (speed == 0 && wasMoving) {
+            if (speed <= 1 && wasMoving) {
                 stopCount++;
                 wasMoving = false;
             }
@@ -206,27 +276,37 @@ public class TripScoreEngine {
                 }
             }
 
+            final boolean driving = speed > MIN_DRIVING_SPEED;
+            final boolean wasDriving = lastSpeed > MIN_DRIVING_SPEED;
+
             // ── 4. Pedal jerk (smoothness) ──
-            if (i > 0) {
-                pedalJerkSum += Math.abs(accel - lastAccel) + Math.abs(brake - lastBrake);
+            // Only between two consecutive driving samples (excludes idle creep
+            // and the launch/stop transients), and each sample's contribution is
+            // winsorized so a single panic stop can't dominate the integral.
+            if (i > 0 && driving && wasDriving) {
+                double sampleJerk = Math.abs(accel - lastAccel) + Math.abs(brake - lastBrake);
+                if (sampleJerk > JERK_CAP_PER_SAMPLE) sampleJerk = JERK_CAP_PER_SAMPLE;
+                drivingJerkSum += sampleJerk;
+                drivingJerkSamples++;
             }
 
             // ── 5. Coast gap detection (anticipation) ──
-            // EV-aware: accel < 5% counts as lifting off (regen zone)
-            // Coasting ends when driver brakes OR re-applies power (one-pedal driving)
+            // EV-aware: accel < 5% counts as lifting off (regen zone). A coast is
+            // CREDITED whenever it ends by any of: friction brake, re-applying
+            // power (≥15%), feathering light throttle (5–14%), OR rolling to a
+            // stop. Crediting light-throttle and roll-to-stop coasts is what lets
+            // one-pedal EV drivers (who rarely touch the brake) score honestly.
             if (accel < 5 && brake == 0 && speed > MIN_DRIVING_SPEED) {
                 if (coastStartTime == null) coastStartTime = s.timestampMs;
-            } else if ((brake > 0 || accel >= 15) && coastStartTime != null) {
-                // Coasting ended via friction brake OR re-applying power
+            } else if (coastStartTime != null
+                    && (brake > 0 || accel >= 5 || speed <= MIN_DRIVING_SPEED)) {
+                // Coast ended — credit the gap regardless of HOW it ended.
                 long gapMs = s.timestampMs - coastStartTime;
                 double gapSec = gapMs / 1000.0;
                 if (gapSec > 0 && gapSec < MAX_COAST_GAP_SECONDS) {
                     coastGapSumMs += gapMs;
                     coastGapCount++;
                 }
-                coastStartTime = null;
-            } else if (accel >= 5 && accel < 15) {
-                // Light throttle re-application — not a full coast-end, just cancel coast tracking
                 coastStartTime = null;
             }
 
@@ -248,8 +328,12 @@ public class TripScoreEngine {
                     microMoments.launches.add(lp);
                 }
             } else {
-                // Detect launch: was stationary, now moving
-                if (speed == 0) {
+                // Detect launch: was stationary, now moving. Arm at a near-
+                // standstill (≤1 km/h) so a gentle 1→2→3→4 creep-off still counts
+                // as a launch, and keep the arm until the car genuinely crosses
+                // the driving threshold (a 1 km/h creep must NOT disarm it — that
+                // was dropping every soft launch).
+                if (speed <= 1) {
                     wasStationary = true;
                 } else if (wasStationary && speed > MIN_DRIVING_SPEED) {
                     // Start capturing launch profile
@@ -260,7 +344,7 @@ public class TripScoreEngine {
                     launchCaptureRemaining = LAUNCH_PROFILE_SAMPLES - 1;
                     wasStationary = false;
                 }
-                if (speed > 0) wasStationary = false;
+                if (speed > MIN_DRIVING_SPEED) wasStationary = false;
             }
 
             // ── 7. Coast-brake events (micro-moments) ──
@@ -279,27 +363,44 @@ public class TripScoreEngine {
             }
             if (accel >= 5) mmCoastStartTime = null;
 
-            // ── 8. Speed discipline: rolling window via circular buffer ──
-            boolean isDriving = speed > MIN_DRIVING_SPEED;
+            // ── 8. Speed discipline + consistency: rolling window via circular buffer ──
+            // One circular buffer feeds two axes:
+            //   • speed discipline = avg per-window σ(speed)  (driving samples only)
+            //   • consistency      = CV of per-window mean pedal demand (all samples)
+            final boolean isDriving = driving;
+            if (isDriving) sdDrivingSampleTotal++;
             int circIdx = i % SD_WINDOW_SIZE;
 
-            // If window is full, evict the oldest entry
+            // If window is full, evict the oldest entry. Both the speed sums
+            // (for σ) and the pedal-intensity sums (for consistency) are gated on
+            // the slot's stored driving flag, so eviction is symmetric with the
+            // driving-gated insertion below.
             if (i >= SD_WINDOW_SIZE) {
                 if (sdWindowIsDriving[circIdx]) {
                     int oldSpeed = sdWindowSpeeds[circIdx];
                     sdWindowDrivingCount--;
                     sdWindowSum -= oldSpeed;
                     sdWindowSumSq -= (double) oldSpeed * oldSpeed;
+                    sdWindowAccelSum -= sdWindowAccel[circIdx];
+                    sdWindowBrakeSum -= sdWindowBrake[circIdx];
                 }
             }
 
-            // Insert new entry
-            sdWindowSpeeds[circIdx] = speed;
+            // Insert new entry. Speed is winsorized so one GPS/CAN spike doesn't
+            // blow up the window variance; pedal values are already 0–100 bounded.
+            // Pedal demand is accumulated only for driving samples (same
+            // population as the σ sums), so idle dwell doesn't dilute intensity.
+            int winsorSpeed = speed > SPEED_WINSOR_CAP ? SPEED_WINSOR_CAP : speed;
+            sdWindowSpeeds[circIdx] = winsorSpeed;
             sdWindowIsDriving[circIdx] = isDriving;
+            sdWindowAccel[circIdx] = accel;
+            sdWindowBrake[circIdx] = brake;
             if (isDriving) {
                 sdWindowDrivingCount++;
-                sdWindowSum += speed;
-                sdWindowSumSq += (double) speed * speed;
+                sdWindowSum += winsorSpeed;
+                sdWindowSumSq += (double) winsorSpeed * winsorSpeed;
+                sdWindowAccelSum += accel;
+                sdWindowBrakeSum += brake;
             }
 
             // Evaluate window every SD_WINDOW_STEP samples, once we have a full window
@@ -314,6 +415,19 @@ public class TripScoreEngine {
                     // Score this window (threshold applied post-loop when we know the state)
                     sdTotalScore += sd;
                     sdWindowCount++;
+
+                    // Consistency: this window's mean pedal demand (accel+brake)
+                    // over its DRIVING samples, streamed into Welford. Dividing by
+                    // sdWindowDrivingCount (the same count this window qualified on,
+                    // ≥ SD_MIN_DRIVING here so never zero) makes intensity a pure
+                    // measure of pedal style, invariant to how much idle dwell the
+                    // 6s window happened to straddle.
+                    double windowIntensity =
+                            (sdWindowAccelSum + sdWindowBrakeSum) / sdWindowDrivingCount;
+                    consWindowCount++;
+                    double delta = windowIntensity - consMean;
+                    consMean += delta / consWindowCount;
+                    consM2 += delta * (windowIntensity - consMean);
                 }
             }
 
@@ -348,6 +462,7 @@ public class TripScoreEngine {
 
             lastAccel = accel;
             lastBrake = brake;
+            lastSpeed = speed;
         }
         // ════════════════════════════════════════════════════════════
         //  END SINGLE PASS
@@ -447,10 +562,16 @@ public class TripScoreEngine {
 
         // ════════════════════════════════════════════════════════════
         //  SCORE COMPUTATION (all from accumulators, no re-iteration)
+        //
+        //  Each axis: raw = smoothScore(metric, good, bad) on a logistic curve,
+        //  then final = applyCoverage(raw, coverage) to shrink toward the
+        //  neutral 50 by how much of the trip actually exercised the axis.
         // ════════════════════════════════════════════════════════════
 
-        // A. Anticipation — coast gap before braking
-        //    Gradient-adjusted: on steep terrain, less coasting is expected
+        // A. Anticipation — average coast gap before the coast ends (higher = better).
+        //    Coverage scales with distance: ~one credited coast per 2 km is "fully
+        //    measured". This replaces the old hard ≥3-transitions gate that pinned
+        //    one-pedal drivers at 50.
         double targetGapMs;
         switch (kinState) {
             case HEAVY_GRIDLOCK:   targetGapMs = 800;  break;
@@ -458,23 +579,22 @@ public class TripScoreEngine {
             default:               targetGapMs = 2500; break;
         }
         targetGapMs *= anticipationGradientFactor;
-        if (targetGapMs <= 0) {
-            trip.anticipationScore = DEFAULT_SCORE;
-        } else if (coastGapCount >= MIN_COAST_TRANSITIONS) {
+        double anticipationCoverage = 0;
+        double rawAnticipation = NEUTRAL_SCORE;
+        if (coastGapCount > 0 && targetGapMs > 0) {
             double avgGapMs = (double) coastGapSumMs / coastGapCount;
-            trip.anticipationScore = clamp((int) Math.round(avgGapMs / targetGapMs * 100), 0, 100);
-        } else {
-            trip.anticipationScore = DEFAULT_SCORE;
+            rawAnticipation = smoothScore(avgGapMs,
+                    /* good */ targetGapMs,
+                    /* bad  */ targetGapMs * ANTICIPATION_GOOD_FRAC);
+            double expectedCoasts = Math.max(1.0, trip.distanceKm * COASTS_PER_KM);
+            anticipationCoverage = Math.min(1.0, coastGapCount / expectedCoasts);
         }
+        trip.anticipationScore = applyCoverage(rawAnticipation, anticipationCoverage);
 
-        // B. Smoothness — pedal jerk integral (lower = smoother)
-        //    Gradient-adjusted: steeper roads require more pedal variation
-        //    Use actual elapsed time from timestamps, not assumed 5Hz polling rate,
-        //    because Android CPU governor and GC cause polling jitter.
-        long actualDurationMs = samples.get(n - 1).timestampMs - samples.get(0).timestampMs;
-        double durationSec = actualDurationMs / 1000.0;
-        if (durationSec < 1) durationSec = 1;
-        double normalizedJerk = pedalJerkSum / durationSec;
+        // B. Smoothness — mean per-driving-sample pedal jerk (lower = smoother).
+        //    Cadence- and idle-invariant: we divide the (winsorized) jerk sum by
+        //    the number of driving-jerk samples, not wall-clock seconds. Coverage
+        //    gates on having enough driving samples to characterize smoothness.
         double maxJerk;
         switch (kinState) {
             case HEAVY_GRIDLOCK:   maxJerk = 20; break;
@@ -482,31 +602,68 @@ public class TripScoreEngine {
             default:               maxJerk = 12; break;
         }
         maxJerk *= smoothnessGradientFactor;
-        trip.smoothnessScore = clamp((int) Math.round((1.0 - normalizedJerk / maxJerk) * 100), 0, 100);
+        double smoothnessCoverage = 0;
+        double rawSmoothness = NEUTRAL_SCORE;
+        if (drivingJerkSamples > 0) {
+            double meanJerk = drivingJerkSum / drivingJerkSamples;
+            rawSmoothness = smoothScore(meanJerk,
+                    /* good */ maxJerk * SMOOTH_GOOD_FRAC_JERK,
+                    /* bad  */ maxJerk);
+            // Coverage is relative to DRIVING time, not wall-clock: a smooth
+            // driving segment inside an idle-heavy trip should keep its score,
+            // not be dragged toward 50 by time spent parked at lights.
+            smoothnessCoverage = Math.min(1.0,
+                    drivingJerkSamples / Math.max(1.0, sdDrivingSampleTotal * SMOOTH_MIN_DRIVING_FRACTION));
+        }
+        trip.smoothnessScore = applyCoverage(rawSmoothness, smoothnessCoverage);
 
-        // C. Speed Discipline — rolling window stddev average
-        //    sdTotalScore holds the SUM of per-window stddev values.
-        //    Convert to average stddev, then score against state-dependent threshold.
+        // C. Speed Discipline — average per-window σ(speed) (lower = steadier).
+        //    Coverage = qualifying windows vs how many windows the driving samples
+        //    could have produced, so an almost-idle trip honestly reads ~50 rather
+        //    than the old flat DEFAULT.
         double maxStdDev;
         switch (kinState) {
             case HEAVY_GRIDLOCK:   maxStdDev = 20.0; break;
             case HIGHWAY_CRUISING: maxStdDev = 12.0; break;
             default:               maxStdDev = 16.0; break;
         }
+        double speedDisciplineCoverage = 0;
+        double rawSpeedDiscipline = NEUTRAL_SCORE;
         if (sdWindowCount > 0) {
             double avgStdDev = sdTotalScore / sdWindowCount;
-            trip.speedDisciplineScore = clamp(
-                    (int) Math.round((1.0 - avgStdDev / maxStdDev) * 100), 0, 100);
-        } else {
-            trip.speedDisciplineScore = DEFAULT_SCORE;
+            rawSpeedDiscipline = smoothScore(avgStdDev,
+                    /* good */ maxStdDev * SMOOTH_GOOD_FRAC_STDDEV,
+                    /* bad  */ maxStdDev);
+            double expectedWindows = Math.max(1.0, (double) sdDrivingSampleTotal / SD_WINDOW_STEP);
+            speedDisciplineCoverage = Math.min(1.0, sdWindowCount / expectedWindows);
         }
+        trip.speedDisciplineScore = applyCoverage(rawSpeedDiscipline, speedDisciplineCoverage);
 
-        // D. Efficiency — kWh/km with realistic BYD EV baselines
-        //    Gradient-adjusted: uphill widens acceptable range, downhill shifts
-        //    bestEff below zero (good driver should be gaining battery on descent)
-        double energyUsed = trip.getEnergyUsedKwh();
-        if (energyUsed > 0 && trip.distanceKm >= MIN_EFFICIENCY_DISTANCE) {
-            double kwhPerKm = energyUsed / trip.distanceKm;
+        // D. Efficiency — kWh/km against a single state-dependent band (lower = better).
+        //    Energy is resolved upstream (BMS kWh, or SoC×nominal-capacity) BEFORE
+        //    this runs, so there is exactly one unit axis — no SoC%/km fallback,
+        //    no dimensionally-mismatched constants. When BMS kWh is available we
+        //    use the SIGNED net energy so a regen-dominant descent yields a
+        //    negative kWh/km that smoothScore maps above the `good` anchor; the
+        //    SoC-estimated fallback (trip.energyPerKm) stays consumption-only
+        //    because 1%-resolution SoC can't reliably tell regen from jitter.
+        double signedBmsKwh = trip.getSignedEnergyKwh();
+        boolean haveBmsKwh = signedBmsKwh != 0; // kwhStart>0 && kwhEnd>0 upstream
+        double kwhPerKm;
+        boolean efficiencyMeasured;
+        if (trip.distanceKm >= MIN_EFFICIENCY_DISTANCE && haveBmsKwh) {
+            kwhPerKm = signedBmsKwh / trip.distanceKm; // may be negative (regen)
+            efficiencyMeasured = true;
+        } else if (trip.distanceKm >= MIN_EFFICIENCY_DISTANCE && trip.energyPerKm > 0) {
+            kwhPerKm = trip.energyPerKm; // SoC-estimated, non-negative
+            efficiencyMeasured = true;
+        } else {
+            kwhPerKm = 0;
+            efficiencyMeasured = false;
+        }
+        double efficiencyCoverage = 0;
+        double rawEfficiency = NEUTRAL_SCORE;
+        if (efficiencyMeasured) {
             double bestEff, worstEff;
             switch (kinState) {
                 case HEAVY_GRIDLOCK:   bestEff = 0.10; worstEff = 0.35; break;
@@ -515,28 +672,33 @@ public class TripScoreEngine {
             }
             bestEff += efficiencyBestAdjust;
             worstEff *= efficiencyGradientFactor;
-            double effRange = worstEff - bestEff;
-            if (effRange <= 0) {
-                trip.efficiencyScore = 100;
-            } else {
-                double score = (worstEff - kwhPerKm) / effRange * 100;
-                trip.efficiencyScore = clamp((int) Math.round(score), 0, 100);
-            }
-        } else if (trip.distanceKm >= MIN_EFFICIENCY_DISTANCE) {
-            double socDelta = trip.socStart - trip.socEnd;
-            if (socDelta > 0) {
-                double consumptionPerKm = socDelta / trip.distanceKm;
-                double score = (3.5 - consumptionPerKm) / 3.0 * 100;
-                trip.efficiencyScore = clamp((int) Math.round(score), 0, 100);
-            } else {
-                trip.efficiencyScore = DEFAULT_SCORE;
-            }
-        } else {
-            trip.efficiencyScore = DEFAULT_SCORE;
+            rawEfficiency = smoothScore(kwhPerKm, /* good */ bestEff, /* bad */ worstEff);
+            efficiencyCoverage = 1.0; // whole-trip aggregate: measured or not
         }
+        trip.efficiencyScore = applyCoverage(rawEfficiency, efficiencyCoverage);
 
-        // E. Consistency — computed later with recent trips from DB
-        trip.consistencyScore = DEFAULT_SCORE;
+        // E. Consistency — INTRA-trip behavioral uniformity (lower CV = steadier).
+        //    consCV is the coefficient of variation of per-window pedal demand,
+        //    accumulated online (Welford) during the single pass. A driver with a
+        //    steady intensity profile (uniformly calm OR uniformly assertive) has
+        //    low CV → high score; "slam-then-coast" alternation has high CV → low
+        //    score. This matches the user-facing "how uniform is your style" copy.
+        double consistencyCoverage = 0;
+        double rawConsistency = NEUTRAL_SCORE;
+        double consCV = 0;
+        // Need ≥2 windows for a coefficient of variation to mean anything: a
+        // single window forces between-window variance to 0, which would hand a
+        // spuriously near-perfect uniformity score to a trip that demonstrated no
+        // measurable intra-trip variation at all. With <2 windows we stay at the
+        // neutral 50 (coverage 0).
+        if (consWindowCount >= 2 && consMean > CONS_MIN_MEAN_INTENSITY) {
+            double consVariance = consM2 / consWindowCount; // population variance
+            if (consVariance < 0) consVariance = 0;
+            consCV = Math.sqrt(consVariance) / consMean;
+            rawConsistency = smoothScore(consCV, /* good */ CONS_GOOD_CV, /* bad */ CONS_BAD_CV);
+            consistencyCoverage = Math.min(1.0, (double) consWindowCount / CONS_MIN_WINDOWS);
+        }
+        trip.consistencyScore = applyCoverage(rawConsistency, consistencyCoverage);
 
         // ── Micro-moments ──
         trip.microMomentsJson = microMoments.toJson().toString();
@@ -550,68 +712,61 @@ public class TripScoreEngine {
                 + " loss/km=" + String.format("%.1f", lossPerKm) + "] "
                 + "A=" + trip.anticipationScore + " S=" + trip.smoothnessScore
                 + " SD=" + trip.speedDisciplineScore + " E=" + trip.efficiencyScore
-                + " C=" + trip.consistencyScore);
+                + " C=" + trip.consistencyScore
+                + " | cov[A=" + String.format("%.2f", anticipationCoverage)
+                + " S=" + String.format("%.2f", smoothnessCoverage)
+                + " SD=" + String.format("%.2f", speedDisciplineCoverage)
+                + " E=" + String.format("%.2f", efficiencyCoverage)
+                + " C=" + String.format("%.2f", consistencyCoverage) + "]"
+                + " consCV=" + String.format("%.2f", consCV)
+                + " kwh/km=" + String.format("%.3f", kwhPerKm));
 
         return trip;
-    }
-
-    /**
-     * Consistency Score (0-100): percentage deviation from rolling average.
-     *
-     * Uses energyPerKm when available, falls back to efficiencySocPerKm.
-     * Percentage-based so that a 0.02 kWh/km deviation on a 0.15 average (~13%)
-     * is treated the same as a 0.04 deviation on a 0.30 average (~13%).
-     * 0% deviation → 100, ≥50% deviation → 0.
-     */
-    public int computeConsistency(double currentEfficiency, List<TripRecord> recentTrips) {
-        if (recentTrips == null || recentTrips.size() < MIN_RECENT_TRIPS_FOR_CONSISTENCY) {
-            return DEFAULT_SCORE;
-        }
-
-        boolean useKwh = currentEfficiency > 0 && currentEfficiency < 1;
-        double sum = 0;
-        int count = 0;
-        for (TripRecord t : recentTrips) {
-            double val = useKwh ? t.energyPerKm : t.efficiencySocPerKm;
-            if (val > 0) { sum += val; count++; }
-        }
-        if (count < MIN_RECENT_TRIPS_FOR_CONSISTENCY) return DEFAULT_SCORE;
-
-        double avgEfficiency = sum / count;
-        double deviation = Math.abs(currentEfficiency - avgEfficiency);
-        double pctDeviation = avgEfficiency > 0 ? deviation / avgEfficiency : 0;
-        double maxPctDeviation = 0.50;
-        int score = (int) Math.round((1.0 - pctDeviation / maxPctDeviation) * 100);
-        return clamp(score, 0, 100);
-    }
-
-    // ==================== Speed Histogram ====================
-
-    /**
-     * Compute speed histogram from pre-counted buckets.
-     * This is a lightweight post-processing step — the actual counting
-     * happens inside the single pass in computeSummary().
-     */
-    int[] computeSpeedHistogram(List<TelemetrySample> samples) {
-        int[] counts = new int[HISTOGRAM_BUCKET_COUNT];
-        for (TelemetrySample s : samples) {
-            int bucket = s.speedKmh / HISTOGRAM_BUCKET_WIDTH;
-            if (bucket >= HISTOGRAM_BUCKET_COUNT) bucket = HISTOGRAM_BUCKET_COUNT - 1;
-            counts[bucket]++;
-        }
-        int[] pct = new int[HISTOGRAM_BUCKET_COUNT];
-        int total = samples.size();
-        if (total > 0) {
-            for (int i = 0; i < HISTOGRAM_BUCKET_COUNT; i++) {
-                pct[i] = (int) Math.round((double) counts[i] / total * 100);
-            }
-        }
-        return pct;
     }
 
     // ==================== Utilities ====================
 
     static int clamp(int value, int min, int max) {
         return Math.max(min, Math.min(max, value));
+    }
+
+    /**
+     * Logistic score in (0, 100). Maps a raw metric onto a smooth S-curve so
+     * scores spread across the range instead of saturating at the rails the way
+     * the old linear {@code (1 - value/max)} clamp did.
+     *
+     * <p>The two reference points define the curve:
+     * <ul>
+     *   <li>{@code value == good} → ~85</li>
+     *   <li>midpoint of good/bad → 50</li>
+     *   <li>{@code value == bad}  → ~15</li>
+     * </ul>
+     *
+     * <p>Works for both higher-is-better axes (pass {@code good > bad}, e.g.
+     * anticipation gap) and lower-is-better axes ({@code good < bad}, e.g. jerk)
+     * — the sign of the half-width handles the direction. Extreme inputs
+     * compress toward 0/100 asymptotically rather than clamping, and negative
+     * values are fine (e.g. regen-positive kWh/km on a descent).
+     *
+     * @param good  metric value that should score ~85 (the "excellent" anchor)
+     * @param bad   metric value that should score ~15 (the "poor" anchor)
+     */
+    static double smoothScore(double value, double good, double bad) {
+        double m = (good + bad) / 2.0;
+        double h = (bad - good) / 2.0;
+        if (h == 0) return NEUTRAL_SCORE; // misconfig: good == bad
+        double z = (value - m) / h; // z = -1 at `good`, +1 at `bad`
+        return 100.0 / (1.0 + Math.exp(SMOOTH_K * z));
+    }
+
+    /**
+     * Shrink a raw score toward the neutral 50 by how much of the trip actually
+     * exercised the axis (empirical-Bayes style). An unmeasured axis (coverage 0)
+     * lands at 50; a fully-measured one (coverage 1) keeps its raw score.
+     * Returns an int in [0, 100].
+     */
+    static int applyCoverage(double raw, double coverage) {
+        double cov = Math.max(0.0, Math.min(1.0, coverage));
+        return clamp((int) Math.round(NEUTRAL_SCORE + cov * (raw - NEUTRAL_SCORE)), 0, 100);
     }
 }

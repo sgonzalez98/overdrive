@@ -232,10 +232,18 @@ class MainActivity : AppCompatActivity() {
         if (headlessBootSilenceGate) {
             android.util.Log.i("MainActivity", "Boot launch — minimizing to background")
             moveTaskToBack(true)
-            // Boot moveTaskToBack puts the task behind home; the very next
-            // foreground entry is the user — clear the silence latch so
-            // the gate fires from the next onResume / onNewIntent.
-            headlessBootSilenceGate = false
+            // NB: do NOT clear headlessBootSilenceGate here. This block runs
+            // inside onCreate; the launch's OWN first onResume fires immediately
+            // after and calls maybeShowPinLock(). If the latch were already
+            // cleared, that first onResume would gate and surface PinLockActivity
+            // over the BYD home screen (with FLAG_TURN_SCREEN_ON waking the
+            // panel) even though we just moved the task to back — an unrequested
+            // lock-screen flash on every boot / post-update. The latch is instead
+            // cleared in onPause (which fires once this minimized launch leaves
+            // the foreground), so the gate stays suppressed through the launch's
+            // own onResume and re-arms for the user's next genuine foreground
+            // entry. onNewIntent clears it explicitly for notification/user
+            // re-entries.
         }
     }
     
@@ -258,6 +266,10 @@ class MainActivity : AppCompatActivity() {
         // RoadSense floating overlay (D-024): start only when the feature is enabled.
         // It's a separate window from the status overlay and renders the pill/card.
         syncRoadSenseOverlay()
+
+        // Blind Spot overlay: native hardware-decoded stream view 7/8, shown on
+        // turn indicator. Started only when the blindspot feature is enabled.
+        syncBlindSpotOverlay()
 
         // showIfNeeded is no-op when the seen install-time matches the current
         // PackageInfo.lastUpdateTime, so it's safe to call on every launch.
@@ -547,8 +559,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Arm/disarm the NATIVE blind-spot lane to match the `blindspot.enabled` flag.
+     * The visual is daemon-side (SurfaceControl layer); the app just POSTs the
+     * daemon control surface — no app-process overlay/decoder. The daemon owns
+     * show/hide (turn-trigger) and positioning.
+     */
+    private fun syncBlindSpotOverlay() {
+        com.overdrive.app.roadsense.overlay.BlindSpotControl.sync(this)
+    }
+
     override fun onPause() {
         super.onPause()
+        // Consume the one-shot headless-boot silence latch here rather than at
+        // the end of onCreate. A minimized boot/post-update launch goes
+        // onCreate (latch set, maybeShowPinLock suppressed) → onResume (still
+        // suppressed) → onPause (this, as moveTaskToBack backgrounds us). By the
+        // time onPause fires the launch's own first onResume has already passed
+        // without flashing the PIN, and the NEXT foreground entry — a genuine
+        // user open — finds the latch cleared and gates normally. Clearing in
+        // onCreate would let that first onResume surface the keypad over the BYD
+        // home screen (see the minimize block in onCreate).
+        if (headlessBootSilenceGate) {
+            headlessBootSilenceGate = false
+            android.util.Log.i("MainActivity", "Boot-silence latch consumed on first onPause")
+        }
         com.overdrive.app.auth.PinSession.notePaused()
     }
 

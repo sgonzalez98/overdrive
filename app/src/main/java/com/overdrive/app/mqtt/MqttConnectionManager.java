@@ -168,6 +168,12 @@ public class MqttConnectionManager {
         }
         publishers.clear();
 
+        // All connections are down — now it's safe to clear the process-global
+        // SOCKS proxy properties (individual disconnect() no longer does this, to
+        // avoid one connection stomping a sibling's still-needed proxy routing).
+        System.clearProperty("socksProxyHost");
+        System.clearProperty("socksProxyPort");
+
         logger.info("All MQTT connections stopped");
     }
 
@@ -213,6 +219,16 @@ public class MqttConnectionManager {
 
         MqttPublisherService publisher = publishers.remove(connectionId);
         if (publisher != null) publisher.disconnect();
+
+        // Once no connection remains, clear the process-global SOCKS proxy props so
+        // unrelated daemon sockets (zrok, APK download, push) aren't routed through
+        // sing-box by a leftover from a WS+proxy connection. While ≥1 connection is
+        // live we leave them — a sibling may still need them, and each connect()
+        // re-asserts/clears authoritatively from the current proxy state.
+        if (publishers.isEmpty()) {
+            System.clearProperty("socksProxyHost");
+            System.clearProperty("socksProxyPort");
+        }
     }
 
     /**

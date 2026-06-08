@@ -34,8 +34,17 @@ class GpsRingBuffer(
     private var head = 0   // next write index
     private var count = 0
 
-    /** Add a fix. Caller filters out null-island / stale fixes (LocationSource). */
+    /** Add a fix. Caller filters out null-island / stale fixes (LocationSource).
+     *  De-dups a repeat of the most-recent timestamp (the GPS layer can re-emit the
+     *  same fix at the poll cadence): a duplicate tMs adds no information but would
+     *  consume a ring slot and shrink the distinct-fix back-projection horizon, and
+     *  a same-tMs bracket makes interpolate()'s span 0 (it already guards span<=0).
+     *  We REPLACE the latest in place so the freshest field values still win. */
     fun add(pose: Pose) {
+        if (count > 0) {
+            val lastIdx = (head - 1 + capacity) % capacity
+            if (buf[lastIdx]?.tMs == pose.tMs) { buf[lastIdx] = pose; return }
+        }
         buf[head] = pose
         head = (head + 1) % capacity
         if (count < capacity) count++
@@ -122,6 +131,8 @@ class GpsRingBuffer(
             bearingDeg = from.bearingDeg,
             // Extrapolated → degrade accuracy by the distance we guessed.
             accuracyM = from.accuracyM + distM.toFloat(),
+            // Altitude doesn't change over a sub-2 s horizontal extrapolation.
+            altitudeM = from.altitudeM,
         )
     }
 
@@ -138,6 +149,10 @@ class GpsRingBuffer(
             bearingDeg = interpolateBearing(a.bearingDeg, b.bearingDeg, f.toFloat()),
             // Localization confidence is no better than the worse of the two fixes.
             accuracyM = maxOf(a.accuracyM, b.accuracyM),
+            // Interpolate altitude only when BOTH fixes have it; else unknown (fail-open).
+            altitudeM = if (altitudeKnown(a.altitudeM) && altitudeKnown(b.altitudeM))
+                a.altitudeM + (b.altitudeM - a.altitudeM) * f
+            else ALTITUDE_UNKNOWN,
         )
     }
 

@@ -53,6 +53,7 @@ object RoadSenseConfig {
     private const val K_UPLOAD_CONF = "uploadConfidenceThreshold" // D-016
     private const val K_DEVICE_ID = "deviceId"                 // rotating anon UUID (R-CRD-7)
     private const val K_WORKER_URL = "syncWorkerUrl"           // user-configurable (D-009)
+    private const val K_RAW_RECORD = "rawRecord"               // debug raw-IMU recorder (D-036)
 
     /** Warn delivery mode. */
     enum class WarnMode { VISUAL, AUDIO, BOTH;
@@ -83,6 +84,10 @@ object RoadSenseConfig {
         val uploadConfidenceThreshold: Float,
         val deviceId: String?,
         val syncWorkerUrl: String?,
+        /** Debug raw-IMU recorder (D-036): when true the controller streams raw 100 Hz
+         *  accel+gyro + derived features to a CSV for offline recall measurement + constant
+         *  fitting. Default OFF (privacy + disk). Toggled via the unified config / adb. */
+        val rawRecord: Boolean,
     ) {
         /** Should a hazard of [severityLevel] (1=minor,2=moderate,3=severe) with
          *  [confidence] produce a warning at all, per the gates? (Distance is the
@@ -129,6 +134,7 @@ object RoadSenseConfig {
             // fork can self-host its own pool (D-009). Empty/unset → use the
             // shared default; a user who blanks it disables sync.
             syncWorkerUrl = s.optString(K_WORKER_URL, "").ifEmpty { DEFAULT_WORKER_URL },
+            rawRecord = s.optBoolean(K_RAW_RECORD, false),
         )
     }
 

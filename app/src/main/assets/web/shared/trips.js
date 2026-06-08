@@ -1919,10 +1919,21 @@ const TRIPS = {
                 // Setup timeline slider
                 this.setupTimelineSlider(samples);
 
+                // Isolate each canvas renderer so a throw in one (e.g. an
+                // unsupported Canvas2D API on the old WebView) can't abort the
+                // others OR prevent the route map below from being scheduled —
+                // they all used to share this one try-block, so a single
+                // exception blanked the timeline, the histogram AND the map.
                 const ribbonCanvas = document.getElementById('timelineChart');
-                if (ribbonCanvas) this.renderTimeline(ribbonCanvas, samples);
+                if (ribbonCanvas) {
+                    try { this.renderTimeline(ribbonCanvas, samples); }
+                    catch (e) { console.error('[Trips] renderTimeline failed:', e.message || e); }
+                }
                 const histCanvas = document.getElementById('speedHistogram');
-                if (histCanvas) this.renderSpeedHistogram(histCanvas, samples);
+                if (histCanvas) {
+                    try { this.renderSpeedHistogram(histCanvas, samples); }
+                    catch (e) { console.error('[Trips] renderSpeedHistogram failed:', e.message || e); }
+                }
                 const mapContainer = document.getElementById('tripMap');
                 console.log('[Trips] Map container:', mapContainer ? (mapContainer.offsetWidth + 'x' + mapContainer.offsetHeight) : 'NOT FOUND');
                 console.log('[Trips] Leaflet available:', typeof L !== 'undefined');
@@ -3054,7 +3065,7 @@ const TRIPS = {
             const ty = Math.max(pad.top, sy - 70);
             ctx.fillStyle = 'rgba(15,15,20,0.92)';
             ctx.beginPath();
-            ctx.roundRect(tx, ty, tw, 70, 6);
+            this._roundRectPath(ctx, tx, ty, tw, 70, 6);
             ctx.fill();
             ctx.strokeStyle = 'rgba(0,212,170,0.3)';
             ctx.lineWidth = 1;
@@ -3141,6 +3152,34 @@ const TRIPS = {
         };
     },
 
+    /**
+     * Append a rounded-rectangle subpath. CanvasRenderingContext2D.roundRect
+     * is Chrome 99+; the BYD head-unit WebView (Chrome 58 / Android 7.1)
+     * lacks it, so calling ctx.roundRect there throws "roundRect is not a
+     * function". That exception was aborting renderTimeline / renderSpeed
+     * Histogram mid-draw AND — because showDetail() runs the histogram inside
+     * the same try-block that later schedules the route map — it was killing
+     * the trip-detail map too (the map's setTimeout was never reached). This
+     * mirrors performance.js's _drawRoundRect so trip canvases degrade
+     * gracefully on the old WebView. Caller still owns beginPath/fill/stroke.
+     */
+    _roundRectPath(ctx, x, y, w, h, r) {
+        if (typeof ctx.roundRect === 'function') { ctx.roundRect(x, y, w, h, r); return; }
+        // Clamp the radius so thin bars (w/h < 2r) don't produce inverted arcs.
+        var rr = Math.min(r, w / 2, h / 2);
+        if (rr < 0) rr = 0;
+        ctx.moveTo(x + rr, y);
+        ctx.lineTo(x + w - rr, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+        ctx.lineTo(x + w, y + h - rr);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+        ctx.lineTo(x + rr, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+        ctx.lineTo(x, y + rr);
+        ctx.quadraticCurveTo(x, y, x + rr, y);
+        ctx.closePath();
+    },
+
     // ==================== SPEED HISTOGRAM ====================
 
     renderSpeedHistogram(canvas, telemetry) {
@@ -3204,7 +3243,7 @@ const TRIPS = {
             ctx.fillStyle = color;
             ctx.globalAlpha = 0.75;
             ctx.beginPath();
-            ctx.roundRect(pad.left, y, Math.max(barW, 4), barH, 3);
+            this._roundRectPath(ctx, pad.left, y, Math.max(barW, 4), barH, 3);
             ctx.fill();
             ctx.globalAlpha = 1;
 

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title data-i18n="app.recordings_title">Recordings - OverDrive</title>
     <link rel="icon" type="image/webp" href="../shared/app-icon-dark.webp">
-    <script src="../shared/theme.js?v=4"></script>
+    <script src="../shared/theme.js?v=5"></script>
     <script src="../shared/app-shell.js"></script>
     <!--
       Bottom-tab manifest. 5 tabs grouping the settings cards:
@@ -30,7 +30,7 @@
         ];
     </script>
     <script src="../shared/app-tabs.js"></script>
-    <link rel="stylesheet" href="../shared/styles.css?v=13">
+    <link rel="stylesheet" href="../shared/styles.css?v=14">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/jmuxer@2.0.4/dist/jmuxer.min.js"></script>
@@ -197,6 +197,7 @@
                             <div class="setting-info">
                                 <div class="setting-name" data-i18n="recording.layout_use_windshield_label">Use Windshield Camera in Dashcam Layout</div>
                                 <div class="setting-desc" id="dashcamWindshieldDesc" data-i18n="recording.layout_use_windshield_desc">When available, use the dedicated windshield camera for the top dashcam view. Falls back to the 360 front camera if the stream cannot be opened.</div>
+                                <div class="setting-desc" id="windshieldCameraInfo" style="display:none;"></div>
                             </div>
                             <div class="setting-control">
                                 <label class="toggle-switch">

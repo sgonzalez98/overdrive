@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title data-i18n="app.mqtt_title">MQTT - OverDrive</title>
     <link rel="icon" type="image/webp" href="../shared/app-icon-dark.webp">
-    <script src="../shared/theme.js?v=4"></script>
+    <script src="../shared/theme.js?v=5"></script>
     <script src="../shared/app-shell.js"></script>
     <!--
       Bottom-tab manifest for MQTT — three task-based tabs:
@@ -33,7 +33,7 @@
         };
     </script>
     <script src="../shared/app-tabs.js"></script>
-    <link rel="stylesheet" href="../shared/styles.css?v=13">
+    <link rel="stylesheet" href="../shared/styles.css?v=14">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
     <style>
@@ -107,6 +107,31 @@
         }
         .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--brand-primary); }
         .form-group input::placeholder { color: var(--text-muted); }
+        /* Range sliders adopt the shared .slider look (themed track + brand
+           thumb from styles.css). The generic `.form-group input` rule above
+           (padding/border/bg-elevated/radius:8px) has higher specificity and
+           would otherwise box the slider like a text field, so re-assert the
+           slider chrome here at matching specificity and stretch to the full
+           form width. The webkit thumb is inherited from the shared
+           `.slider::-webkit-slider-thumb`; add the Firefox thumb the shared
+           rule omits so the brand-coloured thumb shows there too. */
+        .form-group input.slider {
+            width: 100%;
+            height: 6px;
+            padding: 0;
+            border: none;
+            background: var(--bg-hover);
+            border-radius: var(--radius-full);
+        }
+        .form-group input.slider:focus { border: none; }
+        .form-group input.slider::-moz-range-thumb {
+            width: 18px;
+            height: 18px;
+            background: var(--brand-primary);
+            border: none;
+            border-radius: 50%;
+            cursor: pointer;
+        }
         .form-actions { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
         .empty-state { text-align: center; padding: 48px 24px; color: var(--text-muted); }
         .empty-state svg { width: 48px; height: 48px; margin-bottom: 16px; opacity: 0.4; }
@@ -129,7 +154,11 @@
         /* Internal scroller — payload now carries ~100 keys when the SDK is fully populated.
            Cap at 60vh so the card fits inside both 1080x1920 portrait and 1920x1080 landscape
            BYD layouts without pushing the page-tabs offscreen. */
-        .telemetry-scroll { max-height: 60vh; overflow-y: auto; }
+        /* Bare 60vh resolves stale on Android WebView after a
+           landscape→portrait rotation (the scroller keeps its old taller cap
+           and overruns the bottom tab bar). --vh is kept fresh across
+           rotation by theme.js; 60vh stays as the pre-script fallback. */
+        .telemetry-scroll { max-height: 60vh; max-height: calc(var(--vh, 1vh) * 60); overflow-y: auto; }
         .telemetry-scroll::-webkit-scrollbar { width: 6px; }
         .telemetry-scroll::-webkit-scrollbar-track { background: transparent; }
         .telemetry-scroll::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: 4px; }
@@ -235,11 +264,11 @@
                             </div>
                             <div class="form-group" style="grid-column: span 2;">
                                 <label><span data-i18n="mqtt.field_min_interval">Min interval — fastest</span>: <span id="formMinLabel" style="font-family:'JetBrains Mono',monospace;color:var(--text-primary);">5s</span></label>
-                                <input type="range" id="formMinInterval" min="1" max="60" step="1" value="5" oninput="MQTT.onSlider()">
+                                <input type="range" class="slider" id="formMinInterval" min="1" max="60" step="1" value="5" oninput="MQTT.onSlider()">
                             </div>
                             <div class="form-group" style="grid-column: span 2;">
                                 <label><span data-i18n="mqtt.field_max_interval">Max interval — heartbeat</span>: <span id="formMaxLabel" style="font-family:'JetBrains Mono',monospace;color:var(--text-primary);">5m</span></label>
-                                <input type="range" id="formMaxInterval" min="30" max="3600" step="30" value="300" oninput="MQTT.onSlider()">
+                                <input type="range" class="slider" id="formMaxInterval" min="30" max="3600" step="30" value="300" oninput="MQTT.onSlider()">
                             </div>
                         </div>
 

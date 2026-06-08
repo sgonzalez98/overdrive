@@ -41,8 +41,9 @@ class VehicleCalibrator(
      *  (we want minutes of driving to settle, and immunity to a single rough
      *  patch). ~0.001 at 100 Hz ≈ 10 s time constant on continuous quiet road. */
     private val emaAlpha: Float = DEFAULT_EMA_ALPHA,
-    /** Quiet samples needed to call calibration "fully mature" (maturity→1). At
-     *  100 Hz, 60_000 ≈ 10 min of cumulative quiet driving. */
+    /** Legacy linear horizon — NO LONGER the maturity denominator (maturity is the EMA
+     *  convergence fraction now; see [maturity]). Retained only as the absolute ceiling
+     *  on a restored quietCount (caps a stale/mismatched-car persisted value). */
     private val maturitySamples: Long = DEFAULT_MATURITY_SAMPLES,
     /** Reference-vehicle quiet-road residual RMS (m/s²). The scale is
      *  learnedRms / referenceRms. PROVISIONAL — fit from a reference device. */
@@ -64,9 +65,39 @@ class VehicleCalibrator(
 
     @Volatile private var state = CalState(0f, 0L, false)
 
-    /** 0..1 calibration maturity (drives confidence + overlay indicator). */
+    /**
+     * 0..1 calibration maturity (drives confidence + overlay indicator).
+     *
+     * DEFINITION (revised — issue E fix, Session 30f): maturity is the EMA's
+     * CONVERGENCE FRACTION `1 − (1−α)^N`, not a linear `N / 60_000`. WHY: the baseline
+     * RMS is an exponential moving average with weight [emaAlpha]≈0.001, so it is
+     * statistically converged after a few TIME CONSTANTS (~1/α ≈ 1000 quiet samples
+     * each): ~63% at 1 k, ~86% at 2 k, ~95% at 3 k. Requiring 60 k samples to call it
+     * "mature" was meaningless — the estimate stopped moving long before — and on urban
+     * roads (only a small fraction of samples pass the quiet gate) 60 k took HOURS, so
+     * the overlay sat RED ("Learning your vehicle") essentially forever and confidence
+     * stayed pinned at the CALIB_FLOOR (issue E: "calibrating forever"). Tying maturity
+     * to the actual convergence of the thing it measures is the honest signal: ORANGE
+     * ("improving") by ~415 quiet samples, GREEN ("calibrated", ≥0.67) at ~1108 — roughly
+     * one normal drive — and the per-vehicle [vehicleScale] blends in on the SAME
+     * schedule, so a real ~9% per-car scale starts correcting severity within a drive
+     * instead of never.
+     *
+     * [maturitySamples] is retained only as the legacy linear scale (and the restore
+     * cap); it no longer gates the convergence curve. ALPHA_CONVERGENCE mirrors
+     * [emaAlpha] so the curve matches the estimator it describes.
+     */
     val maturity: Float
-        get() = (state.quietCount.toFloat() / maturitySamples).coerceIn(0f, 1f)
+        get() = convergence(state.quietCount)
+
+    /** EMA convergence fraction after [n] quiet samples: 1 − (1−α)^n, clamped 0..1.
+     *  This is exactly "how much of the steady-state value the running mean has
+     *  absorbed" — the principled meaning of calibration maturity. */
+    private fun convergence(n: Long): Float {
+        if (n <= 0L) return 0f
+        val frac = 1.0 - Math.pow(1.0 - ALPHA_CONVERGENCE, n.toDouble())
+        return frac.toFloat().coerceIn(0f, 1f)
+    }
 
     /** Learned quiet-road residual RMS so far (diagnostics). */
     val learnedRms: Float
@@ -83,7 +114,10 @@ class VehicleCalibrator(
             val s = state // single volatile read → consistent snapshot
             if (!s.seeded || s.quietCount < MIN_SAMPLES_FOR_SCALE) return 1f
             val rawScale = (sqrt(s.meanSq) / referenceRms).coerceIn(MIN_SCALE, MAX_SCALE)
-            val m = (s.quietCount.toFloat() / maturitySamples).coerceIn(0f, 1f)
+            // Blend reference(1.0)→learned on the SAME convergence schedule as [maturity]
+            // (was the linear N/60k, which kept the learned scale ~nil for hours). Now a
+            // real per-car scale takes over as the EMA actually converges (~1 drive).
+            val m = convergence(s.quietCount)
             return 1f * (1f - m) + rawScale * m
         }
 
@@ -145,6 +179,15 @@ class VehicleCalibrator(
 
     companion object {
         const val DEFAULT_EMA_ALPHA = 0.001f
+        /** Convergence-rate used by [maturity]/[vehicleScale] (= the EMA weight). Kept
+         *  as its own const so maturity tracks the estimator's actual settling even if
+         *  [emaAlpha] is ever made instance-tunable. At 0.001: ~63% converged @1k quiet
+         *  samples, ~95% @3k — maturity reaches GREEN (~0.67) in roughly one drive. */
+        const val ALPHA_CONVERGENCE = 0.001
+        /** Legacy linear horizon. NO LONGER gates maturity (that's the convergence
+         *  curve now); retained only as the absolute cap on a restored quietCount so a
+         *  stale-but-huge persisted value can't run the convergence curve past 1.0 or
+         *  pin a mismatched car (audit accuracy S2). ~10 min of cumulative quiet @100Hz. */
         const val DEFAULT_MATURITY_SAMPLES = 60_000L
         /** PROVISIONAL reference quiet-road RMS — fit from a reference vehicle. */
         const val DEFAULT_REFERENCE_RMS = 0.18f // seeded from F-005 noise floor; tune

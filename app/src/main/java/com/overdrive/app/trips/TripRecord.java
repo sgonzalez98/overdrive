@@ -85,10 +85,44 @@ public class TripRecord {
     /**
      * Get the actual energy consumed in kWh from BMS readings.
      * Returns 0 if kWh data not available (caller should use SoC-based estimation).
+     * Always non-negative — used for cost and total-energy accounting.
      */
     public double getEnergyUsedKwh() {
         if (kwhStart > 0 && kwhEnd > 0 && kwhStart > kwhEnd) {
             return kwhStart - kwhEnd;
+        }
+        return 0;
+    }
+
+    /**
+     * Get the trip's resolved energy use in kWh for ENERGY ACCOUNTING (rollup
+     * totals). Prefers the direct BMS measurement; when that's absent, falls back
+     * to {@code energyPerKm × distanceKm} — the same SoC-estimated figure that
+     * {@link #energyPerKm} and the trip cost were computed from upstream. This
+     * keeps a rollup's total_energy_kwh consistent with its avg_energy_per_km and
+     * total_cost on SoC-only trims (where {@link #getEnergyUsedKwh()} returns 0).
+     * Always non-negative.
+     */
+    public double getResolvedEnergyKwh() {
+        double bms = getEnergyUsedKwh();
+        if (bms > 0) return bms;
+        if (energyPerKm > 0 && distanceKm > 0) return energyPerKm * distanceKm;
+        return 0;
+    }
+
+    /**
+     * Get the SIGNED net energy in kWh from BMS readings: positive when the pack
+     * drained (normal driving), negative when it gained (regen-dominant descent).
+     * Returns 0 only when BMS kWh readings aren't available at all.
+     *
+     * <p>Used by the efficiency score so a long downhill that nets battery gain
+     * scores as excellent rather than neutral. Only the BMS-kWh path is signed;
+     * the SoC-delta fallback stays consumption-only because 1%-resolution SoC is
+     * too noisy to distinguish genuine regen from sensor jitter.
+     */
+    public double getSignedEnergyKwh() {
+        if (kwhStart > 0 && kwhEnd > 0) {
+            return kwhStart - kwhEnd; // negative when kwhEnd > kwhStart (net regen)
         }
         return 0;
     }

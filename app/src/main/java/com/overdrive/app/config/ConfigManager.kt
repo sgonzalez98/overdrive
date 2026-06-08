@@ -221,8 +221,8 @@ class ConfigManager private constructor(private val context: Context) {
                 val logging = root.getJSONObject("logging")
                 val config = LogConfig(
                     retentionHours = logging.optInt("retentionHours", 24),
-                    cleanupIntervalHours = logging.optInt("cleanupIntervalHours", 6),
-                    maxFileSizeMB = logging.optInt("maxFileSizeMB", 10),
+                    cleanupIntervalHours = logging.optInt("cleanupIntervalHours", 4),
+                    maxFileSizeMB = logging.optInt("maxFileSizeMB", 5),
                     rotationCount = logging.optInt("rotationCount", 3)
                 )
                 if (config.isValid()) {
@@ -249,10 +249,13 @@ class ConfigManager private constructor(private val context: Context) {
     }
     
     private fun loadLoggingConfig(): LogConfig {
+        // Defaults mirror LogConfig's own defaults (5MB cap, 4h cleanup) so the
+        // app-side and daemon-side rotation policy stay coherent. See
+        // DaemonLauncher.LOG_MAX_BYTES / LOG_POLL_INTERVAL_SEC.
         return LogConfig(
             retentionHours = prefs.getInt(KEY_LOG_RETENTION, 24),
-            cleanupIntervalHours = prefs.getInt(KEY_LOG_CLEANUP_INTERVAL, 6),
-            maxFileSizeMB = prefs.getInt(KEY_LOG_MAX_SIZE, 10),
+            cleanupIntervalHours = prefs.getInt(KEY_LOG_CLEANUP_INTERVAL, 4),
+            maxFileSizeMB = prefs.getInt(KEY_LOG_MAX_SIZE, 5),
             rotationCount = prefs.getInt(KEY_LOG_ROTATION_COUNT, 3)
         )
     }

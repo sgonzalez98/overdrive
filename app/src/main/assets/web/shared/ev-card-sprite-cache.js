@@ -158,7 +158,15 @@
     function buildKey(modelId, color, view, canvasEl) {
         // Lower-case the colour so '#1A1A1E' and '#1a1a1e' don't fork.
         var c = (color || '').toLowerCase();
-        var v = (view === 'top') ? 'top' : 'side';
+        // Keep 'top' and 'three-quarter' as distinct buckets; everything
+        // else collapses to 'side'. The dashboard hero mounts with
+        // view='three-quarter' (app-shell.mountVehicleCanvas → applyToAux →
+        // scheduleSpriteSnapshot all preserve it); collapsing it to 'side'
+        // here mis-keyed the snapshot so a warm reload painted the narrow
+        // side sprite into the wider three-quarter canvas (cropped/zoomed
+        // car) and missed the cache on every colour change. Additive — only
+        // introduces a new bucket, never re-buckets existing top/side keys.
+        var v = (view === 'top' || view === 'three-quarter') ? view : 'side';
         return 'v' + SPRITE_VERSION + '|'
              + (modelId || '') + '|' + c + '|' + v + '|' + dprBucket()
              + '|' + sizeBucket(canvasEl);

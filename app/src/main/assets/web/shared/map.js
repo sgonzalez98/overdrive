@@ -72,14 +72,30 @@ BYD.map = {
         this._mountCarIcon3d();
         
         this.isInitialized = true;
-        
+
         // Force map to recalculate size (fixes rendering issues)
         setTimeout(() => {
             if (this.map) {
                 this.map.invalidateSize();
             }
         }, 100);
-        
+
+        // Re-measure on viewport changes. Leaflet caches the container's
+        // pixel box and only re-reads it on invalidateSize(); without this
+        // the map paints blank/clipped tiles after a landscape↔portrait
+        // rotation (the container box changed but Leaflet never noticed).
+        // theme.js dispatches a synthetic `resize` on orientationchange too,
+        // so this single listener covers both plain resizes and rotation.
+        if (!this._viewportListenerBound) {
+            this._viewportListenerBound = true;
+            window.addEventListener('resize', () => {
+                if (this._mapResizeTimer) clearTimeout(this._mapResizeTimer);
+                this._mapResizeTimer = setTimeout(() => {
+                    if (this.map) this.map.invalidateSize();
+                }, 120);
+            });
+        }
+
         // GPS data now comes from consolidated /status call via core.js
         // Check if we already have status data
         if (BYD.core && BYD.core.lastStatus && BYD.core.lastStatus.gps) {

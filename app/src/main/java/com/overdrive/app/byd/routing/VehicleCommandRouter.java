@@ -405,8 +405,16 @@ public final class VehicleCommandRouter {
         public Capability sdkCapability() { return Capability.REQUIRED; }
         public RoutePreference defaultPreference() { return RoutePreference.SDK_ONLY; }
         public boolean executeViaSdk(BydDataCollector c) {
-            // non-short-circuit so both sides are attempted
-            return c.setChildLock(true, enabled) & c.setChildLock(false, enabled);
+            // Both sides must move together; there's no telemetry readback for child
+            // lock, so a half-applied state (one door locked, one not) would never
+            // reconcile. Attempt both (non-short-circuit), then retry only the side
+            // that missed once, so a transient HAL miss self-corrects instead of
+            // leaving the doors inconsistent. Returns true only if both ended set.
+            boolean left = c.setChildLock(true, enabled);
+            boolean right = c.setChildLock(false, enabled);
+            if (!left) left = c.setChildLock(true, enabled);
+            if (!right) right = c.setChildLock(false, enabled);
+            return left && right;
         }
     }
 

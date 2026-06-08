@@ -365,11 +365,44 @@ public class ModelsApiHandler {
     /**
      * Look up the canonical pack capacity (kWh) for the user-selected
      * vehicle model from the bundled/cached manifest. Returns 0 when the
-     * user hasn't picked a model, the model has no nominalKwh declared,
+     * user hasn't picked a model, the model has no capacity declared,
      * or the manifest can't be read. Used by SohEstimator as a stronger-
      * than-heuristic capacity hint.
+     *
+     * <p>For PHEV models the manifest carries BOTH {@code nominalKwh} (gross
+     * nameplate, e.g. 18.3) and {@code usableKwh} (usable EV-only frame, e.g.
+     * 15.2). The SOH/live formula compares {@code remainKwh / SOC} against this
+     * value, and the BMS reports {@code remainKwh} in the USABLE frame on Blade
+     * DM-i packs — so we MUST return the usable value when present, or a healthy
+     * pack reads ~83% SOH (15.2/18.3) and the frame-mismatch banner fires on a
+     * non-degraded battery. BEV models declare only {@code nominalKwh} (gross =
+     * usable for the SOH formula's purposes) and fall through to it.
      */
     public static double nominalKwhForSelectedModel() {
+        try {
+            String modelId = UnifiedConfigManager.getVehicle().optString("modelId", "");
+            if (modelId.isEmpty()) return 0;
+            JSONObject manifest = readManifest();
+            if (manifest == null) return 0;
+            JSONObject m = findModel(manifest, modelId);
+            if (m == null) return 0;
+            // Prefer the usable frame (PHEV) — it matches the BMS remainKwh frame
+            // the SOH formula consumes. Falls back to gross nominal for BEVs.
+            double usable = m.optDouble("usableKwh", 0);
+            if (usable > 0) return usable;
+            return m.optDouble("nominalKwh", 0);
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    /**
+     * Gross nameplate capacity (kWh) for the selected model — always the
+     * {@code nominalKwh} field, never the usable frame. Use for user-facing
+     * "pack size" display where the nameplate number is expected; the SOH
+     * pipeline uses {@link #nominalKwhForSelectedModel()} (usable) instead.
+     */
+    public static double grossNameplateKwhForSelectedModel() {
         try {
             String modelId = UnifiedConfigManager.getVehicle().optString("modelId", "");
             if (modelId.isEmpty()) return 0;

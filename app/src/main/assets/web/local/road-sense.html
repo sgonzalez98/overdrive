@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title data-i18n="app.road_sense_title">RoadSense - OverDrive</title>
     <link rel="icon" type="image/webp" href="../shared/app-icon-dark.webp">
-    <script src="../shared/theme.js?v=4"></script>
+    <script src="../shared/theme.js?v=5"></script>
     <script src="../shared/app-shell.js"></script>
     <!--
       Bottom-tab manifest. Four tabs grouping the RoadSense settings cards:
@@ -18,14 +18,15 @@
     -->
     <script>
         window.OT_TABS = [
-            { id: 'general',     label: 'General',     i18n: 'road_sense.tab_general',     svg: '<path d="M12 3v6"/><path d="M12 12h.01"/><path d="M7 21l3-7"/><path d="M17 21l-3-7"/><path d="M12 21v-2"/><path d="M12 17.5v-2"/>' },
+            { id: 'general',     label: 'General',     i18n: 'road_sense.tab_general',     svg: '<path d="M3.2 20.2 L8.6 11 L15.4 11 L20.8 20.2 Z"/><path d="M12 12.4v1.3M12 15.7v1.6M12 18.7v1.1"/><path d="M12 3.2v2.4"/><path d="M12 7.6h.01"/>' },
             { id: 'warnings',    label: 'Warnings',    i18n: 'road_sense.tab_warnings',    svg: '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>' },
             { id: 'crowdsource', label: 'Crowdsource', i18n: 'road_sense.tab_crowdsource', svg: '<path d="M17.5 19a4.5 4.5 0 1 0-2.83-7.97A6 6 0 0 0 4 12.45a3 3 0 0 0 .5 5.95"/><path d="M17.5 19h-12"/>' },
-            { id: 'data',        label: 'Data',        i18n: 'road_sense.tab_data',        svg: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>' }
+            { id: 'data',        label: 'Data',        i18n: 'road_sense.tab_data',        svg: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>' },
+            { id: 'blindspot',   label: 'Blind Spot',  i18n: 'road_sense.tab_blindspot',   svg: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>' }
         ];
     </script>
     <script src="../shared/app-tabs.js"></script>
-    <link rel="stylesheet" href="../shared/styles.css?v=13">
+    <link rel="stylesheet" href="../shared/styles.css?v=14">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
 </head>
@@ -54,7 +55,7 @@
                 <div class="card" data-tab="general">
                     <div class="card-header">
                         <div class="card-title">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v6"/><path d="M12 12h.01"/><path d="M7 21l3-7"/><path d="M17 21l-3-7"/><path d="M12 21v-2"/><path d="M12 17.5v-2"/></svg>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.2 20.2 L8.6 11 L15.4 11 L20.8 20.2 Z"/><path d="M12 12.4v1.3M12 15.7v1.6M12 18.7v1.1"/><path d="M12 3.2v2.4"/><path d="M12 7.6h.01"/></svg>
                             <span data-i18n="road_sense.master_title">RoadSense</span>
                         </div>
                         <span class="status-badge inactive" id="rsStatusBadge" data-i18n="status.off">OFF</span>
@@ -296,6 +297,146 @@
                                     <span data-i18n="road_sense.delete_cloud_btn">Delete cloud</span>
                                 </button>
                             </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Blind Spot: enable -->
+                <div class="card" data-tab="blindspot">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+                            <span data-i18n="road_sense.bs_title">Blind Spot</span>
+                        </div>
+                        <span class="status-badge inactive" id="bsStatusBadge" data-i18n="status.off">OFF</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="setting-row" style="border-bottom:none;">
+                            <div class="setting-info">
+                                <div class="setting-name" data-i18n="road_sense.bs_enable">Enable Blind Spot</div>
+                                <div class="setting-desc" data-i18n="road_sense.bs_enable_desc">Shows a merged rear + side camera view in a floating window when you turn on the indicator. The window is draggable and resizable. Left signal shows rear + left; right signal shows right + rear.</div>
+                            </div>
+                            <div class="setting-control">
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="bsEnabled" onchange="RoadSenseSettings.bsToggleEnabled()">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Blind Spot: on-screen size + position (live, daemon rescales the
+                     SurfaceControl layer). Placed ABOVE Alignment — size/position is
+                     the common adjustment; the FOV/blend sliders are advanced tuning. -->
+                <div class="card" data-tab="blindspot">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+                            <span data-i18n="road_sense.bs_layout_title">Size &amp; position</span>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="setting-row"><div class="setting-info"><div class="setting-name" data-i18n="road_sense.bs_size">Overlay size</div></div>
+                            <div class="setting-control"><div class="slider-control">
+                                <span class="slider-value" id="bsSizeVal">40%</span>
+                                <input type="range" class="slider" id="bsSize" min="20" max="80" step="5" value="40" oninput="RoadSenseSettings.bsSetSize(this.value)">
+                            </div></div>
+                        </div>
+                        <div class="setting-row" style="border-bottom:none;"><div class="setting-info"><div class="setting-name" data-i18n="road_sense.bs_position">Position</div></div>
+                            <div class="setting-control" style="display:flex;flex-wrap:wrap;">
+                                <button class="btn btn-secondary" id="bsCornerTl" style="margin:0 8px 8px 0;" onclick="RoadSenseSettings.bsSetCorner('tl')" data-i18n="road_sense.bs_corner_tl">Top-left</button>
+                                <button class="btn btn-secondary" id="bsCornerTr" style="margin:0 8px 8px 0;" onclick="RoadSenseSettings.bsSetCorner('tr')" data-i18n="road_sense.bs_corner_tr">Top-right</button>
+                                <button class="btn btn-secondary" id="bsCornerBl" style="margin:0 8px 8px 0;" onclick="RoadSenseSettings.bsSetCorner('bl')" data-i18n="road_sense.bs_corner_bl">Bottom-left</button>
+                                <button class="btn btn-secondary" id="bsCornerBr" style="margin:0 0 8px 0;" onclick="RoadSenseSettings.bsSetCorner('br')" data-i18n="road_sense.bs_corner_br">Bottom-right</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Blind Spot: calibration (debug) -->
+                <div class="card" data-tab="blindspot">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                            <span data-i18n="road_sense.bs_calib_title">Alignment</span>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <!-- Live preview controls — the preview is a NATIVE window
+                             on the car's screen, so it only works in the in-app
+                             WebView. Hidden by default; updateUI() reveals it only
+                             when AndroidBridge is present (not on a tunnel/browser). -->
+                        <div id="bsPreviewControls" style="display:none;flex-direction:column;align-items:stretch;padding:16px 0;border-bottom:1px solid var(--border-subtle);">
+                            <div class="setting-info" style="margin-bottom:12px;">
+                                <div class="setting-name" data-i18n="road_sense.bs_calib_debug">Live alignment</div>
+                                <div class="setting-desc" data-i18n="road_sense.bs_calib_desc">Tap a side to open a live preview window on the car's screen, then drag the sliders below to align it. The preview floats above this page — drag it aside if it covers the controls. Apply when it looks right.</div>
+                            </div>
+                            <div style="display:flex;flex-wrap:wrap;">
+                                <button class="btn btn-secondary" style="margin:0 10px 10px 0;" onclick="RoadSenseSettings.bsPreview(7)" data-i18n="road_sense.bs_preview_left">Show left view</button>
+                                <button class="btn btn-secondary" style="margin:0 10px 10px 0;" onclick="RoadSenseSettings.bsPreview(8)" data-i18n="road_sense.bs_preview_right">Show right view</button>
+                                <button class="btn btn-secondary" style="margin:0 0 10px 0;" onclick="RoadSenseSettings.bsPreviewStop()" data-i18n="road_sense.bs_preview_stop">Hide preview</button>
+                            </div>
+                        </div>
+
+                        <div class="setting-row"><div class="setting-info"><div class="setting-name" data-i18n="road_sense.bs_rear_fov">Width A</div></div>
+                            <div class="setting-control"><div class="slider-control">
+                                <span class="slider-value" id="bsRearFovVal">1.66</span>
+                                <input type="range" class="slider" id="bsRearFov" min="1.0" max="2.2" step="0.02" value="1.66" oninput="RoadSenseSettings.bsTune()">
+                            </div></div>
+                        </div>
+                        <div class="setting-row"><div class="setting-info"><div class="setting-name" data-i18n="road_sense.bs_side_fov">Width B</div></div>
+                            <div class="setting-control"><div class="slider-control">
+                                <span class="slider-value" id="bsSideFovVal">1.98</span>
+                                <input type="range" class="slider" id="bsSideFov" min="1.0" max="2.2" step="0.02" value="1.98" oninput="RoadSenseSettings.bsTune()">
+                            </div></div>
+                        </div>
+                        <div class="setting-row"><div class="setting-info"><div class="setting-name" data-i18n="road_sense.bs_yaw">Blend point</div></div>
+                            <div class="setting-control"><div class="slider-control">
+                                <span class="slider-value" id="bsYawVal">1.23</span>
+                                <input type="range" class="slider" id="bsYaw" min="0" max="1.4" step="0.01" value="1.23" oninput="RoadSenseSettings.bsTune()">
+                            </div></div>
+                        </div>
+                        <div class="setting-row"><div class="setting-info"><div class="setting-name" data-i18n="road_sense.bs_roll">Tilt</div></div>
+                            <div class="setting-control"><div class="slider-control">
+                                <span class="slider-value" id="bsRollVal">0.25</span>
+                                <input type="range" class="slider" id="bsRoll" min="-0.4" max="0.4" step="0.005" value="0.25" oninput="RoadSenseSettings.bsTune()">
+                            </div></div>
+                        </div>
+                        <div class="setting-row"><div class="setting-info"><div class="setting-name" data-i18n="road_sense.bs_pitch">Height</div></div>
+                            <div class="setting-control"><div class="slider-control">
+                                <span class="slider-value" id="bsPitchVal">-0.275</span>
+                                <input type="range" class="slider" id="bsPitch" min="-0.4" max="0.4" step="0.005" value="-0.275" oninput="RoadSenseSettings.bsTune()">
+                            </div></div>
+                        </div>
+                        <div class="setting-row"><div class="setting-info"><div class="setting-name" data-i18n="road_sense.bs_feather">Blend softness</div></div>
+                            <div class="setting-control"><div class="slider-control">
+                                <span class="slider-value" id="bsFeatherVal">0.38</span>
+                                <input type="range" class="slider" id="bsFeather" min="0" max="1.0" step="0.02" value="0.38" oninput="RoadSenseSettings.bsTune()">
+                            </div></div>
+                        </div>
+                        <div class="setting-row"><div class="setting-info"><div class="setting-name" data-i18n="road_sense.bs_proj_exp">Side spread</div></div>
+                            <div class="setting-control"><div class="slider-control">
+                                <span class="slider-value" id="bsProjExpVal">1.00</span>
+                                <input type="range" class="slider" id="bsProjExp" min="0.4" max="1.6" step="0.02" value="1.0" oninput="RoadSenseSettings.bsTune()">
+                            </div></div>
+                        </div>
+                        <div class="setting-row"><div class="setting-info"><div class="setting-name" data-i18n="road_sense.bs_rear_roll">Rear level</div></div>
+                            <div class="setting-control"><div class="slider-control">
+                                <span class="slider-value" id="bsRearRollVal">0.00</span>
+                                <input type="range" class="slider" id="bsRearRoll" min="-0.4" max="0.4" step="0.005" value="0.0" oninput="RoadSenseSettings.bsTune()">
+                            </div></div>
+                        </div>
+                        <div class="setting-row"><div class="setting-info"><div class="setting-name" data-i18n="road_sense.bs_rear_pitch">Rear tilt</div></div>
+                            <div class="setting-control"><div class="slider-control">
+                                <span class="slider-value" id="bsRearPitchVal">0.00</span>
+                                <input type="range" class="slider" id="bsRearPitch" min="-0.4" max="0.4" step="0.005" value="0.0" oninput="RoadSenseSettings.bsTune()">
+                            </div></div>
+                        </div>
+
+                        <div style="display:flex;flex-wrap:wrap;padding-top:20px;margin-top:8px;border-top:1px solid var(--border-subtle);">
+                            <button class="btn btn-primary" style="margin:0 10px 0 0;" onclick="RoadSenseSettings.bsSave()" data-i18n="road_sense.bs_save">Apply alignment</button>
+                            <button class="btn btn-secondary" onclick="RoadSenseSettings.bsResetDefaults()" data-i18n="road_sense.bs_reset">Reset to default</button>
                         </div>
                     </div>
                 </div>

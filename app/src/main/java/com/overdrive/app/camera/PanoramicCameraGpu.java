@@ -240,6 +240,13 @@ public class PanoramicCameraGpu {
     // program deleted) — undefined behaviour on Adreno.
     private volatile com.overdrive.app.streaming.GpuStreamScaler streamScaler;  // Stream scaler (optional)
     private volatile HardwareEventRecorderGpu streamEncoder;  // Stream encoder (optional)
+    // Dedicated blind-spot lane (views 7/8). A SECOND independent scaler+encoder
+    // fed from the SAME camera texture each render-loop iteration (read-only
+    // fan-out, exactly like the stream lane). Kept fully separate from the stream
+    // lane so the blind-spot overlay never contends with / hijacks the live-view
+    // stream's view mode, quality, or WS. Null until setBsStreamingComponents().
+    private volatile com.overdrive.app.streaming.GpuStreamScaler bsStreamScaler;
+    private volatile HardwareEventRecorderGpu bsStreamEncoder;
     private GpuDownscaler downscaler;
     /** Lazy-allocated full-resolution sampler for the camera-mapping dialog.
      *  Lives on the GL handler; allocates GL resources on first use. */
@@ -1469,7 +1476,7 @@ public class PanoramicCameraGpu {
         windshieldFrameReady = false;
         windshieldFrameCount = 0;
     }
-    
+
     /**
      * Starts the BYD camera via AVMCamera reflection with multi-strategy fallback.
      * Tries constructor path first, then static factory for firmware compatibility.
@@ -2636,6 +2643,29 @@ public class PanoramicCameraGpu {
                 }
                 localStreamScaler.drawFrame(cameraTextureId);
                 localStreamEncoder.drainEncoder();
+            }
+
+            // PASS 1C: Blind-spot lane (views 7/8). Independent scaler fed from the
+            // SAME cameraTextureId, read-only — like PASS 1B but owned by the
+            // dedicated blind-spot pipeline. NATIVE path: the scaler's render target
+            // is a SurfaceControl layer (GPU → screen), so there is NO encoder —
+            // localBsEncoder is null and drawFrame's swapBuffers IS the on-screen
+            // present; we only drain when an encoder is present (legacy/none now).
+            // Local snapshot so a concurrent disableBlindSpot() nulling the field
+            // can't NPE mid-frame.
+            com.overdrive.app.streaming.GpuStreamScaler localBsScaler = bsStreamScaler;
+            HardwareEventRecorderGpu localBsEncoder = bsStreamEncoder;
+            if (localBsScaler != null) {
+                if (USE_ESCO_SURFACE_TEXTURE_PATH && localBsScaler == bsStreamScaler) {
+                    localBsScaler.setTextureMatrix(currentTexMatrix);
+                }
+                localBsScaler.drawFrame(cameraTextureId);
+                // Drain only if an encoder is wired (legacy path). Native path has
+                // none — the swapBuffers in drawFrame presented straight to screen.
+                // Identity re-check guards a concurrent disable nulling the field.
+                if (localBsEncoder != null && bsStreamEncoder == localBsEncoder) {
+                    localBsEncoder.drainEncoder();
+                }
             }
 
             // PASS 2 + 3: AI lane.
@@ -3952,7 +3982,7 @@ public class PanoramicCameraGpu {
             GlUtil.deleteTexture(windshieldTextureId);
             windshieldTextureId = 0;
         }
-        
+
         if (dummySurface != null) {
             eglCore.destroySurface(dummySurface);
             dummySurface = null;
@@ -3979,6 +4009,51 @@ public class PanoramicCameraGpu {
     }
 
     /**
+     * Publishes the dedicated blind-spot lane's scaler+encoder to the render
+     * loop (PASS 1C). The fields are volatile so the render loop's per-frame
+     * snapshot read sees the write, and so cross-thread readers (calibration /
+     * param tuning via getBsStreamScaler) observe the reference atomically.
+     *
+     * <p>Volatile alone only publishes the <em>reference</em>, not a happens-
+     * before edge to the scaler's GL-resource construction. The scaler is
+     * init()'d on the GL thread (handler post in GpuSurveillancePipeline), while
+     * this publish is invoked from the lifecycle (enable) thread. If the bare
+     * volatile write became visible to the GL render loop before that init
+     * Runnable had fully constructed the scaler's GL state, the render loop
+     * would call drawFrame() on a half-built scaler — undefined behaviour on
+     * Adreno (program/FBO not yet created). To make the publish safe, hop it
+     * onto the GL thread: the Handler is FIFO, so this write lands strictly
+     * after any already-queued init Runnable, and because the render loop runs
+     * on the same thread it can never observe the reference ahead of the
+     * scaler's fully-constructed GL state. If we're already on the GL thread
+     * (or the handler is gone during teardown), write directly.
+     */
+    public void setBsStreamingComponents(com.overdrive.app.streaming.GpuStreamScaler scaler,
+                                         HardwareEventRecorderGpu encoder) {
+        final Handler h = glHandler;
+        if (h == null || h.getLooper().getThread() == Thread.currentThread()) {
+            this.bsStreamScaler = scaler;
+            this.bsStreamEncoder = encoder;
+            return;
+        }
+        h.post(() -> {
+            this.bsStreamScaler = scaler;
+            this.bsStreamEncoder = encoder;
+        });
+    }
+
+    /** Detach the blind-spot lane from the render loop (render loop sees null
+     *  next frame and stops blitting it). Does NOT release the GL objects — the
+     *  caller releases them on the GL thread after this returns. */
+    public void clearBsStreamingComponents() {
+        this.bsStreamScaler = null;
+        this.bsStreamEncoder = null;
+    }
+
+    /** @return the live blind-spot scaler, or null if the BS lane isn't active. */
+    public com.overdrive.app.streaming.GpuStreamScaler getBsStreamScaler() { return bsStreamScaler; }
+
+    /**
      * Enables/disables the optional direct windshield camera used by the
      * dashcam recording layout. The actual AVMCamera open/close happens on
      * the GL thread; if it fails, the recorder keeps using the 360-front
@@ -3995,7 +4070,7 @@ public class PanoramicCameraGpu {
         logger.info("Dashcam windshield source "
             + (this.windshieldEnabled ? ("enabled (id=" + cameraId + ")") : "disabled"));
     }
-    
+
     /**
      * Clears streaming components (called when streaming is disabled).
      * This prevents the render loop from trying to use released surfaces.

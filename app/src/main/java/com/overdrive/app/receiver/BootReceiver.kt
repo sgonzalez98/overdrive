@@ -120,8 +120,16 @@ class BootReceiver : BroadcastReceiver() {
                         com.overdrive.app.updater.UpdateLifecycle.EXTRA_POST_UPDATE,
                         true,
                     )
+                    // System-driven relaunch, not a user tap. Suppress the PIN
+                    // gate + minimize so the keypad doesn't flash over the BYD
+                    // home screen on a locked install. The post-update daemon
+                    // hard-reset still runs (runDaemonStartup executes before the
+                    // minimize check in MainActivity.onCreate); minimize_on_start
+                    // only governs the PIN gate + moveTaskToBack, and is one-shot
+                    // so the user's next real foreground entry gates normally.
+                    launchIntent.putExtra("minimize_on_start", true)
                     context.startActivity(launchIntent)
-                    Log.d(TAG, "MY_PACKAGE_REPLACED — relaunching MainActivity (post_update=true)")
+                    Log.d(TAG, "MY_PACKAGE_REPLACED — relaunching MainActivity (post_update=true, minimized)")
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to relaunch app: ${e.message}")
                 }
@@ -152,6 +160,13 @@ class BootReceiver : BroadcastReceiver() {
             "com.byd.action.IGN_ON",
             "com.byd.accmode.ACC_MODE_CHANGED" -> {
                 startDaemons(context, action)
+                // Arm the blind-spot overlay ON ACC-ON, app-independently. Without
+                // this the overlay only started via MainActivity.syncBlindSpotOverlay()
+                // on app resume — so a fresh ACC-on with the app backgrounded left
+                // the pipeline un-armed and the panel wouldn't pop on the indicator.
+                // Gated on the same blindspot.enabled flag the activity uses, so a
+                // disabled feature stays off.
+                armBlindSpotIfEnabled(context)
             }
             
             // BYD ACC OFF - AccSentryDaemon handles sentry mode via bodywork listener
@@ -170,10 +185,22 @@ class BootReceiver : BroadcastReceiver() {
         }
     }
     
+    /** On ACC-ON, arm the NATIVE blind-spot lane IF the feature is enabled, so the
+     *  daemon brings up its SurfaceControl layer without needing MainActivity to be
+     *  foregrounded. BlindSpotControl.sync POSTs the daemon control surface; the
+     *  daemon owns show/hide (turn-trigger) + positioning. No app-process overlay. */
+    private fun armBlindSpotIfEnabled(context: Context) {
+        try {
+            com.overdrive.app.roadsense.overlay.BlindSpotControl.sync(context)
+        } catch (t: Throwable) {
+            Log.w(TAG, "armBlindSpotIfEnabled failed: ${t.message}")
+        }
+    }
+
     private fun startDaemons(context: Context, trigger: String) {
         lastStartTime = System.currentTimeMillis()
         Log.d(TAG, "Starting daemons (trigger: $trigger)")
-        
+
         try {
             // Start DaemonKeepaliveService (foreground + sticky + wakelock)
             DaemonKeepaliveService.start(context.applicationContext)

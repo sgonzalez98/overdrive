@@ -252,7 +252,7 @@
 
     /**
      * @param {HTMLCanvasElement} canvasEl
-     * @param {{ view?: 'side'|'top' }} [opts]
+     * @param {{ view?: 'side'|'top'|'three-quarter' }} [opts]
      *   view='side' (default) — camera looks down the +Z axis at the GLB
      *     rotated π/2 around Y, so the car fills the canvas in side
      *     profile with the front pointing left. Used by the sidebar
@@ -261,14 +261,14 @@
      *     a roof-down silhouette with the front pointing UP. Used by the
      *     Live View camera selector so FRONT/REAR/LEFT/RIGHT hotspots
      *     align with the rendered body.
-      *   view='three-quarter' — slightly angled profile for dashboard
-      *     hero cards: keeps side readability while adding depth.
+     *   view='three-quarter' — slightly angled profile for dashboard
+     *     hero cards: keeps side readability while adding depth.
      */
     function OverdriveEvCard3D(canvasEl, opts) {
         this.canvas = canvasEl;
-          this.view = 'side';
-          if (opts && opts.view === 'top') this.view = 'top';
-          else if (opts && opts.view === 'three-quarter') this.view = 'three-quarter';
+        this.view = 'side';
+        if (opts && opts.view === 'top') this.view = 'top';
+        else if (opts && opts.view === 'three-quarter') this.view = 'three-quarter';
         this.scene = null;
         this.camera = null;
         this.renderer = null;

@@ -438,6 +438,45 @@ public class BydDataCollector {
         fastDynamics.set(null);
     }
 
+    // ── Turn-indicator read (Blind Spot) ─────────────────────────────────────
+    // The main light poll runs on the 5s full-snapshot cadence — far too slow to
+    // pop the blind-spot overlay the instant the driver flicks the indicator.
+    // The overlay (app process, no BYD handles) instead reads the lamps on-demand
+    // over the daemon's loopback /api/stream/turn at its own 250ms tick, so there
+    // is exactly ONE cadence and NO background scheduler here — the daemon just
+    // answers each read inline.
+
+    /** Read the turn lamps inline (no background scheduler), packed bit0=L, bit1=R
+     *  (so 0=none, 1=left, 2=right, 3=both/hazard). Returns -1 if the light device
+     *  is unavailable.
+     *
+     *  Uses getTurnLightFlashState() — a SINGLE combined enum — NOT the per-side
+     *  getTurnLightState(1/2), which on this BYD firmware does not reflect the
+     *  blinking indicator (it returned 0 even with the indicator on, so the
+     *  blind-spot overlay never popped on a real turn signal — only debugPreview
+     *  worked). TelemetryDataCollector uses this same getter+enum and is proven to
+     *  detect turn signals reliably. Flash-state enum: 2|3=left, 4|5=right,
+     *  6|7=hazard (both). Caller bridges the blink off-phase (the lamp toggles
+     *  ~1.5Hz) via its own off-debounce. */
+    public int readTurnNow() {
+        if (lightDevice == null) return -1;
+        try {
+            Object fs = BydDeviceHelper.callGetter(lightDevice, "getTurnLightFlashState");
+            if (!(fs instanceof Number)) return 0;
+            int flashState = ((Number) fs).intValue();
+            boolean left = (flashState == 2 || flashState == 3);
+            boolean right = (flashState == 4 || flashState == 5);
+            if (flashState == 6 || flashState == 7) { left = true; right = true; }  // hazard
+            int packed = 0;
+            if (left) packed |= 0x1;
+            if (right) packed |= 0x2;
+            return packed;
+        } catch (Throwable t) {
+            logger.debug("readTurnNow error: " + t.getMessage());
+            return -1;
+        }
+    }
+
     private void startPolling() {
         pollScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "BydDataPoll");
@@ -893,11 +932,19 @@ public class BydDataCollector {
             boolean kwhWrittenThisCycle = false;
             boolean isPhevForKwh = isPhev(b);
 
-            // PHEV Priority 1: BodyworkDevice.getBatteryPowerHEV() — PHEV-native energy reading.
-            // On Sealion-class PHEVs whose Power/Statistic getters return SOC% in the kWh
-            // field, this getter returns the actual remaining kWh (e.g. ~9.6 kWh at 67%
-            // SOC on an 18.3 kWh pack instead of 67.1). socHevPercent is always populated
-            // for telemetry.
+            // PHEV: read getBatteryPowerHEV ONLY to populate socHevPercent (telemetry)
+            // and STASH it as a last-resort remainKwh fallback — it is no longer the
+            // PHEV-primary energy source. Field-confirmed to read ~half the true
+            // remaining energy at full charge on Blade DM-i packs (e.g. 9.1 kWh on an
+            // 18.3 kWh / ~15.2 kWh-usable pack — a constant ~0.5× across pack sizes,
+            // the fingerprint of a scaling/per-string artifact, not real degradation).
+            // getBatteryRemainPowerEV (Priority 1 below) is the accurate PHEV source:
+            // it returns the usable-frame remaining kWh. HEV is retained only as a
+            // fallback so firmwares where the EV getter genuinely echoes SOC% (the
+            // SOC-as-kWh bug) still get *some* reading; that path preserves the old
+            // (under-reporting) behavior rather than producing none.
+            double phevHevKwh = Double.NaN;
+            boolean phevHevKwhUsable = false;
             if (isPhevForKwh && bodyworkDevice != null) {
                 try {
                     Object hev = BydDeviceHelper.callGetter(bodyworkDevice, "getBatteryPowerHEV");
@@ -909,11 +956,8 @@ public class BydDataCollector {
                             boolean looksLikeSocPercent = !Double.isNaN(soc)
                                     && soc > 0 && Math.abs(hevVal - soc) < 3.0;
                             if (!looksLikeSocPercent && hevVal > 1 && hevVal < 120) {
-                                b.remainKwh(hevVal);
-                                kwhWrittenThisCycle = true;
-                                logger.debug("remainKwh from getBatteryPowerHEV (PHEV-priority): " +
-                                    String.format("%.1f", hevVal) + " (soc=" +
-                                    String.format("%.1f", soc) + "%)");
+                                phevHevKwh = hevVal;
+                                phevHevKwhUsable = true;
                             } else if (looksLikeSocPercent) {
                                 logger.debug("getBatteryPowerHEV returned " +
                                     String.format("%.1f", hevVal) + " ≈ SOC " +
@@ -922,12 +966,16 @@ public class BydDataCollector {
                         }
                     }
                 } catch (Exception e) {
-                    logger.debug("getBatteryPowerHEV (PHEV-priority) failed: " + e.getMessage());
+                    logger.debug("getBatteryPowerHEV (PHEV socHev/stash) failed: " + e.getMessage());
                 }
             }
 
-            // BEV Priority 1: PowerDevice.getBatteryRemainPowerEV() — most accurate for BEVs.
-            // On PHEVs this may return stale values when ICE is running — validate against SOC.
+            // Priority 1 (BEV and PHEV): PowerDevice.getBatteryRemainPowerEV() — the
+            // most accurate remaining-energy source on both drivetrains. On PHEVs it
+            // returns the usable-frame remaining kWh; it may go stale when the ICE is
+            // running, which the implied-capacity gate below rejects. The SOC-as-kWh
+            // guard skips firmwares that echo SOC% here, falling through to the PHEV
+            // HEV last-resort fallback further down.
             if (!kwhWrittenThisCycle && powerDevice != null) {
                 try {
                     Object evKwh = BydDeviceHelper.callGetter(powerDevice, "getBatteryRemainPowerEV");
@@ -941,8 +989,9 @@ public class BydDataCollector {
                                 // Reject before the implied-capacity range check, because at
                                 // SOC=84 the bogus 84.1 produces impliedCap=100, which falls
                                 // inside the 10-130 BEV-friendly window and would otherwise
-                                // be accepted. The Priority-3 getBatteryPowerHEV path is the
-                                // PHEV-correct source; let this slot stay NaN for it to fill.
+                                // be accepted. When this is the SOC-mimic bug, let the
+                                // slot stay NaN so a later priority / the PHEV HEV
+                                // last-resort fallback fills it.
                                 boolean looksLikeSocMimic = Math.abs(evVal - soc) < 5.0;
                                 double impliedCap = evVal / (soc / 100.0);
                                 if (looksLikeSocMimic) {
@@ -960,12 +1009,23 @@ public class BydDataCollector {
                                         String.format("%.0f", soc) + "% SOC → implied " +
                                         String.format("%.1f", impliedCap) + " kWh");
                                 }
-                            } else if (Double.isNaN(b.remainKwh)) {
-                                // No SOC to validate against. Only accept the unvalidated
-                                // reading on first poll (when there is no prior cached value
-                                // to risk overwriting with HAL garbage).
+                            } else if (Double.isNaN(b.remainKwh) && !isPhevForKwh) {
+                                // No SOC to validate against (cold boot, SOC read by the
+                                // later collectStatistic). Accept the unvalidated reading
+                                // ONLY on BEV first-poll — a BEV's getBatteryRemainPowerEV
+                                // is its authoritative source and a one-poll seed is safe.
+                                // On PHEV we deliberately DON'T accept here: this getter is
+                                // PHEV-primary now, and without SOC we cannot run the
+                                // SOC-mimic guard — a firmware echoing SOC% would seed a
+                                // bogus remainKwh that flows raw into MQTT/trip accounting
+                                // before the downstream ratio gates ever see it. Defer one
+                                // poll until SOC arrives and the guarded branch can run.
                                 b.remainKwh(evVal);
                                 kwhWrittenThisCycle = true;
+                            } else if (Double.isNaN(b.remainKwh) && isPhevForKwh) {
+                                logger.debug("getBatteryRemainPowerEV " +
+                                    String.format("%.1f", evVal) + " kWh held on PHEV — no SOC "
+                                    + "yet to validate against; deferring one poll");
                             }
                         }
                     }
@@ -993,7 +1053,8 @@ public class BydDataCollector {
                                 // SOC-as-kWh PHEV firmware bug — same guard as Priority 1.
                                 // The Sealion 6 DM-i HAL returns raw=841 (84.1 kWh) at 84% SOC;
                                 // impliedCap=100 passes a generic [10,130] gate even though
-                                // the pack is only 18.3 kWh. Let Priority 3 fill this slot.
+                                // the pack is only 18.3 kWh. Reject so a later priority /
+                                // the PHEV HEV last-resort fallback fills this slot.
                                 boolean looksLikeSocMimic = Math.abs(kwh - soc) < 5.0;
                                 double impliedCap = kwh / (soc / 100.0);
                                 if (looksLikeSocMimic) {
@@ -1007,8 +1068,11 @@ public class BydDataCollector {
                                     logger.debug("remainKwh from getRemainingBatteryPower: " +
                                         String.format("%.1f", kwh) + " (raw=" + rawVal + ")");
                                 }
-                            } else if (Double.isNaN(b.remainKwh)) {
-                                // No SOC to validate. Only accept on first poll — see Priority 1 note.
+                            } else if (Double.isNaN(b.remainKwh) && !isPhevForKwh) {
+                                // No SOC to validate. BEV first-poll seed only — on PHEV we
+                                // defer until SOC arrives so the SOC-mimic guard can run
+                                // (see Priority 1 note: raw remainKwh flows into MQTT/trip
+                                // accounting ungated, so an unvalidated PHEV seed is unsafe).
                                 b.remainKwh(kwh);
                                 kwhWrittenThisCycle = true;
                             }
@@ -1018,7 +1082,22 @@ public class BydDataCollector {
                     logger.debug("getRemainingBatteryPower failed: " + e.getMessage());
                 }
             }
-            
+
+            // PHEV last-resort fallback: the getBatteryPowerHEV value stashed above.
+            // Only used when getBatteryRemainPowerEV (Priority 1) and
+            // getRemainingBatteryPower (Priority 2) both failed to produce a usable
+            // reading this cycle — e.g. a firmware where the EV getter genuinely
+            // echoes SOC% and gets rejected. This value under-reports (~half) on
+            // Blade DM-i packs, so it is deliberately the LAST choice; preferring it
+            // would reintroduce the half-reading. Better a known-low reading than none.
+            if (isPhevForKwh && !kwhWrittenThisCycle && phevHevKwhUsable
+                    && !Double.isNaN(phevHevKwh)) {
+                b.remainKwh(phevHevKwh);
+                kwhWrittenThisCycle = true;
+                logger.debug("remainKwh from getBatteryPowerHEV (PHEV last-resort fallback, "
+                    + "may under-report): " + String.format("%.1f", phevHevKwh));
+            }
+
             // BEV-side fallback: BodyworkDevice.getBatteryPowerHEV() also runs for BEVs
             // when Priority 1/2 didn't yield a value, in case a particular BEV firmware
             // exposes remaining kWh here too. Skipped when PHEV-priority above already

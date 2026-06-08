@@ -2,19 +2,21 @@
 <!--
   RoadSense mark — M3, single-color, tint-driven (24dp grid).
 
-  Concept (per design steer): a ROAD in perspective + an EXCLAMATION mark =
-  "road hazard ahead." Authored in the Material Symbols 960-unit grid and scaled
-  via the same <group> transform as ic_diagnostics / ic_directions_car / ic_sentry,
-  so the weight, fill and proportions match the rest of the rail exactly.
+  Concept: a wide ROAD in gentle perspective + a SHORT, BOLD hazard
+  EXCLAMATION = "road hazard ahead." Authored in the Material Symbols
+  960-unit grid, scaled via the same <group> transform as ic_sentry.
 
-  Geometry follows the Material baseline convention (x:0..960, y:-960..0, baseline
-  at 0), symmetric about x=480:
-    - Exclamation (focal point): a bold tapered bar (y -850..-550) + round dot
-      (centre y=-450) occupying the top ~60% as the hazard warning.
-    - Road: a filled perspective band in the bottom ~30% — converging toward the
-      horizon (y=-340), wide at the base (y=-110) — with two dashed centre
-      segments punched out so it reads unmistakably as a road, not a triangle.
-    Dot bottom (-394) clears the road horizon (-340), so the motifs never collide.
+  Material baseline convention: x:0..960, y:-960..0, baseline y=0.
+  LARGER magnitude = HIGHER on screen. Exclamation (top) y≈-800..-470;
+  road (bottom) y≈-440..-110.
+
+  v6 (per steer "make the exclamation short in height"):
+    - Exclamation bar shortened to ~165u tall (was ~275u) and kept bold
+      (~92u wide) so it reads as a stout hazard mark, not a tall stick.
+    - Dot kept bold (r=55) just below the bar.
+    - Road unchanged from v5: broad horizon end (~296u) + wide base
+      (~700u), gentle taper, two centre-line dashes punched via evenOdd.
+  Mirrored 1:1 by the web stroke icon in app-shell.js / road-sense.html.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
@@ -27,21 +29,22 @@
         android:scaleY="0.025"
         android:translateY="24">
 
-        <!-- Exclamation bar: bold tapered hazard mark, focal point of the icon. -->
+        <!-- Exclamation bar: short, bold tapered hazard mark (top region). -->
         <path
             android:fillColor="@android:color/white"
-            android:pathData="M419,-810 Q419,-850 480,-850 Q541,-850 541,-810 L519,-580 Q516,-550 480,-550 Q444,-550 441,-580 Z" />
+            android:pathData="M434,-800 Q434,-828 480,-828 Q526,-828 526,-800 L510,-665 Q508,-635 480,-635 Q452,-635 450,-665 Z" />
 
-        <!-- Exclamation dot. -->
+        <!-- Exclamation dot (bold). -->
         <path
             android:fillColor="@android:color/white"
-            android:pathData="M480,-450 m-56,0 a56,56 0 1,0 112,0 a56,56 0 1,0 -112,0 Z" />
+            android:pathData="M480,-548 m-55,0 a55,55 0 1,0 110,0 a55,55 0 1,0 -110,0 Z" />
 
-        <!-- Road in perspective: filled trapezoid (bottom band) with dashed
-             centre line punched out via evenOdd. -->
+        <!-- Road: wide perspective band with a broad horizon end (not a
+             wedge) and rounded near base. Two centre-line dashes punched
+             out via evenOdd. -->
         <path
             android:fillColor="@android:color/white"
             android:fillType="evenOdd"
-            android:pathData="M398,-340 L562,-340 Q583,-340 588,-320 L672,-142 Q681,-110 648,-110 L312,-110 Q279,-110 288,-142 L372,-320 Q377,-340 398,-340 Z M462,-276 L452,-236 L508,-236 L498,-276 Z M438,-188 L424,-140 L536,-140 L522,-188 Z" />
+            android:pathData="M332,-440 L628,-440 L832,-128 Q846,-110 824,-110 L136,-110 Q114,-110 128,-128 L332,-440 Z M468,-410 L463,-330 L497,-330 L492,-410 Z M457,-262 L447,-140 L533,-140 L523,-262 Z" />
     </group>
 </vector>

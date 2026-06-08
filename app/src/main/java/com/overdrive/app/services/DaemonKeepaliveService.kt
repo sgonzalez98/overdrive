@@ -124,6 +124,22 @@ class DaemonKeepaliveService : Service() {
         } catch (e: Exception) {
             Log.w(TAG, "Failed to kick status overlay: ${e.message}")
         }
+
+        // Same for the RoadSense overlay: it must be visible whenever the feature is
+        // enabled, NOT only after the user opens MainActivity (its sole other launch
+        // path, onResume). The app process is killed/respawned across ACC cycles, so
+        // without this an ACC-on with RoadSense already enabled would leave the overlay
+        // absent until the user manually opened the app. Gated on the enabled flag
+        // (forceReload — the daemon/web UI may have just toggled it cross-UID) so a
+        // disabled feature stays silent. The overlay itself only renders daemon-
+        // published state, so showing it early just yields the idle/scanning pill.
+        try {
+            if (com.overdrive.app.roadsense.config.RoadSenseConfig.snapshot(forceReload = true).enabled) {
+                com.overdrive.app.roadsense.overlay.RoadSenseOverlayService.startIfPermitted(applicationContext)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to kick RoadSense overlay: ${e.message}")
+        }
         
         // START_STICKY ensures service restarts if killed
         return START_STICKY

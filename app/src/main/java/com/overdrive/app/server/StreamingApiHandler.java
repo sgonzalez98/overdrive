@@ -35,11 +35,24 @@ public class StreamingApiHandler {
     // This static survives the teardown so HttpServer's WS-open path can
     // re-apply the correct view (and re-route OEM for view 6).
     // -1 = never set; 0..6 valid mode values.
+    //
+    // Blind-spot views 7/8 are INTENTIONALLY excluded (clamp stays <=6): they are
+    // session-only, owned by BlindSpotOverlayService which re-issues
+    // /api/stream/view/{7|8} on every reveal AND that path re-applies the saved
+    // calibration (handleStreamViewMode). Persisting 7/8 here would restore a
+    // blind-spot view on a bare WS reconnect WITHOUT re-applying calibration —
+    // worse than reverting to a normal view, which self-heals on the next signal.
     private static volatile int lastDesiredViewMode = -1;
     public static int getLastDesiredViewMode() { return lastDesiredViewMode; }
     public static void setLastDesiredViewMode(int mode) {
         if (mode >= 0 && mode <= 6) lastDesiredViewMode = mode;
     }
+
+    // ── Blind-spot dedicated stream profile ─────────────────────────────────
+    // NOTE: the blind-spot view (7/8) no longer rides the shared live-view
+    // encoder — it has its own DEDICATED pipeline (GpuSurveillancePipeline.
+    // enableBlindSpot, own encoder+scaler+WS on port BS_WS_PORT, driven by the
+    // /api/bs/* endpoints). The shared stream's quality is just the user's pick.
 
     // Cold-start dedup. The first DVR / view-set click on a fresh daemon
     // takes ~4-9s to warm AVC HAL + open AVMCamera + EGL setup. Without
@@ -69,6 +82,26 @@ public class StreamingApiHandler {
                         new com.overdrive.app.camera.AvcHalWarmup();
                     warmup.warmupAndWait();
                     pano.start();
+                    // BS-ENABLE-001: self-arm the native blind-spot lane once pano
+                    // is genuinely running. The app-side BlindSpotControl.sync is a
+                    // one-shot POST with no re-poll (the old re-poll lived in the
+                    // deleted overlay service), so on a COLD ACC-on the initial
+                    // /api/bs/enable returns starting:true / throws NotReady and the
+                    // lane would otherwise never arm until the user re-toggles. Arm
+                    // it here, daemon-side, app-independently — enableBlindSpot is
+                    // idempotent and now past the running/camera gate.
+                    try {
+                        org.json.JSONObject bs =
+                            com.overdrive.app.config.UnifiedConfigManager.getBlindSpot();
+                        boolean want = bs != null && (bs.optBoolean("enabled", false)
+                            || bs.optBoolean("debugPreview", false));
+                        if (want && pano.isRunning()) {
+                            pano.enableBlindSpot(pano.getBlindSpotViewMode());
+                            CameraDaemon.log("BS: self-armed after pano cold-start");
+                        }
+                    } catch (Throwable t) {
+                        CameraDaemon.log("BS self-arm after pano start failed: " + t.getMessage());
+                    }
                 } catch (Throwable t) {
                     CameraDaemon.log("ensurePanoStartedNonBlocking: " + t.getMessage());
                 } finally {
@@ -110,11 +143,275 @@ public class StreamingApiHandler {
             handleStreamViewMode(out, viewMode);
             return true;
         }
+        // Blind-spot (view 7/8) LIVE stitch tuning, used by the RoadSense Blind
+        // Spot debug editor's slider preview. In-memory only (not persisted) —
+        // the debug editor's Save writes the 'blindspot' UCM section separately.
+        if (path.startsWith("/api/stream/bs/")) {
+            handleBlindSpotParams(out, path.substring(15));
+            return true;
+        }
         if (path.equals("/api/stream/view") && method.equals("GET")) {
             sendStreamViewMode(out);
             return true;
         }
+        if (path.equals("/api/stream/turn") && method.equals("GET")) {
+            sendTurnState(out);
+            return true;
+        }
         return false;
+    }
+
+    /**
+     * Dedicated blind-spot pipeline API (/api/bs/*). Completely separate from
+     * the /api/stream/* live-view stream: drives GpuSurveillancePipeline's
+     * second scaler+encoder+WS (port {@link GpuSurveillancePipeline#BS_WS_PORT}),
+     * locked to views 7/8 at the fixed BS profile (1280×960@15). Never touches
+     * lastDesiredViewMode / streamingQuality, so a live-view WS reconnect can
+     * never hijack the blind-spot view, and vice-versa.
+     */
+    public static boolean handleBlindSpot(String method, String path, String body, OutputStream out) throws Exception {
+        // Method-agnostic: all loopback, all idempotent or clearly-scoped. The
+        // overlay drives enable/disable via POST but view-select via the GET-based
+        // httpGetSucceeded helper, and /api/stream/view never gated on method
+        // either — so accept whatever verb arrives rather than 404 a GET into a
+        // non-JSON body the caller then fails to parse.
+        if (path.equals("/api/bs/enable")) {
+            handleBsEnable(out);
+            return true;
+        }
+        if (path.equals("/api/bs/disable")) {
+            handleBsDisable(out);
+            return true;
+        }
+        if (path.equals("/api/bs/status")) {
+            handleBsStatus(out);
+            return true;
+        }
+        if (path.startsWith("/api/bs/view/")) {
+            int mode;
+            try { mode = Integer.parseInt(path.substring(13)); }
+            catch (NumberFormatException e) { HttpResponse.sendJsonError(out, "invalid view"); return true; }
+            handleBsView(out, mode);
+            return true;
+        }
+        if (path.startsWith("/api/bs/geometry")) {
+            handleBsGeometry(out, path);
+            return true;
+        }
+        return false;
+    }
+
+    private static void handleBsEnable(OutputStream out) throws Exception {
+        GpuSurveillancePipeline pipeline = CameraDaemon.getGpuPipeline();
+        if (pipeline == null) {
+            HttpResponse.sendJsonError(out, Messages.get("errors.streaming_pipeline_not_available"));
+            return;
+        }
+        // Cold-start the pano pipeline async (same dedup as the stream path);
+        // the overlay re-polls /api/bs/enable until running.
+        if (!ensurePanoStartedNonBlocking(pipeline)) {
+            JSONObject pending = new JSONObject();
+            pending.put("success", false);
+            pending.put("starting", true);
+            pending.put("error", "Pipeline starting — try again in a few seconds");
+            pending.put("errorCode", "pano_starting");
+            HttpResponse.sendJson(out, pending.toString());
+            return;
+        }
+        try {
+            // NATIVE path: arming the lane creates the daemon SurfaceControl layer
+            // + repoints the BS scaler onto it (GPU → screen). The daemon's own
+            // turn-trigger loop shows/hides it; no app-process decoder/WS involved.
+            pipeline.enableBlindSpot(pipeline.getBlindSpotViewMode());
+            JSONObject response = new JSONObject();
+            response.put("success", true);
+            response.put("native", true);
+            response.put("view", pipeline.getBlindSpotViewMode());
+            response.put("width", 1280);
+            response.put("height", 960);
+            HttpResponse.sendJson(out, response.toString());
+        } catch (Exception e) {
+            CameraDaemon.log("handleBsEnable: error - " + e.getMessage());
+            HttpResponse.sendJsonError(out, e.getMessage());
+        }
+    }
+
+    private static void handleBsDisable(OutputStream out) throws Exception {
+        GpuSurveillancePipeline pipeline = CameraDaemon.getGpuPipeline();
+        if (pipeline != null) {
+            try { pipeline.disableBlindSpot(); } catch (Throwable t) {
+                CameraDaemon.log("handleBsDisable: " + t.getMessage());
+            }
+        }
+        JSONObject response = new JSONObject();
+        response.put("success", true);
+        HttpResponse.sendJson(out, response.toString());
+    }
+
+    private static void handleBsStatus(OutputStream out) throws Exception {
+        GpuSurveillancePipeline pipeline = CameraDaemon.getGpuPipeline();
+        JSONObject response = new JSONObject();
+        response.put("success", true);
+        boolean enabled = pipeline != null && pipeline.isBlindSpotEnabled();
+        response.put("enabled", enabled);
+        response.put("running", pipeline != null && pipeline.isRunning());
+        response.put("view", pipeline != null ? pipeline.getBlindSpotViewMode() : 7);
+        response.put("native", true);
+        HttpResponse.sendJson(out, response.toString());
+    }
+
+    /**
+     * GET/POST /api/bs/geometry[/x/y/w/h] — set the on-screen rect (panel pixels)
+     * of the native SurfaceControl blind-spot layer. SurfaceControl layers have no
+     * input channel, so position/size are config-driven (RoadSense settings UI),
+     * not finger-drag. Persists to UCM blindspot.geometry so it survives restart.
+     */
+    private static void handleBsGeometry(OutputStream out, String path) throws Exception {
+        GpuSurveillancePipeline pipeline = CameraDaemon.getGpuPipeline();
+        // Forms: /api/bs/geometry/{x}/{y}/{w}/{h}  (absolute px)
+        //   or:  /api/bs/geometry/preset/{sizePct}/{corner}  (daemon does panel math)
+        String tail = path.length() > 16 ? path.substring(16) : "";
+        if (tail.startsWith("/")) tail = tail.substring(1);
+        if (tail.startsWith("preset/")) {
+            try {
+                String[] p = tail.substring("preset/".length()).split("/");
+                int pct = Integer.parseInt(p[0]);
+                String corner = p.length > 1 ? p[1] : "tr";
+                if (pipeline != null) pipeline.setBsGeometryPreset(pct, corner);
+            } catch (Exception e) {
+                HttpResponse.sendJsonError(out, "preset must be /preset/{pct}/{corner}: " + e.getMessage());
+                return;
+            }
+        } else if (!tail.isEmpty()) {
+            try {
+                String[] p = tail.split("/");
+                int x = Integer.parseInt(p[0]);
+                int y = Integer.parseInt(p[1]);
+                int w = Integer.parseInt(p[2]);
+                int h = Integer.parseInt(p[3]);
+                // Persist to UCM so the daemon restores it on the next enable.
+                org.json.JSONObject g = new org.json.JSONObject();
+                g.put("x", x); g.put("y", y); g.put("w", w); g.put("h", h);
+                com.overdrive.app.config.UnifiedConfigManager.updateSection("blindspot",
+                    new org.json.JSONObject().put("geometry", g));
+                if (pipeline != null) pipeline.setBsGeometry(x, y, w, h);
+            } catch (Exception e) {
+                HttpResponse.sendJsonError(out, "geometry must be /x/y/w/h ints: " + e.getMessage());
+                return;
+            }
+        }
+        JSONObject response = new JSONObject();
+        response.put("success", true);
+        // Return the current (clamped) rect so a settings UI can reflect it.
+        if (pipeline != null) {
+            int[] r = pipeline.getBsGeometry();
+            response.put("x", r[0]); response.put("y", r[1]);
+            response.put("w", r[2]); response.put("h", r[3]);
+        }
+        HttpResponse.sendJson(out, response.toString());
+    }
+
+    private static void handleBsView(OutputStream out, int mode) throws Exception {
+        GpuSurveillancePipeline pipeline = CameraDaemon.getGpuPipeline();
+        if (pipeline == null || (mode != 7 && mode != 8)) {
+            HttpResponse.sendJsonError(out, "blind-spot view must be 7 or 8");
+            return;
+        }
+        // CRITICAL (DEFECT-B): never report success while the BS lane is still
+        // disabled. Gate BEFORE setBlindSpotViewMode() — that setter is a no-op
+        // until enableBlindSpot() has allocated bsScaler + bound the WS server on
+        // BS_WS_PORT (it just snapshots a null bsScaler and returns). If the pano
+        // is still cold-starting, the initial /api/bs/enable returned
+        // starting:true and enableBlindSpot was never called, so the lane is
+        // disabled and port 8889 is dead. Returning success here would let the
+        // overlay commit streamWarmedView=mode and STOP re-driving the arming
+        // loop, leaving WsH264Client reconnect-storming a dead port forever while
+        // the lane stays un-armed (the observed NO-VIDEO flap). Mirror
+        // handleBsEnable's cold-pano contract: reply {starting:true} so
+        // confirmBsLaneAndConnect keeps re-POSTing /api/bs/enable and the overlay
+        // keeps retrying selectView until the lane genuinely commits, then it
+        // connects to a LIVE 8889.
+        if (!pipeline.isBlindSpotEnabled()) {
+            JSONObject pending = new JSONObject();
+            pending.put("success", false);
+            pending.put("starting", true);
+            pending.put("view", mode);
+            pending.put("error", "Blind-spot lane not yet armed — try again in a few seconds");
+            pending.put("errorCode", "bs_starting");
+            HttpResponse.sendJson(out, pending.toString());
+            return;
+        }
+        pipeline.setBlindSpotViewMode(mode);
+        JSONObject response = new JSONObject();
+        response.put("success", true);
+        response.put("view", mode);
+        HttpResponse.sendJson(out, response.toString());
+    }
+
+    // One-time warning latch so we log the degraded-latency fallback once per
+    // daemon lifetime instead of spamming logcat at the overlay's 250ms tick.
+    private static volatile boolean turnFallbackWarned = false;
+
+    /**
+     * Live turn-indicator state for the blind-spot overlay. The overlay runs in
+     * the APP process, which has no BYD device handles (BydDataCollector.init()
+     * is daemon-only), so it can't read the turn lamps directly — it polls this
+     * loopback endpoint instead. We read from the daemon's own collector (which
+     * owns lightDevice) via one inline readTurnNow() per request — the overlay's
+     * own 250ms tick drives the cadence; there is NO background scheduler here.
+     * Returns {left,right} as ints (>0 = lamp on); -1 when state is unknown.
+     *
+     * FALLBACK LATENCY: on trims whose light device is unavailable, readTurnNow()
+     * returns -1 and we fall back to the ~5s main snapshot (BydVehicleData). That
+     * value is stale by up to 5 seconds — orders of magnitude older than the
+     * 250ms poll — so on those trims the blind-spot overlay's turn trigger may
+     * miss or lag a newly-activated indicator. This is a hard HAL limitation on
+     * that trim (no fast turn-lamp read path exists), not a bug here. We log the
+     * degradation once (turnFallbackWarned) so it's diagnosable from logs.
+     */
+    private static void sendTurnState(OutputStream out) throws Exception {
+        JSONObject response = new JSONObject();
+        int left = -1;
+        int right = -1;
+        try {
+            com.overdrive.app.byd.BydDataCollector collector =
+                com.overdrive.app.byd.BydDataCollector.getInstance();
+            if (collector.isInitialized()) {
+                // One inline HAL read per request — no background scheduler. The
+                // overlay's own 250ms tick drives the cadence; the daemon just
+                // answers each read. Packed bit0=L, bit1=R; -1 if unavailable.
+                int packed = collector.readTurnNow();
+                if (packed >= 0) {
+                    left = (packed & 0x1) != 0 ? 1 : 0;
+                    right = (packed & 0x2) != 0 ? 1 : 0;
+                } else {
+                    // Light device unavailable on this trim — fall back to the
+                    // ~5s main snapshot's last-known lamp state. This value can
+                    // be up to ~5s stale (vs the overlay's 250ms poll), so the
+                    // blind-spot turn trigger has degraded latency on this trim.
+                    // Warn once so the degradation is diagnosable from logs
+                    // without spamming at the 250ms tick.
+                    if (!turnFallbackWarned) {
+                        turnFallbackWarned = true;
+                        CameraDaemon.log("sendTurnState: readTurnNow() unavailable on this"
+                            + " trim — blind-spot turn trigger falling back to the ~5s"
+                            + " snapshot (up to ~5s latency vs the normal 250ms poll)");
+                    }
+                    com.overdrive.app.byd.BydVehicleData d = collector.getData();
+                    if (d != null) {
+                        int un = com.overdrive.app.byd.BydVehicleData.UNAVAILABLE;
+                        if (d.leftTurnState != un) left = d.leftTurnState;
+                        if (d.rightTurnState != un) right = d.rightTurnState;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            CameraDaemon.log("sendTurnState error: " + t.getMessage());
+        }
+        response.put("success", true);
+        response.put("left", left);
+        response.put("right", right);
+        HttpResponse.sendJson(out, response.toString());
     }
     
     private static void handleEnableStreaming(OutputStream out) throws Exception {
@@ -156,7 +453,7 @@ public class StreamingApiHandler {
             GpuPipelineConfig.StreamingQuality q = GpuPipelineConfig.StreamingQuality.fromString(streamingQuality);
             CameraDaemon.log("handleEnableStreaming: quality=" + q.displayName);
             pipeline.enableStreaming(q.width, q.height, q.fps, q.bitrate);
-            
+
             CameraDaemon.log("handleEnableStreaming: success");
             JSONObject response = new JSONObject();
             response.put("success", true);
@@ -267,6 +564,51 @@ public class StreamingApiHandler {
         HttpResponse.sendJson(out, response.toString());
     }
     
+    // Blind-spot (view 7/8) LIVE tuning (in-memory; debug editor). tail is up to
+    // 10 opaque scalars: "{p0}/{p1}/{p2}/{p3}/{p4}/{p5}/{p6}/{p7}/{p8}/{p9}"
+    // (trailing values optional; each defaults to its identity value).
+    private static void handleBlindSpotParams(OutputStream out, String tail) throws Exception {
+        GpuSurveillancePipeline pipeline = CameraDaemon.getGpuPipeline();
+        if (pipeline == null) {
+            HttpResponse.sendJsonError(out, Messages.get("errors.streaming_pipeline_not_available"));
+            return;
+        }
+        float hfov = 1.66f, sideHFov = 1.98f, yaw = 1.23f, roll = 0.25f,
+              feather = 0.38f, projExp = 1.0f, vscale = 1.0f, pitch = -0.275f,
+              rearRoll = 0.0f, rearPitch = 0.0f;
+        try {
+            String[] p = tail.split("/");
+            if (p.length > 0 && !p[0].isEmpty()) hfov      = Float.parseFloat(p[0]);
+            if (p.length > 1 && !p[1].isEmpty()) sideHFov  = Float.parseFloat(p[1]);
+            if (p.length > 2 && !p[2].isEmpty()) yaw       = Float.parseFloat(p[2]);
+            if (p.length > 3 && !p[3].isEmpty()) roll      = Float.parseFloat(p[3]);
+            if (p.length > 4 && !p[4].isEmpty()) feather   = Float.parseFloat(p[4]);
+            if (p.length > 5 && !p[5].isEmpty()) projExp   = Float.parseFloat(p[5]);
+            if (p.length > 6 && !p[6].isEmpty()) vscale    = Float.parseFloat(p[6]);
+            if (p.length > 7 && !p[7].isEmpty()) pitch     = Float.parseFloat(p[7]);
+            if (p.length > 8 && !p[8].isEmpty()) rearRoll  = Float.parseFloat(p[8]);
+            if (p.length > 9 && !p[9].isEmpty()) rearPitch = Float.parseFloat(p[9]);
+        } catch (NumberFormatException e) {
+            HttpResponse.sendJsonError(out, "Bad blind-spot params: " + tail);
+            return;
+        }
+        pipeline.setBlindSpotParams(hfov, sideHFov, yaw, roll, feather, projExp, vscale, pitch,
+                                    rearRoll, rearPitch);
+        JSONObject ok = new JSONObject();
+        ok.put("success", true);
+        ok.put("hfov", hfov);
+        ok.put("sideHFov", sideHFov);
+        ok.put("yaw", yaw);
+        ok.put("roll", roll);
+        ok.put("feather", feather);
+        ok.put("projExp", projExp);
+        ok.put("vscale", vscale);
+        ok.put("pitch", pitch);
+        ok.put("rearRoll", rearRoll);
+        ok.put("rearPitch", rearPitch);
+        HttpResponse.sendJson(out, ok.toString());
+    }
+
     private static void handleStreamViewMode(OutputStream out, int viewMode) throws Exception {
         GpuSurveillancePipeline pipeline = CameraDaemon.getGpuPipeline();
         
@@ -275,6 +617,12 @@ public class StreamingApiHandler {
             return;
         }
         
+        // Live-view stream accepts only modes 0-6. Blind-spot views 7/8 are
+        // NOT valid here — they belong to the dedicated BS pipeline on port
+        // 8889 and must route through /api/bs/view/{mode} (validated at
+        // handleBsView). Letting 7/8 through here would call
+        // pipeline.setStreamViewMode() on the SHARED live-view scaler and
+        // hijack the live-view stream.
         if (viewMode < 0 || viewMode > 6) {
             HttpResponse.sendJsonError(out, Messages.get("errors.streaming_invalid_view_mode"));
             return;
@@ -304,7 +652,8 @@ public class StreamingApiHandler {
             // Defensive: refresh the static so a daemon-restart-then-idempotent-hit
             // can't leave lastDesiredViewMode out of sync with the live scaler.
             setLastDesiredViewMode(viewMode);
-            String[] modeNamesIdem = {"Mosaic", "Front", "Right", "Rear", "Left", "Raw", "OEM Dashcam"};
+            String[] modeNamesIdem = {"Mosaic", "Front", "Right", "Rear", "Left", "Raw", "OEM Dashcam",
+                                      "BlindSpot L", "BlindSpot R"};
             JSONObject ok = new JSONObject();
             ok.put("success", true);
             ok.put("viewMode", viewMode);
@@ -340,17 +689,45 @@ public class StreamingApiHandler {
                 return;
             }
         }
-        
+
         // Capture the prior view BEFORE we change it so the OEM lifecycle
         // recalc only fires on transitions in/out of view 6. Pre-fix every
         // AVM quadrant click triggered a recalc, which on smart-mode arms
         // would warm the OEM camera unnecessarily for no consumer.
         int prevView = pipeline.getStreamViewMode();
+
         pipeline.setStreamViewMode(viewMode);
         // Persist across scaler teardown so a future WS reconnect after
         // idle-shutdown can re-apply the user's pick. See lastDesiredViewMode
         // doc above.
         setLastDesiredViewMode(viewMode);
+
+        // Blind-spot views (7=Rear+Left, 8=Right+Rear): apply the user's SAVED
+        // panorama calibration from the 'blindspot' UCM section so the stitch
+        // looks right without the debug editor open. forceReload first — the web
+        // (different UID) just wrote it. The live /api/stream/bs path still
+        // overrides this in-memory for the debug editor's slider preview.
+        if (viewMode == 7 || viewMode == 8) {
+            try {
+                com.overdrive.app.config.UnifiedConfigManager.forceReload();
+                org.json.JSONObject bs =
+                    com.overdrive.app.config.UnifiedConfigManager.getBlindSpot();
+                if (bs != null && bs.length() > 0) {
+                    pipeline.setBlindSpotParams(
+                        (float) bs.optDouble("rearFov", 1.66),
+                        (float) bs.optDouble("sideFov", 1.98),
+                        (float) bs.optDouble("yaw",     1.23),
+                        (float) bs.optDouble("roll",    0.25),
+                        (float) bs.optDouble("feather", 0.38),
+                        (float) bs.optDouble("projExp", 1.0), 1.0f,
+                        (float) bs.optDouble("pitch",  -0.275),
+                        (float) bs.optDouble("rearRoll",  0.0),
+                        (float) bs.optDouble("rearPitch", 0.0));
+                }
+            } catch (Throwable t) {
+                CameraDaemon.log("blindspot calib apply failed: " + t.getMessage());
+            }
+        }
 
         // If a prior view-6 selection swapped the WS sink to the OEM encoder,
         // restore pano now so view 0..5 actually delivers pano frames again.
@@ -372,7 +749,8 @@ public class StreamingApiHandler {
             com.overdrive.app.server.OemDashcamApiHandler.scheduleLifecycleRecalc();
         }
 
-        String[] modeNames = {"Mosaic", "Front", "Right", "Rear", "Left", "Raw", "OEM Dashcam"};
+        String[] modeNames = {"Mosaic", "Front", "Right", "Rear", "Left", "Raw", "OEM Dashcam",
+                              "BlindSpot L", "BlindSpot R"};
         CameraDaemon.log("Stream view mode set to: " + (viewMode < modeNames.length ? modeNames[viewMode] : "Unknown"));
         
         JSONObject response = new JSONObject();

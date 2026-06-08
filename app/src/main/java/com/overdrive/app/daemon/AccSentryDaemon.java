@@ -328,6 +328,7 @@ public class AccSentryDaemon {
             setSpecialConfig(SPECIAL_CONFIG_DATA_MODULE_POWER, 2);  // Allow sleep (value=2, NOT 0)
             setPowerConfig(-1442840502, 0);                         // Release power hold (PowerDevice, not SpecialDevice)
             applyEscoSentrySpecialConfig(false);                    // dilink4-only esco-parity disable
+            applySentryIspPowerVote(false);                         // release OEM 409 camera/ISP power vote (fleet-wide)
         } else {
             // ENABLE — check MCU state first
             int mcuStatus = getMcuStatus();
@@ -339,6 +340,7 @@ public class AccSentryDaemon {
                 setSpecialConfig(SPECIAL_CONFIG_DATA_MODULE_POWER, 1);  // Wake request ON
                 applyEscoSentrySpecialConfig(true);                    // dilink4-only esco-parity enable
                 applyEscoMcuPowerHold(true);                           // dilink4-only McuStatus=1
+                applySentryIspPowerVote(true);                         // OEM 409 camera/ISP power vote (fleet-wide)
             } else {
                 // MCU needs active wake — use wakeUpMcu() then retry
                 log("MCU not ready (status=" + mcuStatus + "), waking up and retrying...");
@@ -353,6 +355,7 @@ public class AccSentryDaemon {
                         setSpecialConfig(SPECIAL_CONFIG_DATA_MODULE_POWER, 1);
                         applyEscoSentrySpecialConfig(true);
                         applyEscoMcuPowerHold(true);
+                        applySentryIspPowerVote(true);
                     } else {
                         // One more attempt
                         wakeUpMcu();
@@ -361,6 +364,7 @@ public class AccSentryDaemon {
                         setSpecialConfig(SPECIAL_CONFIG_DATA_MODULE_POWER, 1);
                         applyEscoSentrySpecialConfig(true);
                         applyEscoMcuPowerHold(true);
+                        applySentryIspPowerVote(true);
                         log("Forced peripheral power enable after second wake attempt");
                     }
                 }).start();
@@ -421,6 +425,46 @@ public class AccSentryDaemon {
             setSpecialConfig(ESCO_SENTRY_KEY_1, 0);
             setSpecialConfig(ESCO_SENTRY_KEY_2, 2);
         }
+    }
+
+    // ==================== SENTRY ISP / CAMERA POWER VOTE (409) ====================
+
+    // The OEM BYD Sentry Mode app (com.byd.sentrymode) casts a dedicated
+    // camera/ISP power vote on its sentry-arm path that NONE of our existing
+    // keep-alive writes cover. The DiPlus keys (782237711/782237728) hold the
+    // 5V/modem/USB rails; the esco keys (1901/1902) and MCU hold (-1442840502)
+    // hold the byd_apa AVM rail on dilink4. But the OEM's "409" pair is the
+    // sentry-mode CAMERA/ISP power request specifically. Without it, on certain
+    // trims the AVM ISP rail power-gates after ~30-35 min of inactivity and
+    // AVMCamera frames go all-black — recovering only when the OEM Sentry app
+    // (or anything) re-casts this vote. That recovery-on-OEM-event is exactly
+    // the symptom we set out to fix; replicating the vote ourselves makes our
+    // feed self-sustaining without depending on the OEM app being armed.
+    //
+    // OEM source (decompiled com.byd.sentrymode):
+    //   AutoApiManager.set409Value(v):       SpecialDevice[0x4090103E] = v
+    //   AutoApiManager.set409SentryState(v): SpecialDevice[0x4090103C] = v
+    //   SentryModeFuncRequest:451   set409Value(1); set409SentryState(1);  (arm)
+    //   AutoApiManager:976-977      set409Value(0); set409SentryState(0);  (exit)
+    //   The OEM gates set409Value on isMcuWake()/wakeUpMcu(); our callers
+    //   (configurePeripheralPower / keep-alive) only fire this after the MCU is
+    //   already confirmed awake, so no extra wake is needed here.
+    //
+    // Applied FLEET-WIDE (NOT gated to dilink4): the OEM writes these from the
+    // generic AutoApiManager with no car-type gate, and the black-frame symptom
+    // spans multiple models — gating to dilink4 would miss affected legacy
+    // trims. setSpecialConfig is best-effort, so an unsupported key on a given
+    // trim is a logged no-op; this is safe additive coverage for legacy too.
+    // 0x4090103E = 1083183166, 0x4090103C = 1083183164.
+    private static final int SENTRY_ISP_NEED_409_SET   = 0x4090103E;
+    private static final int SENTRY_ISP_WORK_STATE_SET = 0x4090103C;
+
+    private static void applySentryIspPowerVote(boolean enable) {
+        int v = enable ? 1 : 0;
+        log("[sentry-isp] 409 camera/ISP power vote " + (enable ? "ON" : "OFF")
+            + ": SpecialDevice[0x4090103E]=" + v + " [0x4090103C]=" + v);
+        setSpecialConfig(SENTRY_ISP_NEED_409_SET, v);
+        setSpecialConfig(SENTRY_ISP_WORK_STATE_SET, v);
     }
     
     /**
@@ -2020,6 +2064,17 @@ public class AccSentryDaemon {
         systemKeepAliveThread = new Thread(() -> {
             log("System Persistence Service started");
 
+            // Re-assert cadence for the OEM 409 camera/ISP power vote. The
+            // loop ticks every SYSTEM_KEEPALIVE_INTERVAL_MS (10s); the ISP
+            // gate that black-frames the AVM feed fires at ~30-35 min of
+            // inactivity, so re-asserting every ~5 min (30 ticks) is a 6-7x
+            // safety margin while keeping binder/log churn negligible. The
+            // initial vote is already cast by configurePeripheralPower(true)
+            // in enterSentryMode; this only defends against the MCU/BCM
+            // silently dropping the flag mid-session.
+            final long ISP_VOTE_REASSERT_EVERY_TICKS = 30;  // 30 * 10s = 5 min
+            long tick = 0;
+
             while (running && inSentryMode) {  // Check BOTH flags
                 try {
                     // 1. Maintain Network Interface Stability
@@ -2068,6 +2123,22 @@ public class AccSentryDaemon {
                             log("AVC keep-alive tick failed: " + t.getMessage());
                         }
                     }
+
+                    // 3b. Re-assert the OEM 409 camera/ISP power vote on a
+                    // ~5 min cadence so the AVM ISP rail can't power-gate
+                    // mid-session (the ~30-35 min black-frame symptom). Cheap
+                    // best-effort SpecialDevice writes; no-op on trims that
+                    // don't expose the key. Fires on the first tick too
+                    // (tick==0) as a belt-and-suspenders re-cast after the
+                    // enterSentryMode vote.
+                    if (tick % ISP_VOTE_REASSERT_EVERY_TICKS == 0) {
+                        try {
+                            applySentryIspPowerVote(true);
+                        } catch (Throwable t) {
+                            log("ISP power vote re-assert failed: " + t.getMessage());
+                        }
+                    }
+                    tick++;
 
                     // 4. Maintenance Cycle Interval (10 seconds)
                     Thread.sleep(SYSTEM_KEEPALIVE_INTERVAL_MS);

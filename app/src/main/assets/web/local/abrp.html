@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title data-i18n="app.abrp_title">ABRP - OverDrive</title>
     <link rel="icon" type="image/webp" href="../shared/app-icon-dark.webp">
-    <script src="../shared/theme.js?v=4"></script>
+    <script src="../shared/theme.js?v=5"></script>
     <script src="../shared/app-shell.js"></script>
     <!--
       Bottom-tab manifest for ABRP. Three task-based tabs:
@@ -24,7 +24,7 @@
         ];
     </script>
     <script src="../shared/app-tabs.js"></script>
-    <link rel="stylesheet" href="../shared/styles.css?v=13">
+    <link rel="stylesheet" href="../shared/styles.css?v=14">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
     <style>
@@ -37,12 +37,28 @@
         .token-actions { display: flex; gap: 8px; margin-top: 12px; }
         .token-input-row { display: flex; gap: 8px; align-items: center; }
         .token-input-row input {
-            flex: 1; padding: 10px 14px; background: var(--bg-elevated); border: 1px solid var(--border-color);
+            /* min-width:0 so a long monospace token can't push the adjacent
+               action button off the row on a narrow phone — the flex item is
+               allowed to shrink below the token's intrinsic width. */
+            flex: 1; min-width: 0; padding: 10px 14px; background: var(--bg-elevated); border: 1px solid var(--border-color);
             border-radius: 8px; color: var(--text-primary); font-size: 14px; font-family: 'JetBrains Mono', monospace;
         }
         .token-input-row input::placeholder { color: var(--text-muted); }
         .token-input-row input:focus { outline: none; border-color: var(--brand-primary); }
         .status-text { margin-top: 12px; font-size: 13px; color: var(--text-secondary); min-height: 20px; }
+        /* Range sliders use the shared .slider chrome (themed track + brand
+           webkit thumb from styles.css). abrp has no generic input rule that
+           boxes them, so the class alone styles the track + webkit thumb;
+           add the Firefox thumb the shared rule omits so it's brand-coloured
+           there too. */
+        input.slider::-moz-range-thumb {
+            width: 18px;
+            height: 18px;
+            background: var(--brand-primary);
+            border: none;
+            border-radius: 50%;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
@@ -196,11 +212,11 @@
                         </div>
                         <div style="margin-top:14px;">
                             <label style="font-size:12px;color:var(--text-secondary);"><span data-i18n="abrp.min_interval">Min interval — fastest</span>: <span id="abrpMinLabel" style="font-family:'JetBrains Mono',monospace;color:var(--text-primary);">5s</span></label>
-                            <input type="range" id="abrpMinInterval" min="1" max="30" step="1" value="5" style="width:100%;" oninput="ABRP.onSlider()" onchange="ABRP.saveDataSaving()">
+                            <input type="range" class="slider" id="abrpMinInterval" min="1" max="30" step="1" value="5" style="width:100%;" oninput="ABRP.onSlider()" onchange="ABRP.saveDataSaving()">
                         </div>
                         <div style="margin-top:14px;">
                             <label style="font-size:12px;color:var(--text-secondary);"><span data-i18n="abrp.max_interval">Max interval — heartbeat</span>: <span id="abrpMaxLabel" style="font-family:'JetBrains Mono',monospace;color:var(--text-primary);">2m</span></label>
-                            <input type="range" id="abrpMaxInterval" min="30" max="1800" step="30" value="120" style="width:100%;" oninput="ABRP.onSlider()" onchange="ABRP.saveDataSaving()">
+                            <input type="range" class="slider" id="abrpMaxInterval" min="30" max="1800" step="30" value="120" style="width:100%;" oninput="ABRP.onSlider()" onchange="ABRP.saveDataSaving()">
                         </div>
                     </div>
                 </div>
@@ -236,7 +252,7 @@
                             </div>
                             <div style="margin-top:14px;">
                                 <label style="font-size:12px;color:var(--text-secondary);"><span data-i18n="abrp.app_grace">Grace period</span>: <span id="abrpGraceLabel" style="font-family:'JetBrains Mono',monospace;color:var(--text-primary);">90s</span></label>
-                                <input type="range" id="abrpAppGrace" min="0" max="600" step="10" value="90" style="width:100%;" oninput="ABRP.onSlider()" onchange="ABRP.saveDataSaving()">
+                                <input type="range" class="slider" id="abrpAppGrace" min="0" max="600" step="10" value="90" style="width:100%;" oninput="ABRP.onSlider()" onchange="ABRP.saveDataSaving()">
                             </div>
                             <div class="info-box" style="margin-top:12px;">
                                 <div class="info-row"><span class="label" data-i18n="abrp.app_status">ABRP app</span><span class="value" id="abrpAppPresence">--</span></div>

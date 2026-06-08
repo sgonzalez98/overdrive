@@ -2577,7 +2577,13 @@ BYD.performance = {
             // copies used "title". Fall back to id when neither is set.
             opt.textContent = m.name || m.title || m.id || '';
             modelSel.appendChild(opt);
-            if (m.id && typeof m.nominalKwh === 'number' && m.nominalKwh > 0) {
+            // Prefer the usable frame (PHEV) so the prefilled nominal matches
+            // the BMS remainKwh frame the SOH formula uses — entering gross
+            // (e.g. 18.3) on a usable-frame pack reads ~83% SOH on a healthy
+            // battery. BEVs have no usableKwh and use gross nominalKwh.
+            if (m.id && typeof m.usableKwh === 'number' && m.usableKwh > 0) {
+                this._modelNominalById[m.id] = m.usableKwh;
+            } else if (m.id && typeof m.nominalKwh === 'number' && m.nominalKwh > 0) {
                 this._modelNominalById[m.id] = m.nominalKwh;
             }
         }
@@ -2605,8 +2611,10 @@ BYD.performance = {
         var input = document.getElementById('sohCapacityModalInput');
         var modelSel = document.getElementById('sohCapacityModalModel');
         var kwh = input ? parseFloat(input.value) : NaN;
-        if (isNaN(kwh) || kwh < 15 || kwh > 120) {
-            alert(BYD.i18n.t('soh.modal_capacity_label') + ': 15 - 120');
+        // Floor is 8 (not 15) to match the backend's PHEV-aware range — small
+        // Blade DM-i usable packs sit below 15 kWh (e.g. ~12.96 / 15.2 usable).
+        if (isNaN(kwh) || kwh < 8 || kwh > 120) {
+            alert(BYD.i18n.t('soh.modal_capacity_label') + ': 8 - 120');
             return;
         }
         var modelId = modelSel ? modelSel.value : '';

@@ -197,6 +197,22 @@ class SeverityClassifier {
             potholeVote -= AXLE_PAIR_VOTE
         }
 
+        // Pitch-vs-roll gyro signature (the user's "up-down movement" cue). A transverse
+        // breaker taken head-on PITCHES the body (nose up→over→down) with little roll; a
+        // one-sided pothole ROLLS the body (one corner drops) with little pitch. So the
+        // signed dominance pitch−roll is a geometric, amplitude-of-rotation cue that is
+        // independent of the vertical-accel morphology AND more speed-robust than the
+        // accel peak — exactly where the accel path is weakest (slow crossings). Only
+        // when the axes were actually resolvable (pitchValid; longitudinal axis
+        // established, e.g. after decelerating for the breaker) — else it's "not
+        // measured" and contributes nothing, like the asymmetry vote. Normalize the
+        // dominance by a reference rotation rate and clamp so one big number can't swamp
+        // the trusted dipLeading/axle votes; scale keeps it a strong-but-bounded cue.
+        if (c.pitchValid) {
+            val rotDominance = (c.peakPitchRate - c.peakRollRate) / PITCH_REF_RPS
+            potholeVote -= rotDominance.coerceIn(-1f, 1f) * PITCH_VOTE_SCALE
+        }
+
         return when {
             potholeVote >= TYPE_DECISION_MARGIN -> HazardType.POTHOLE
             potholeVote <= -TYPE_DECISION_MARGIN -> HazardType.BREAKER
@@ -322,7 +338,20 @@ class SeverityClassifier {
         // ============================================================
         // From the 03-ARCH table @ 30 km/h, vehicle-cal applied:
         //   < 1.0 None (not stored)  | 1.0–3.0 Minor | 3.0–6.0 Moderate | >6.0 Severe
-        /** PROVISIONAL. Moderate starts at 3.0 m/s² normalized peak (D-011). */
+        //
+        // CALIBRATION NOTE (Session 30e→30f): 53 on-device labels showed a ~9% HOT bias
+        // (every user severity correction LOWERED, 4/0) — a +9% floor nudge (3.3/6.6) fit
+        // it (12/53→4/53 errors). That nudge was REVERTED once issue E was fixed: the bias
+        // is exactly what the per-vehicle VehicleCalibrator.vehicleScale exists to remove
+        // (this car reads ~9% high → scale≈1.09 → normalizedPeak = span/scale divides it
+        // out). With maturity redefined as EMA convergence, vehicleScale now learns that
+        // ~9% within ONE drive instead of never, so a hardcoded global nudge HERE would
+        // DOUBLE-correct (~18% → under-classify). Keeping the D-011 table values and
+        // letting the per-CAR scale be the single correction path is the principled fix
+        // (it adapts to a stiff truck vs a soft SUV; a fixed nudge cannot). RE-CONFIRM
+        // severity accuracy on the next labeled drive AFTER calibration has matured.
+        /** PROVISIONAL. Moderate starts at 3.0 m/s² normalized peak (D-011). The ~9%
+         *  per-vehicle hot bias seen on-device is removed by vehicleScale, not here. */
         const val MODERATE_FLOOR = 3.0f
 
         /** PROVISIONAL. Severe starts at 6.0 m/s² normalized peak (D-011). */
@@ -333,16 +362,28 @@ class SeverityClassifier {
         // ============================================================
         //  Type classification votes (03-ARCH type rule) — PROVISIONAL
         // ============================================================
-        /** PROVISIONAL. Rise time below this ⇒ "sharp" ⇒ pothole-leaning. The
-         *  task brief and 03-ARCH put the sharp-rise pothole edge at ~50 ms. */
+        /** Rise time below this ⇒ "sharp leading edge" ⇒ pothole. DATA-FIT (Session 32,
+         *  97 on-device labels): rise_ms is the SINGLE strongest, fully non-circular
+         *  type discriminator — potholes 38/38 had rise < 50 ms (median 8.5 ms), breakers
+         *  median 83 ms (14/16 ≥ 50 ms). The 50 ms split is confirmed near-perfect; the
+         *  rare miss is a low-amplitude breaker, not a threshold error. */
         const val POTHOLE_RISE_MS = 50
 
-        /** PROVISIONAL. Vote magnitude for the dip-leading signal (classic but
-         *  noisy on a single tilt-corrected IMU channel). */
-        const val DIP_LEADING_VOTE = 1.0f
+        /** Vote magnitude for the dip-leading signal. DEMOTED 1.0→0.6 (Session 32 fit):
+         *  dip-leading (which lobe dominates / which came first) is the NOISIER cue on a
+         *  single tilt-corrected IMU channel — on the 97-label set it disagreed with the
+         *  rise-time verdict on several real breakers (strong-rebound / load-dominant
+         *  breakers read dip-leading=true). Making it a SUPPORTING vote under rise-time
+         *  (below) fixes those without hurting the clean cases. */
+        const val DIP_LEADING_VOTE = 0.6f
 
-        /** PROVISIONAL. Vote magnitude for the rise-time sharpness signal. */
-        const val RISE_TIME_VOTE = 0.8f
+        /** Vote magnitude for the rise-time sharpness signal. PROMOTED 0.8→1.2 to be the
+         *  LEAD type vote (Session 32 fit): with rise leading + dip supporting, type
+         *  coverage on ground-truth breaker/pothole rows rose 94%→100% (the UNKNOWN
+         *  "punt" rate that drove the user's "too many UNKNOWN" complaint dropped to 0)
+         *  while commit-accuracy stayed ~96–98%. On the non-circular user-corrected
+         *  subset this converted 3 wrongly-UNKNOWN breakers into correct commits. */
+        const val RISE_TIME_VOTE = 1.2f
 
         /** PROVISIONAL. lateralAsymmetry is the ratio horizPeak/(horizPeak+vertPeak)
          *  (EventDetector). It is NOT a 50/50 split: on a real one-sided pothole the
@@ -366,6 +407,20 @@ class SeverityClassifier {
         /** PROVISIONAL. Strong vote that a detected axle-pair ⇒ full-width
          *  breaker (geometric, trusted more than the amplitude-based hints). */
         const val AXLE_PAIR_VOTE = 1.0f
+
+        /** PROVISIONAL. Reference body-rotation rate (rad/s) that normalizes the
+         *  pitch−roll dominance into a 0..1-ish scale before the vote. F-006 saw a hard
+         *  STEERING turn ramp to ~0.35 rad/s; a breaker's pitch transient is briefer and
+         *  smaller, so ~0.15 rad/s is a reasonable "clearly pitching" reference. Tune
+         *  against raw IMU once the recorder lands. */
+        const val PITCH_REF_RPS = 0.15f
+
+        /** PROVISIONAL. Vote magnitude for the pitch-vs-roll gyro signature. Sized like a
+         *  primary geometric cue (between the amplitude hints and the axle-pair vote): at
+         *  full pitch-dominance it contributes −0.8 toward BREAKER, enough to clear the
+         *  ±0.6 decision margin on its own when the accel hints are ambiguous, but not so
+         *  large it overrides a clear dip-leading + axle-pair pothole reading. */
+        const val PITCH_VOTE_SCALE = 0.8f
 
         /** PROVISIONAL. Required |vote| margin to commit to a type; inside the
          *  band we stay UNKNOWN rather than guess (03-ARCH "ambiguous ⇒ UNKNOWN").

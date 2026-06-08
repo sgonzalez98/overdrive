@@ -157,14 +157,31 @@
                     ev.initCustomEvent('ot-tabs:active-changed', true, true, { id: id });
                     document.dispatchEvent(ev);
                 } catch (e) { /* ignore — older browsers */ }
-                // Scroll content area to the top so users see the start of
-                // the new tab, not whatever scroll offset they were at.
-                var main = document.querySelector('.main-content');
-                if (main && typeof main.scrollTo === 'function') {
-                    main.scrollTo({ top: 0, behavior: 'smooth' });
-                } else {
-                    window.scrollTo(0, 0);
-                }
+                // Reset the scroll offset to the top so users see the start of
+                // the new tab, not whatever offset the previous (taller) tab
+                // was scrolled to.
+                //
+                // The previous code scrolled .main-content, which is a SILENT
+                // NO-OP: in this layout the ancestor chain (html/body/.app-layout/
+                // .main-content) is sized with min-height only — nothing is
+                // height-BOUNDED — so neither .main-content nor .page-body
+                // establishes an internal overflow scroller; the DOCUMENT itself
+                // scrolls. Switching from a tall tab (RoadSense General/Warnings)
+                // to a short one (Data) shrinks the document below the old scroll
+                // offset, and the browser clamps the document scrollTop upward —
+                // which is the "whole tab section shifts up" the user sees.
+                //
+                // Reset the document scroller (window + both documentElement and
+                // body for cross-engine safety on our Chrome 58 floor) AND the
+                // .page-body element defensively, in case a future page makes it
+                // a real overflow container. Instant jump (not smooth) so the
+                // reset lands before the ot-tab-fade-in animation paints, instead
+                // of a smooth scroll racing the fade.
+                try { window.scrollTo(0, 0); } catch (e) { /* ignore */ }
+                if (document.documentElement) document.documentElement.scrollTop = 0;
+                if (document.body) document.body.scrollTop = 0;
+                var pageBody = document.querySelector('.page-body');
+                if (pageBody) pageBody.scrollTop = 0;
             });
         }
     }

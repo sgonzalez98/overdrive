@@ -30,7 +30,22 @@ class DaemonLauncher(
         private const val ACC_SENTRY_DAEMON_LOG = "/data/local/tmp/acc_sentry_daemon.log"
         private const val PROXY_DAEMON_LOG = "/data/local/tmp/proxy_daemon.log"
         private const val TELEGRAM_DAEMON_LOG = "/data/local/tmp/telegrambotdaemon.log"
-        
+
+        // ==================== LOG ROTATION ====================
+        // Hard ceiling for a daemon's stdout-redirect log (the files the UI
+        // surfaces under /data/local/tmp). Bounded by the in-run poller below,
+        // NOT by DaemonLogger's Java rotation (compiled out in release via
+        // DaemonLogConfig) — the shell poller is the only effective mechanism
+        // on-device. Kept as a single coherent constant rather than threaded
+        // from app config: daemon RELAUNCH paths (Telegram bot → cam/acc-sentry)
+        // run under UID 2000 and can't read the app's SharedPreferences, so a
+        // config-driven shell limit would be split-brain across launch sources.
+        const val LOG_MAX_BYTES = 5_242_880L  // 5 MB
+        // Housekeeping cadence. The poller checks once on daemon start (to catch
+        // a log left oversized by a previous run) then every interval while the
+        // daemon is alive. 4h keeps wakeups negligible on a parked car.
+        const val LOG_POLL_INTERVAL_SEC = 14_400  // 4 hours
+
         // Process names for daemon identification
         private const val CAMERA_DAEMON_PROCESS = "byd_cam_daemon"
         private const val SENTRY_DAEMON_PROCESS = "sentry_daemon"
@@ -82,6 +97,89 @@ class DaemonLauncher(
         fun psAwkKillLine(pattern: String): String = psAwkKill(pattern) + "\n"
 
         /**
+         * Build the shell lines for a backgrounded log-size poller that bounds
+         * the daemon's stdout-redirect log (`$LOG_FILE`) *while the daemon is
+         * alive*, not merely at respawn.
+         *
+         * Why a co-process: in every watchdog the daemon is launched via a
+         * BLOCKING call (`app_process ... >> "$LOG_FILE"`, or `wait $PID`) that
+         * does not return until the daemon dies. A size-check at the loop top
+         * therefore fires only once per crash/respawn — useless for a healthy
+         * daemon that stays up for days. This poller runs in parallel for the
+         * lifetime of [daemonPidVar] and truncates on a fixed cadence.
+         *
+         * Truncation uses `: > "$LOG_FILE"` (truncate-in-place), NOT rm+recreate:
+         * the daemon holds an O_APPEND fd to this inode, so an in-place truncate
+         * keeps its writes flowing to the same file. An rm would strand the fd
+         * on the unlinked inode and the log would silently stop updating.
+         *
+         * Sleep cadence: the poller sleeps in 60s increments and only truncates
+         * once the accumulated elapsed time crosses [LOG_POLL_INTERVAL_SEC],
+         * rather than one big `sleep $LOG_POLL_INTERVAL_SEC`. This matters on a
+         * crash-looping daemon: when the outer loop kills the poller subshell
+         * mid-sleep, the in-flight `sleep` child is orphaned to init and runs to
+         * completion — a 60s orphan drains harmlessly, a 4h orphan would pile up
+         * (one per respawn) against the phantom-process cap. The short loop also
+         * lets the poller self-exit within ~60s of the daemon dying (its
+         * `kill -0` check fails on the next tick) instead of lingering up to 4h.
+         * Same 60s-tick shape the zrok edge probe already uses.
+         *
+         * The caller MUST:
+         *   1. background the daemon and capture its pid into [daemonPidVar],
+         *   2. emit these lines (which start a background subshell),
+         *   3. `wait` on the daemon pid,
+         *   4. kill the poller pid (captured into [pollerPidVar]) afterward.
+         *
+         * @param daemonPidVar shell var name holding the daemon PID (no `$`).
+         * @param pollerPidVar shell var name to receive the poller PID (no `$`).
+         */
+        fun logRotateCoprocessLines(daemonPidVar: String, pollerPidVar: String): List<String> = listOf(
+            "  (",
+            // Kill our own in-flight `sleep` child (and only it) when the outer
+            // loop signals us via `kill $pollerPidVar`. Without this the
+            // backgrounded `sleep` is orphaned to init and lives out its full
+            // 60s on every respawn. NOT `kill 0` — that would signal the entire
+            // process group, including the daemon and the watchdog itself.
+            "    trap 'kill \$SLEEP_PID 2>/dev/null; exit 0' TERM",
+            "    LOG_ELAPSED=0",
+            "    while kill -0 \$$daemonPidVar 2>/dev/null; do",
+            "      sleep 60 &",
+            "      SLEEP_PID=\$!",
+            "      wait \$SLEEP_PID",
+            "      LOG_ELAPSED=\$((LOG_ELAPSED + 60))",
+            "      if [ \$LOG_ELAPSED -ge $LOG_POLL_INTERVAL_SEC ]; then",
+            "        LOG_ELAPSED=0",
+            "        if [ -f \"\$LOG_FILE\" ]; then",
+            "          LOG_SZ=\$(stat -c%s \"\$LOG_FILE\" 2>/dev/null || echo 0)",
+            "          if [ \"\$LOG_SZ\" -gt $LOG_MAX_BYTES ]; then",
+            "            : > \"\$LOG_FILE\"",
+            "            echo \"[\$(date)] Log truncated in place (was \${LOG_SZ} bytes)\" >> \"\$LOG_FILE\"",
+            "          fi",
+            "        fi",
+            "      fi",
+            "    done",
+            "  ) &",
+            "  $pollerPidVar=\$!"
+        )
+
+        /**
+         * One-shot size guard for the TOP of a watchdog loop: truncates
+         * `$LOG_FILE` in place if it is already over [LOG_MAX_BYTES] before the
+         * daemon (re)starts. Complements [logRotateCoprocessLines] by catching a
+         * log left oversized by a prior run / SIGKILL before the next launch.
+         * Uses in-place truncate for the same O_APPEND-fd safety reason.
+         */
+        fun logRotateGuardLines(): List<String> = listOf(
+            "  if [ -f \"\$LOG_FILE\" ]; then",
+            "    LOG_SZ=\$(stat -c%s \"\$LOG_FILE\" 2>/dev/null || echo 0)",
+            "    if [ \"\$LOG_SZ\" -gt $LOG_MAX_BYTES ]; then",
+            "      : > \"\$LOG_FILE\"",
+            "      echo \"[\$(date)] Log truncated in place (was \${LOG_SZ} bytes)\" >> \"\$LOG_FILE\"",
+            "    fi",
+            "  fi"
+        )
+
+        /**
          * Build the start_acc_sentry.sh watchdog script body. Static so the
          * Telegram bot daemon can emit the SAME watchdog the UI uses. The
          * acc-sentry watchdog is intentionally UNCAPPED (no MAX_RETRIES, no
@@ -119,12 +217,12 @@ class DaemonLauncher(
                 "sleep 5",
                 "",
                 "while true; do",
-                "  if [ -f \"\$LOG_FILE\" ]; then",
-                "    SIZE=\$(stat -c%s \"\$LOG_FILE\" 2>/dev/null || echo 0)",
-                "    if [ \"\$SIZE\" -gt 2097152 ]; then",
-                "      echo \"[\$(date)] Log rotated...\" > \"\$LOG_FILE\"",
-                "    fi",
-                "  fi",
+                // Catch a log left oversized by a previous run before relaunch.
+                // Real-time bounding during the daemon's life is done by the
+                // poller co-process below (the app_process call blocks until
+                // the daemon dies, so a loop-top check alone fires only once
+                // per respawn). Both truncate in place — see helper docs.
+                *logRotateGuardLines().toTypedArray(),
                 "",
                 "  if [ -f \"\$SENTINEL\" ]; then",
                 "    echo \"[\$(date)] Daemon disabled by user (sentinel file exists). Exiting watchdog.\" >> \"\$LOG_FILE\"",
@@ -132,9 +230,13 @@ class DaemonLauncher(
                 "  fi",
                 "",
                 "  echo \"[\$(date)] Starting Daemon...\" >> \"\$LOG_FILE\"",
-                "  CLASSPATH=\"\$APK_PATH\" app_process \$PROXY_ARGS /system/bin --nice-name=\"\$PROCESS_NAME\" \"\$CLS\" >> \"\$LOG_FILE\" 2>&1",
-                "",
+                // Backgrounded so the log poller can supervise it while it runs.
+                "  CLASSPATH=\"\$APK_PATH\" app_process \$PROXY_ARGS /system/bin --nice-name=\"\$PROCESS_NAME\" \"\$CLS\" >> \"\$LOG_FILE\" 2>&1 &",
+                "  DAEMON_PID=\$!",
+                *logRotateCoprocessLines("DAEMON_PID", "ROTATE_PID").toTypedArray(),
+                "  wait \$DAEMON_PID",
                 "  EXIT_CODE=\$?",
+                "  kill \$ROTATE_PID 2>/dev/null; wait \$ROTATE_PID 2>/dev/null",
                 "  if [ -f \"\$SENTINEL\" ]; then",
                 "    echo \"[\$(date)] Daemon disabled by user (sentinel written during shutdown). Exiting watchdog.\" >> \"\$LOG_FILE\"",
                 "    exit 0",
@@ -168,11 +270,13 @@ class DaemonLauncher(
          * With this watchdog, recovery is seconds.
          */
         fun buildTelegramWatchdogScript(apkPath: String, proxyArgs: String): List<String> {
+            // Backgrounded (trailing &) so the log poller can supervise it
+            // while it runs; $! is captured into DAEMON_PID below.
             val appProcessLine =
                 "  CLASSPATH=$apkPath app_process " +
                 "${proxyArgs}/system/bin " +
                 "--nice-name=$TELEGRAM_DAEMON_PROCESS " +
-                "com.overdrive.app.daemon.TelegramBotDaemon >> \"\$LOG_FILE\" 2>&1"
+                "com.overdrive.app.daemon.TelegramBotDaemon >> \"\$LOG_FILE\" 2>&1 &"
 
             return listOf(
                 "#!/system/bin/sh",
@@ -184,6 +288,9 @@ class DaemonLauncher(
                 "HEALTHY_UPTIME_SEC=300",
                 "",
                 "while true; do",
+                // Catch a log left oversized by a previous run before relaunch;
+                // real-time bounding is the poller co-process below.
+                *logRotateGuardLines().toTypedArray(),
                 "  if [ -f \"\$SENTINEL\" ]; then",
                 "    echo \"[\$(date)] Daemon disabled by user (sentinel file exists). Exiting watchdog.\" >> \"\$LOG_FILE\"",
                 "    exit 0",
@@ -192,8 +299,11 @@ class DaemonLauncher(
                 "  START_EPOCH=\$(awk '{print int(\$1)}' /proc/uptime 2>/dev/null || date +%s)",
                 "",
                 appProcessLine,
-                "",
+                "  DAEMON_PID=\$!",
+                *logRotateCoprocessLines("DAEMON_PID", "ROTATE_PID").toTypedArray(),
+                "  wait \$DAEMON_PID",
                 "  EXIT_CODE=\$?",
+                "  kill \$ROTATE_PID 2>/dev/null; wait \$ROTATE_PID 2>/dev/null",
                 "  END_EPOCH=\$(awk '{print int(\$1)}' /proc/uptime 2>/dev/null || date +%s)",
                 "  UPTIME_SEC=\$((END_EPOCH - START_EPOCH))",
                 "  if [ \$UPTIME_SEC -lt 0 ]; then UPTIME_SEC=0; fi",
@@ -236,13 +346,17 @@ class DaemonLauncher(
                 outputDir: String,
                 proxyArgs: String
         ): List<String> {
+            // Backgrounded (trailing &) so the log poller can supervise it
+            // while it runs; $! is captured into DAEMON_PID below. The cam
+            // daemon is the highest-volume stdout logger, so real-time
+            // bounding of cam_daemon.log (the UI-shown file) matters most here.
             val appProcessLine =
                 "  CLASSPATH=/system/framework/bmmcamera.jar:$apkPath app_process " +
                 "-Djava.library.path=$nativeLibDir:/system/lib64:/vendor/lib64:/product/lib64:/odm/lib64 " +
                 "${proxyArgs}/system/bin " +
                 "--nice-name=$CAMERA_DAEMON_PROCESS " +
                 "com.overdrive.app.daemon.CameraDaemon " +
-                "$outputDir $nativeLibDir >> \"\$LOG_FILE\" 2>&1"
+                "$outputDir $nativeLibDir >> \"\$LOG_FILE\" 2>&1 &"
 
             return listOf(
                 "#!/system/bin/sh",
@@ -252,8 +366,18 @@ class DaemonLauncher(
                 "SENTINEL=\"/data/local/tmp/camera_daemon.disabled\"",
                 "RETRY_COUNT=0",
                 "HEALTHY_UPTIME_SEC=300",
+                // Record THIS supervisor loop's PID so the kill-readers
+                // (CameraDaemon.killWatchdogWrapper, the Telegram stop handlers)
+                // can target the watchdog precisely instead of falling back to
+                // pkill name-matching. $$ is the watchdog shell, NOT $! (which is
+                // the daemon/poller). Cleared by the same rm paths that already
+                // reference cam_watchdog.pid.
+                "echo \$\$ > /data/local/tmp/cam_watchdog.pid",
                 "",
                 "while true; do",
+                // Catch a log left oversized by a previous run before relaunch;
+                // real-time bounding is the poller co-process below.
+                *logRotateGuardLines().toTypedArray(),
                 "  if [ -f \"\$SENTINEL\" ]; then",
                 "    echo \"[\$(date)] Daemon disabled by user (sentinel file exists). Exiting watchdog.\" >> \"\$LOG_FILE\"",
                 "    exit 0",
@@ -262,8 +386,11 @@ class DaemonLauncher(
                 "  START_EPOCH=\$(awk '{print int(\$1)}' /proc/uptime 2>/dev/null || date +%s)",
                 "",
                 appProcessLine,
-                "",
+                "  DAEMON_PID=\$!",
+                *logRotateCoprocessLines("DAEMON_PID", "ROTATE_PID").toTypedArray(),
+                "  wait \$DAEMON_PID",
                 "  EXIT_CODE=\$?",
+                "  kill \$ROTATE_PID 2>/dev/null; wait \$ROTATE_PID 2>/dev/null",
                 "  END_EPOCH=\$(awk '{print int(\$1)}' /proc/uptime 2>/dev/null || date +%s)",
                 "  UPTIME_SEC=\$((END_EPOCH - START_EPOCH))",
                 "  if [ \$UPTIME_SEC -lt 0 ]; then UPTIME_SEC=0; fi",

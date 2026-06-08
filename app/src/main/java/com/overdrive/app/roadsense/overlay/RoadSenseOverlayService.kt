@@ -100,7 +100,19 @@ class RoadSenseOverlayService : Service() {
         startPolling()
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Self-guard the overlay permission here too (not only at the app-side
+        // startIfPermitted call site): the daemon launches us via `am` (startFromDaemon)
+        // on ACC-on + feature-on, which bypasses the app-side canDrawOverlays gate. If
+        // permission isn't granted, addView would throw and leave a zombie foreground
+        // service with no window — so stop cleanly instead.
+        if (!Settings.canDrawOverlays(this)) {
+            Log.w(TAG, "overlay permission not granted — stopping")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        return START_STICKY
+    }
 
     override fun onDestroy() {
         super.onDestroy()
@@ -166,10 +178,7 @@ class RoadSenseOverlayService : Service() {
     private fun removeOverlay() {
         overlayView?.let {
             try {
-                layoutParams?.let { lp ->
-                    getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                        .putInt(PREF_X, lp.x).putInt(PREF_Y, lp.y).apply()
-                }
+                persistPosition()
                 windowManager.removeView(it)
             } catch (_: Exception) {}
         }
@@ -177,6 +186,17 @@ class RoadSenseOverlayService : Service() {
         // Drop the cached themed context so a rebuild (config change) re-resolves
         // it for the new day/night configuration.
         themedCtx = null
+    }
+
+    /** Persist the overlay's current x/y so a drag survives recreation, service
+     *  restarts (ACC cycle), and reboots. Called on drag-end and on teardown. */
+    private fun persistPosition() {
+        layoutParams?.let { lp ->
+            try {
+                getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                    .putInt(PREF_X, lp.x).putInt(PREF_Y, lp.y).apply()
+            } catch (_: Exception) {}
+        }
     }
 
     private fun bindViews() {
@@ -229,7 +249,16 @@ class RoadSenseOverlayService : Service() {
                     true
                 }
                 android.view.MotionEvent.ACTION_UP -> {
-                    if (!dragged) { expanded = !expanded; applyExpanded() }
+                    if (!dragged) {
+                        expanded = !expanded; applyExpanded()
+                    } else {
+                        // Persist the dragged position NOW (not only in removeOverlay):
+                        // the overlay is started/stopped across ACC cycles and can be
+                        // OS-killed, so saving only on teardown loses the position on a
+                        // kill. Mirror StatusOverlayService — save on every drag-end so
+                        // it survives recreation, service restarts, and reboots.
+                        persistPosition()
+                    }
                     true
                 }
                 else -> false
@@ -645,10 +674,24 @@ class RoadSenseOverlayService : Service() {
 
     private fun startForegroundCompat() {
         val n = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, n, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        } else {
-            startForeground(NOTIFICATION_ID, n)
+        // 3-tier + try-catch (StatusOverlayService pattern). SPECIAL_USE is an
+        // API-34 type; passing it on 29-33 throws → onCreate dies before any log.
+        // DATA_SYNC for 29-33, untyped below, plain-startForeground fallback so a
+        // typed mismatch can never silently kill the service.
+        try {
+            when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ->
+                    startForeground(NOTIFICATION_ID, n,
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
+                    startForeground(NOTIFICATION_ID, n,
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                else -> startForeground(NOTIFICATION_ID, n)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "startForeground typed failed (${t.message}); falling back to untyped")
+            try { startForeground(NOTIFICATION_ID, n) }
+            catch (t2: Throwable) { Log.e(TAG, "startForeground untyped ALSO failed: ${t2.message}") }
         }
     }
 
@@ -695,7 +738,8 @@ class RoadSenseOverlayService : Service() {
         // day/night theme via themeColor()/colorDim() (R.color.status_*), matching
         // StatusOverlayService so the overlay tracks the active theme.
 
-        /** Start only if overlay permission is granted (StatusOverlayService gate). */
+        /** Start only if overlay permission is granted (StatusOverlayService gate).
+         *  This is the APP-process path (MainActivity / DaemonKeepaliveService). */
         fun startIfPermitted(context: Context): Boolean {
             if (!Settings.canDrawOverlays(context)) {
                 Log.w(TAG, "no overlay permission — not starting")
@@ -707,6 +751,38 @@ class RoadSenseOverlayService : Service() {
 
         fun stop(context: Context) {
             context.stopService(Intent(context, RoadSenseOverlayService::class.java))
+        }
+
+        /** Fully-qualified component for the daemon's `am` launch. */
+        private const val COMPONENT =
+            "com.overdrive.app/com.overdrive.app.roadsense.overlay.RoadSenseOverlayService"
+
+        /**
+         * Start the overlay FROM THE DAEMON (app_process, shell uid). The daemon's
+         * synthetic Context cannot startForegroundService() an app-process Service (a
+         * silent cross-process no-op — the same constraint RoadSenseImuSidecarService
+         * documents), so use the proven `am start-foreground-service` exec. The daemon
+         * calls this on the ACC-on + feature-on transition (regime → DRIVING/RELAXED), so
+         * the overlay appears as soon as the car is alive and the feature is enabled —
+         * without the user opening MainActivity. The service self-guards the overlay
+         * permission in onStartCommand, so this cleanly no-ops if it isn't granted.
+         * Fire-and-forget (no waitFor) — runs on the daemon tick thread.
+         */
+        fun startFromDaemon() {
+            execAm("am start-foreground-service -n $COMPONENT")
+        }
+
+        /** Stop the overlay FROM THE DAEMON (ACC-off / feature-off). */
+        fun stopFromDaemon() {
+            execAm("am stopservice -n $COMPONENT")
+        }
+
+        private fun execAm(cmd: String) {
+            try {
+                Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
+            } catch (t: Throwable) {
+                Log.w(TAG, "exec failed [$cmd]: ${t.message}")
+            }
         }
     }
 }

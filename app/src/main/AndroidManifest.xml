@@ -260,6 +260,20 @@
              In MainActivity's task (singleTop) so unlock returns straight
              to the user's nav destination. excludeFromRecents keeps the
              keypad off the recents stack. -->
+        <!--
+            configChanges is deliberately MINIMAL (keyboardHidden only) — do NOT
+            add orientation|screenSize here. PinLockActivity has a distinct
+            layout-land/activity_pin_lock.xml (horizontal two-column keypad) and
+            inflates its layout only in onCreate with no onConfigurationChanged
+            override, so it MUST recreate on rotation to pick up the landscape
+            layout on the rotatable BYD Seal panel. Handling the config change
+            in-place would strand the portrait layout in landscape. The ACC-ON
+            self-minimize receiver is registered in onCreate / unregistered in
+            onDestroy, so recreation re-arms it cleanly; the only cost is a
+            sub-millisecond window during destroy->create where an ACC_ON
+            broadcast could be missed (bounded, no security impact — the PIN
+            gate stays armed).
+        -->
         <activity
             android:name="com.overdrive.app.ui.PinLockActivity"
             android:exported="false"
@@ -390,11 +404,17 @@
 
         <!-- RoadSense floating overlay (app-side renderer, D-024). Reads
              daemon-published roadSense.overlayState from UCM and draws the
-             pill/card. specialUse FGS like StatusOverlayService. -->
+             pill/card. specialUse FGS like StatusOverlayService.
+             exported=true so the shell-uid CameraDaemon can launch it via `am`
+             on ACC-on + feature-on (startFromDaemon), the same cross-process path
+             RoadSenseImuSidecarService uses — otherwise the overlay only appears
+             after the user opens MainActivity. The service self-guards the overlay
+             permission in onStartCommand, so an am launch without it cleanly no-ops. -->
         <service
             android:name="com.overdrive.app.roadsense.overlay.RoadSenseOverlayService"
-            android:foregroundServiceType="specialUse"
-            android:exported="false" />
+            android:foregroundServiceType="specialUse|dataSync"
+            android:exported="true" />
+
 
         <!-- Status Overlay Service - Floating recording/trip status indicator -->
         <service

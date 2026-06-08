@@ -81,7 +81,9 @@
             android:background="@drawable/roadsense_pill_bg"
             android:alpha="0.5" />
 
-        <!-- header: icon + title + calibration dot -->
+        <!-- header: icon + title (own row; the calibration signal moved to the line
+             below so a long cal label can never squeeze the title into a mid-word
+             wrap like "ROADS / ENSE") -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -106,26 +108,44 @@
                 android:textStyle="bold"
                 android:fontFamily="monospace"
                 android:letterSpacing="0.10"
-                android:textAllCaps="true" />
+                android:textAllCaps="true"
+                android:maxLines="1"
+                android:singleLine="true"
+                android:ellipsize="end" />
+        </LinearLayout>
+
+        <!-- calibration signal: own sub-line under the title (dot aligned under the
+             title text via the 26dp start margin = 18dp icon + 8dp icon margin) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
             <ImageView
                 android:id="@+id/cardCalDot"
                 android:layout_width="14dp"
                 android:layout_height="14dp"
+                android:layout_marginStart="26dp"
                 android:src="@drawable/roadsense_cal_dot"
                 android:contentDescription="@string/roadsense_cd_cal_level" />
 
             <TextView
                 android:id="@+id/cardCalLabel"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
+                android:layout_weight="1"
                 android:layout_marginStart="6dp"
                 android:text="@string/roadsense_cal_learning"
                 android:textColor="#99FFFFFF"
                 android:textSize="9sp"
                 android:fontFamily="monospace"
                 android:textAllCaps="true"
-                android:letterSpacing="0.06" />
+                android:letterSpacing="0.06"
+                android:maxLines="1"
+                android:singleLine="true"
+                android:ellipsize="end" />
         </LinearLayout>
 
         <!-- ===== HERO: bearing GAUGE + distance ===== -->

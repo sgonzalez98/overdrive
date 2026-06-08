@@ -110,8 +110,12 @@ body {
     background: var(--bg-base);
     color: var(--text-primary);
     line-height: 1.5;
+    /* Static vh as the floor for any engine that runs before theme.js sets
+       --vh (and as the no-JS fallback); the --vh calc is the live value kept
+       fresh across rotation by theme.js Step 0. Source order means the calc
+       wins wherever var() is supported (Chrome 49+ / our Chrome 58 floor). */
     min-height: 100vh;
-    min-height: 100dvh;
+    min-height: calc(var(--vh, 1vh) * 100);
     overflow-x: hidden;
     -webkit-font-smoothing: antialiased;
 }
@@ -123,7 +127,7 @@ input, select { font-family: inherit; }
 .app-layout {
     display: flex;
     min-height: 100vh;
-    min-height: 100dvh;
+    min-height: calc(var(--vh, 1vh) * 100);
 }
 
 /* === SIDEBAR === */
@@ -453,29 +457,22 @@ input, select { font-family: inherit; }
     flex: 1;
     margin-left: var(--sidebar-width);
     min-height: 100vh;
-    min-height: 100dvh;
+    min-height: calc(var(--vh, 1vh) * 100);
     display: flex;
     flex-direction: column;
 }
 
-/* === PWA FIX === */
-/* Android PWA makes the height too big with both lvh and dvh.
-   Rotating the page to landscape and portrait fixes it until
-   it is loaded again if not set to svh. */
-@media (display-mode: standalone) {
-    body, .app-layout, .main-content {
-        min-height: 100svh;
-    }
-}
-
-/* iOS PWA makes the height too small with svh */
-@supports (-webkit-touch-callout: none) {
-    @media (display-mode: standalone) {
-        body, .app-layout, .main-content {
-            min-height: 100lvh;
-        }
-    }
-}
+/* === VIEWPORT HEIGHT / ORIENTATION ===
+   The old @media (display-mode: standalone) svh/lvh override lived here. It
+   was a workaround for "Android PWA makes the height too big with both lvh
+   and dvh; rotating to landscape and back fixes it" — i.e. the stale-vh
+   rotation bug. That dance is now obsolete: theme.js (Step 0) publishes a
+   live --vh on load AND on every resize / orientationchange, so the
+   `min-height: calc(var(--vh,1vh)*100)` rules above always reflect the
+   CURRENT viewport in standalone PWA, in-app WebView, and plain browser
+   alike — without the engine-specific unit guessing that the svh/lvh
+   override depended on. Keeping the override would re-introduce a stale,
+   competing value on rotation, so it is intentionally removed. */
 
 /* === PAGE HEADER === */
 .page-header {
@@ -1213,6 +1210,14 @@ select.md-input ~ .md-label {
 }
 .btn-secondary:hover { border-color: var(--brand-primary); color: var(--brand-primary); }
 .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Selected state for a choice group (e.g. blind-spot corner) — M3 tonal-primary
+   fill + primary border so the saved option reads as "currently active". */
+.btn-secondary.active {
+    background: rgba(0, 212, 170, 0.16);
+    border-color: var(--brand-primary);
+    color: var(--brand-primary);
+    font-weight: 600;
+}
 
 @media (max-width: 540px) {
     .byd-action-row .btn { flex: 1 1 100%; }
@@ -1631,8 +1636,14 @@ select.md-input ~ .md-label {
     position: relative;
     display: flex;
     flex-direction: column;
+    /* Live view is a FULLSCREEN flex root (video fills it, no page scroll),
+       so it needs a rigid height — which is exactly what makes the stale-vh
+       rotation bug bite hardest here. Drive it off the live --vh from
+       theme.js so a landscape→portrait flip recomputes instead of stranding
+       the video at the old landscape height (the bottom car-selector strip
+       was getting clipped). 100vh is the pre-theme.js fallback. */
     height: 100vh;
-    height: 100dvh;
+    height: calc(var(--vh, 1vh) * 100);
 }
 
 /* Live view mobile header - visible with background */

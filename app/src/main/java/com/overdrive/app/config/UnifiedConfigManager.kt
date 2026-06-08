@@ -186,6 +186,9 @@ object UnifiedConfigManager {
         val proximityGuard = config.optJSONObject("proximityGuard") ?: JSONObject().also {
             config.put("proximityGuard", it)
         }
+        val blindspot = config.optJSONObject("blindspot") ?: JSONObject().also {
+            config.put("blindspot", it)
+        }
         
         // Surveillance defaults
         if (!surveillance.has("minObjectSize")) surveillance.put("minObjectSize", 0.08)
@@ -261,7 +264,22 @@ object UnifiedConfigManager {
         if (!proximityGuard.has("triggerLevel")) proximityGuard.put("triggerLevel", "RED")
         if (!proximityGuard.has("preRecordSeconds")) proximityGuard.put("preRecordSeconds", 5)
         if (!proximityGuard.has("postRecordSeconds")) proximityGuard.put("postRecordSeconds", 10)
-        
+
+        // Blind Spot overlay defaults. `enabled` gates the indicator-triggered
+        // native overlay; the 6 numerics are the dialed-in stitch calibration
+        // for this car (rear+side panorama). See BlindSpotOverlayService.
+        if (!blindspot.has("enabled")) blindspot.put("enabled", false)
+        if (!blindspot.has("rearFov")) blindspot.put("rearFov", 1.66)
+        if (!blindspot.has("sideFov")) blindspot.put("sideFov", 1.98)
+        if (!blindspot.has("yaw")) blindspot.put("yaw", 1.23)
+        if (!blindspot.has("roll")) blindspot.put("roll", 0.25)
+        if (!blindspot.has("pitch")) blindspot.put("pitch", -0.275)
+        if (!blindspot.has("feather")) blindspot.put("feather", 0.38)
+        // Additional opaque stitch-tuning scalars; defaults below = no change.
+        if (!blindspot.has("projExp")) blindspot.put("projExp", 1.0)
+        if (!blindspot.has("rearRoll")) blindspot.put("rearRoll", 0.0)
+        if (!blindspot.has("rearPitch")) blindspot.put("rearPitch", 0.0)
+
         // Telemetry Overlay defaults.
         //
         // Schema:
@@ -586,6 +604,14 @@ object UnifiedConfigManager {
     @JvmStatic
     fun getStreaming(): JSONObject {
         return loadConfig().optJSONObject("streaming") ?: JSONObject()
+    }
+
+    /** Blind Spot overlay config section: {enabled, rearFov, sideFov, yaw, roll,
+     *  pitch, feather}. mtime-gated loadConfig; callers needing cross-UID
+     *  freshness (app reading a daemon/web write) should forceReload() first. */
+    @JvmStatic
+    fun getBlindSpot(): JSONObject {
+        return loadConfig().optJSONObject("blindspot") ?: JSONObject()
     }
 
     /**

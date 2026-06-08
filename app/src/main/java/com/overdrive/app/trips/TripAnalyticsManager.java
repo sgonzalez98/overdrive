@@ -352,24 +352,33 @@ public class TripAnalyticsManager {
         String telemetryPath = null;
 
         // 1. Stop recorder, get samples
+        List<TelemetrySample> samples = null;
         if (recorder != null) {
             telemetryPath = recorder.stopRecording();
-            List<TelemetrySample> samples = recorder.getSamplesForScoring();
+            samples = recorder.getSamplesForScoring();
+        }
 
-            // 2. Compute scores
-            if (scoreEngine != null && samples != null && !samples.isEmpty()) {
-                scoreEngine.computeSummary(trip, samples);
+        // 2. Resolve trip energy (kWh) BEFORE scoring.
+        //    The efficiency axis scores against a single kWh/km band, so
+        //    trip.energyPerKm must be populated first — either from direct BMS
+        //    kWh readings or, when those are absent (the common case), estimated
+        //    from the SoC delta via the SohEstimator's calibrated capacity. This
+        //    ordering is the fix for efficiency/consistency scoring on a
+        //    different unit axis than stored history. Used again below for cost.
+        double energyUsed = resolveTripEnergyKwh(trip);
+        if (energyUsed > 0 && trip.distanceKm > 0) {
+            trip.energyPerKm = energyUsed / trip.distanceKm;
+        }
 
-                // Compute consistency using recent trips from DB
-                if (database != null) {
-                    List<TripRecord> recentTrips = database.getTrips(30, 10);
-                    // Use energyPerKm when available, fall back to efficiencySocPerKm
-                    double currentEff = trip.energyPerKm > 0 ? trip.energyPerKm : trip.efficiencySocPerKm;
-                    trip.consistencyScore = scoreEngine.computeConsistency(currentEff, recentTrips);
-                }
-            }
+        // 3. Compute scores — all five DNA axes in a single pass. Consistency is
+        //    now an intra-trip behavioral-uniformity metric computed inside
+        //    computeSummary (no DB lookup, no unit confusion).
+        if (scoreEngine != null && samples != null && !samples.isEmpty()) {
+            scoreEngine.computeSummary(trip, samples);
+        }
 
-            // 3. Populate recorder stats
+        // 4. Populate recorder stats (recorder is authoritative for avg/max speed)
+        if (recorder != null) {
             trip.maxSpeedKmh = recorder.getMaxSpeedKmh();
             trip.avgSpeedKmh = recorder.getAvgSpeedKmh();
         }
@@ -395,40 +404,8 @@ public class TripAnalyticsManager {
             trip.electricityRate = config.getElectricityRate();
             trip.currency = config.getCurrency();
 
-            double energyUsed = trip.getEnergyUsedKwh();
-
-            // If BMS kWh readings weren't available, estimate from SoC delta
-            // using the SohEstimator's calibrated nominal capacity (from pack voltage).
-            if (energyUsed <= 0 && trip.socStart > 0 && trip.socEnd > 0 && trip.socStart > trip.socEnd) {
-                double nominalKwh = 0;
-                try {
-                    com.overdrive.app.abrp.SohEstimator soh =
-                        com.overdrive.app.monitor.SocHistoryDatabase.getInstance().getSohEstimator();
-                    if (soh != null && soh.getNominalCapacityKwh() > 0) {
-                        nominalKwh = soh.getNominalCapacityKwh();
-                        // BYD packs are LFP (Blade) and hold ≥98% SOH for the
-                        // first ~1500 cycles, so 100% is a fair default until
-                        // a live estimate seeds. The earlier 95% guess
-                        // would have under-reported energy/cost on fresh
-                        // packs. Note in the log when SOH is unseeded so a
-                        // wrong number can be traced back to this branch.
-                        boolean hasSoh = soh.hasEstimate();
-                        double sohPercent = hasSoh ? soh.getCurrentSoh() : 100.0;
-                        double usableKwh = nominalKwh * (sohPercent / 100.0);
-                        energyUsed = ((trip.socStart - trip.socEnd) / 100.0) * usableKwh;
-                        logger.info(String.format("Energy estimated from SoC: %.1f%% → %.1f%% = %.2f kWh (nominal=%.1f, SOH=%.1f%%%s)",
-                                trip.socStart, trip.socEnd, energyUsed, nominalKwh, sohPercent,
-                                hasSoh ? "" : ", default — no SOH seeded yet (LFP)"));
-                    }
-                } catch (Exception e) {
-                    logger.warn("SohEstimator not available for energy estimation: " + e.getMessage());
-                }
-            }
-
-            // Store computed energy for the database (so future reads don't need to re-estimate)
-            if (energyUsed > 0 && trip.distanceKm > 0) {
-                trip.energyPerKm = energyUsed / trip.distanceKm;
-            }
+            // energyUsed (kWh) and trip.energyPerKm were already resolved above,
+            // before scoring — reuse them here for the cost math.
 
             // Electric leg
             double electricCost = 0;
@@ -547,6 +524,50 @@ public class TripAnalyticsManager {
         if (rangeEstimator != null) {
             rangeEstimator.onTripCompleted(trip);
         }
+    }
+
+    /**
+     * Resolve the trip's electrical energy use in kWh.
+     *
+     * <p>Prefers direct BMS kWh readings ({@link TripRecord#getEnergyUsedKwh()}).
+     * When those are absent — the common case on trims that don't expose a clean
+     * BMS energy channel — estimate from the SoC delta using the SohEstimator's
+     * calibrated nominal pack capacity. Returns 0 when neither source is usable
+     * (e.g. SoC flat or rose, no capacity estimate).
+     *
+     * <p>Called BEFORE scoring so the efficiency axis and the cost math both see
+     * the same kWh figure on a single unit axis.
+     */
+    private double resolveTripEnergyKwh(TripRecord trip) {
+        double energyUsed = trip.getEnergyUsedKwh();
+        if (energyUsed > 0) {
+            return energyUsed;
+        }
+
+        // Estimate from SoC delta via SohEstimator's calibrated nominal capacity.
+        if (trip.socStart > 0 && trip.socEnd > 0 && trip.socStart > trip.socEnd) {
+            try {
+                com.overdrive.app.abrp.SohEstimator soh =
+                    com.overdrive.app.monitor.SocHistoryDatabase.getInstance().getSohEstimator();
+                if (soh != null && soh.getNominalCapacityKwh() > 0) {
+                    double nominalKwh = soh.getNominalCapacityKwh();
+                    // BYD packs are LFP (Blade) and hold ≥98% SOH for the first
+                    // ~1500 cycles, so 100% is a fair default until a live
+                    // estimate seeds. Log when SOH is unseeded so a wrong number
+                    // can be traced back to this branch.
+                    boolean hasSoh = soh.hasEstimate();
+                    double sohPercent = hasSoh ? soh.getCurrentSoh() : 100.0;
+                    double usableKwh = nominalKwh * (sohPercent / 100.0);
+                    energyUsed = ((trip.socStart - trip.socEnd) / 100.0) * usableKwh;
+                    logger.info(String.format("Energy estimated from SoC: %.1f%% → %.1f%% = %.2f kWh (nominal=%.1f, SOH=%.1f%%%s)",
+                            trip.socStart, trip.socEnd, energyUsed, nominalKwh, sohPercent,
+                            hasSoh ? "" : ", default — no SOH seeded yet (LFP)"));
+                }
+            } catch (Exception e) {
+                logger.warn("SohEstimator not available for energy estimation: " + e.getMessage());
+            }
+        }
+        return energyUsed;
     }
 
     /**

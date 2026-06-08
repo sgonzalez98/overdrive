@@ -982,6 +982,26 @@ class WebViewFragment : Fragment() {
             }
         }
 
+        /**
+         * Arm/disarm the NATIVE blind-spot lane to match the just-saved
+         * blindspot.enabled (or debugPreview) flag, without waiting for the next
+         * activity onResume. The RoadSense web tab calls this after toggling so the
+         * daemon reacts instantly. The visual is a daemon-owned SurfaceControl layer
+         * (NO app-process overlay → NO SYSTEM_ALERT_WINDOW permission needed); this
+         * just POSTs the daemon control surface via BlindSpotControl.
+         */
+        @android.webkit.JavascriptInterface
+        fun syncBlindSpotOverlay(): String {
+            try {
+                val ctx = context ?: return "no_context"
+                com.overdrive.app.roadsense.overlay.BlindSpotControl.sync(ctx)
+                return "ok"
+            } catch (e: Exception) {
+                android.util.Log.w("WebViewFragment", "syncBlindSpotOverlay bridge failed: ${e.message}")
+                return "error"
+            }
+        }
+
         @android.webkit.JavascriptInterface
         fun getAppTheme(): String {
             // Source-of-truth ordering — try the strongest signal first:

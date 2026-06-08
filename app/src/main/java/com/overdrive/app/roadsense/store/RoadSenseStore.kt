@@ -1,10 +1,13 @@
 package com.overdrive.app.roadsense.store
 
 import com.overdrive.app.logging.DaemonLogger
+import com.overdrive.app.roadsense.detect.ALTITUDE_UNKNOWN
 import com.overdrive.app.roadsense.detect.HazardType
 import com.overdrive.app.roadsense.detect.RoadSenseHazard
 import com.overdrive.app.roadsense.detect.Severity
 import com.overdrive.app.roadsense.detect.StoredHazard
+import com.overdrive.app.roadsense.detect.altitudeKnown
+import com.overdrive.app.roadsense.detect.altitudeMatches
 import java.io.File
 import java.sql.Connection
 import java.sql.DriverManager
@@ -377,6 +380,7 @@ class RoadSenseStore private constructor() {
                     "confidence DOUBLE," +
                     "speed_kmh DOUBLE," +
                     "a_vert_peak DOUBLE," +
+                    "altitude DOUBLE," +   // NULL = level unknown (fail-open); see ALTITUDE_MATCH_M
                     "observations INT DEFAULT 1," +
                     "status INT DEFAULT 0," +
                     "human_verified INT DEFAULT 0," +
@@ -387,13 +391,25 @@ class RoadSenseStore private constructor() {
                     ");"
             )
 
+            // Migration for stores created before altitude disambiguation: add the
+            // column NULL-defaulted so every pre-existing hazard reads as "level
+            // unknown" and stays fail-open (never suppressed). Idempotent.
+            stmt.execute("ALTER TABLE $TABLE ADD COLUMN IF NOT EXISTS altitude DOUBLE;")
+
             // Single-column tile index for the approach query (WHERE tile IN ...).
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_rs_tile ON $TABLE(tile);")
 
             // Compound (tile, updated_ms) index for delta-sync (R-CRD-5): the
-            // upload/download cursor queries are exactly WHERE tile IN (...)
+            // approach/download cursor queries are exactly WHERE tile IN (...)
             // AND updated_ms > cursor, mirroring the D1 schema's index.
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_rs_tile_updated ON $TABLE(tile, updated_ms);")
+
+            // Compound (source, updated_ms) index for the UPLOAD scan (queryForUpload):
+            // WHERE source = ? AND updated_ms > ? ORDER BY updated_ms — this query is
+            // tile-LESS, so neither tile index above can serve it and it would full-scan
+            // the table every sync (audit storage LOW). Leading on source (the equality)
+            // then updated_ms (the range + the ORDER BY) is the exact access path.
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_rs_source_updated ON $TABLE(source, updated_ms);")
 
             logger.info("$TABLE table + indices ready")
         }
@@ -443,7 +459,7 @@ class RoadSenseStore private constructor() {
                 // A merge keeps the EXISTING row's source (the UPDATE never touches
                 // it), so a local re-detection over a downloaded CLOUD row folds in
                 // without demoting it to LOCAL / minting an uploadable duplicate.
-                val existing = findMergeTarget(neighbours, typeOrdinal, hazard.lat, hazard.lng, nowMs)
+                val existing = findMergeTarget(neighbours, typeOrdinal, hazard.lat, hazard.lng, hazard.altitudeM, nowMs)
                 if (existing != null) {
                     return mergeInto(existing, hazard, nowMs)
                 }
@@ -452,9 +468,9 @@ class RoadSenseStore private constructor() {
                 val id = UUID.randomUUID().toString()
                 val sql =
                     "INSERT INTO $TABLE (id, lat, lng, tile, type, severity, heading, confidence, " +
-                        "speed_kmh, a_vert_peak, observations, status, human_verified, source, " +
+                        "speed_kmh, a_vert_peak, altitude, observations, status, human_verified, source, " +
                         "device_id, created_ms, updated_ms) " +
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
                 connection!!.prepareStatement(sql).use { ps ->
                     ps.setString(1, id)
                     ps.setDouble(2, hazard.lat)
@@ -466,13 +482,15 @@ class RoadSenseStore private constructor() {
                     ps.setDouble(8, hazard.confidence.toDouble())
                     ps.setDouble(9, hazard.speedKmh.toDouble())
                     ps.setDouble(10, hazard.aVertPeak.toDouble())
-                    ps.setInt(11, 1) // observations
-                    ps.setInt(12, STATUS_CANDIDATE)
-                    ps.setInt(13, 0) // human_verified
-                    ps.setInt(14, source)
-                    ps.setNull(15, java.sql.Types.VARCHAR) // device_id: stamped by sync only
-                    ps.setLong(16, nowMs)
+                    if (altitudeKnown(hazard.altitudeM)) ps.setDouble(11, hazard.altitudeM)
+                    else ps.setNull(11, java.sql.Types.DOUBLE)   // NULL = level unknown
+                    ps.setInt(12, 1) // observations
+                    ps.setInt(13, STATUS_CANDIDATE)
+                    ps.setInt(14, 0) // human_verified
+                    ps.setInt(15, source)
+                    ps.setNull(16, java.sql.Types.VARCHAR) // device_id: stamped by sync only
                     ps.setLong(17, nowMs)
+                    ps.setLong(18, nowMs)
                     ps.executeUpdate()
                 }
                 logger.debug("Inserted candidate $id type=${hazard.type} sev=${hazard.severity.level} conf=${hazard.confidence}")
@@ -516,12 +534,13 @@ class RoadSenseStore private constructor() {
         typeOrdinal: Int,
         lat: Double,
         lng: Double,
+        altitudeM: Double,
         nowMs: Long,
     ): MergeTarget? {
         val placeholders = tiles.joinToString(",") { "?" }
         val sql =
             "SELECT id, lat, lng, observations, confidence, severity, a_vert_peak, " +
-                "human_verified, heading, updated_ms FROM $TABLE WHERE type = ? AND tile IN ($placeholders);"
+                "human_verified, heading, altitude, updated_ms FROM $TABLE WHERE type = ? AND tile IN ($placeholders);"
         connection!!.prepareStatement(sql).use { ps ->
             ps.setInt(1, typeOrdinal)
             tiles.forEachIndexed { i, t -> ps.setLong(2 + i, t) }
@@ -535,6 +554,13 @@ class RoadSenseStore private constructor() {
                     val rLng = rs.getDouble("lng")
                     val d = GeoMath.haversineMeters(lat, lng, rLat, rLng)
                     if (d > bestDist) continue
+                    // Altitude gate (flyover vs surface road below): don't merge two
+                    // same-tile/same-type detections at clearly different levels. Fail-
+                    // open — NULL/unknown on either side, or close altitude, still
+                    // merges; only a confident > ALTITUDE_MATCH_M delta blocks it.
+                    val rAltRaw = rs.getDouble("altitude")
+                    val rAlt = if (rs.wasNull()) ALTITUDE_UNKNOWN else rAltRaw
+                    if (!altitudeMatches(altitudeM, rAlt)) continue
                     // Two-tier gate: within the tight radius we always merge (same-
                     // pass GPS jitter). In the 4–8 m loose band we ONLY merge if this
                     // row is old enough to be a separate pass — otherwise it's a
@@ -705,13 +731,14 @@ class RoadSenseStore private constructor() {
 
     /**
      * Sync-layer read [D-016]: high-confidence rows updated since a cursor, for
-     * the upload batch. Uses the (tile, updated_ms) index path via updated_ms.
-     * The HIGH upload bar (default ~0.7) is the caller's `minConfidence`; this
-     * is independent of the personal warn threshold.
+     * the upload batch. This is a tile-LESS scan (all eligible rows regardless of
+     * tile), so it is served by the dedicated idx_rs_source_updated(source,
+     * updated_ms) index — NOT the tile indexes, which can't help a query with no
+     * tile predicate. The HIGH upload bar (default ~0.7) is the caller's
+     * `minConfidence`; this is independent of the personal warn threshold.
      *
-     * Note: this returns ALL eligible rows regardless of tile (it is the upload
-     * scan, not the approach query); the index still serves the updated_ms
-     * range. Returns rows with confidence ≥ minConfidence AND updated_ms > since.
+     * Returns rows with source = LOCAL AND confidence ≥ minConfidence AND
+     * updated_ms > since, ordered by updated_ms so the caller can advance its cursor.
      */
     fun queryForUpload(minConfidence: Double, sinceMs: Long): List<StoredHazard> {
         synchronized(lock) {
@@ -759,6 +786,9 @@ class RoadSenseStore private constructor() {
                         speedKmh = rs.getDouble("speed_kmh").toFloat(),
                         aVertPeak = rs.getDouble("a_vert_peak").toFloat(),
                         tMs = createdMs,
+                        // NULL altitude (old rows / no-fix) → unknown sentinel (fail-open).
+                        // getDouble then wasNull immediately, before any other column read.
+                        altitudeM = rs.getDouble("altitude").let { if (rs.wasNull()) ALTITUDE_UNKNOWN else it },
                     ),
                     status = rs.getInt("status"),
                     observations = rs.getInt("observations"),

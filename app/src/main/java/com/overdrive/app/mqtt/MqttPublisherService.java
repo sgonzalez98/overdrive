@@ -54,8 +54,13 @@ public class MqttPublisherService implements MqttCallback {
     private volatile int consecutiveFailures = 0;
     private volatile String lastError = null;
 
-    // Change detection (report-by-exception) + Home Assistant discovery state
+    // Change detection (report-by-exception) + Home Assistant discovery state.
+    // TelemetryDiffer is documented single-thread-owned: ALL access to it must
+    // happen on the scheduler thread inside the synchronized publishTelemetry().
+    // The Paho callback thread (messageArrived) must NOT touch it directly —
+    // it sets forceFullResend instead, and the publish thread performs reset().
     private final TelemetryDiffer differ = new TelemetryDiffer();
+    private volatile boolean forceFullResend = false;
     private volatile boolean discoveryAnnounced = false;
     private volatile MqttCommandRouter commandRouter;
     private volatile String haVin = null;
@@ -297,10 +302,13 @@ public class MqttPublisherService implements MqttCallback {
             }
         }
 
-        // Clean up JVM-level SOCKS proxy properties that may have been set for
-        // WebSocket connections. These are global and would affect other connections.
-        System.clearProperty("socksProxyHost");
-        System.clearProperty("socksProxyPort");
+        // NOTE: the JVM-level socksProxyHost/Port properties are process-global and
+        // shared by every connection (all route through the same sing-box). We must
+        // NOT clear them here — a sibling WS+proxy connection may still be relying on
+        // them, and one connection's disconnect would silently break the others'
+        // sockets. connect() re-asserts or clears them authoritatively from the
+        // current (global) proxy state on each (re)connect, and the manager clears
+        // them once on full shutdown (stopAll). See MqttConnectionManager.stopAll().
 
         logger.info("Disconnected from " + config.name + " (" + config.getBrokerUri() + ")");
     }
@@ -327,6 +335,15 @@ public class MqttPublisherService implements MqttCallback {
      */
     public synchronized boolean publishTelemetry(JSONObject snapshot) {
         if (!running) return false;
+
+        // Apply a deferred reset requested by the Paho callback thread (HA birth).
+        // Done here, on the publish thread, so the differ's HashMap is only ever
+        // mutated by one thread — avoids the ConcurrentModificationException /
+        // lost-update race that a direct differ.reset() in messageArrived caused.
+        if (forceFullResend) {
+            forceFullResend = false;
+            differ.reset();
+        }
 
         long now = System.currentTimeMillis();
         long minMs = Math.max(1, config.minIntervalSeconds) * 1000L;
@@ -498,7 +515,9 @@ public class MqttPublisherService implements MqttCallback {
             if ("online".equalsIgnoreCase(payload)) {
                 logger.info("Home Assistant birth received — re-announcing discovery");
                 discoveryAnnounced = false;
-                differ.reset();
+                // Defer the differ.reset() to the publish thread — do NOT touch
+                // the differ from this Paho callback thread (it isn't thread-safe).
+                forceFullResend = true;
             }
             return;
         }
@@ -512,16 +531,22 @@ public class MqttPublisherService implements MqttCallback {
             if (slash >= 0) { key = inner.substring(0, slash); sub = inner.substring(slash + 1); }
             else { key = inner; sub = null; }
             String payload = new String(message.getPayload());
-            ensureCommandRouter();
-            commandRouter.handle(key, sub, payload);
+            // ensureCommandRouter() is synchronized and returns the (volatile)
+            // router so we don't race on the field read against disconnect().
+            MqttCommandRouter router = ensureCommandRouter();
+            if (router != null) router.handle(key, sub, payload);
         }
     }
 
-    private synchronized void ensureCommandRouter() {
+    private synchronized MqttCommandRouter ensureCommandRouter() {
+        // Don't resurrect a router for a connection that's shutting down — a late
+        // inbound message racing disconnect() would otherwise leak a new executor.
+        if (!running) return null;
         if (commandRouter == null) {
             commandRouter = new MqttCommandRouter(config.id,
                     (k, v) -> publishString(config.topic + "/" + k, v, true, config.qos));
         }
+        return commandRouter;
     }
 
     @Override

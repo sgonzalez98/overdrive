@@ -56,7 +56,55 @@ public class GpuSurveillancePipeline {
     // components committed or neither.
     private final java.util.concurrent.locks.ReentrantLock streamLifecycleLock =
         new java.util.concurrent.locks.ReentrantLock();
-    
+
+    // ── Dedicated blind-spot lane (views 7/8) — NATIVE SurfaceControl path ────
+    // A SECOND, independent GpuStreamScaler fed from the same camera texture via
+    // PanoramicCameraGpu's PASS 1C render-loop fan-out, rendering the libod view
+    // 7/8 stitch STRAIGHT onto a daemon-owned SurfaceControl layer on screen.
+    // NO encoder, NO WebSocket, NO MediaCodec decoder — GPU → screen, all in the
+    // daemon (UID 2000). Validated on this firmware by BsSurfaceControlSpike
+    // (non-fullscreen + GL-fed + setGeometry-positioned SC layer composites).
+    // Buffer is BS_WIDTH×BS_HEIGHT; on-screen rect comes from config (setGeometry),
+    // since SurfaceControl layers have no InputChannel (not finger-draggable).
+    private com.overdrive.app.streaming.GpuStreamScaler bsScaler;
+    private com.overdrive.app.surveillance.BsNativeLayer bsLayer;
+    private volatile boolean blindSpotEnabled = false;
+    // True while an enableBlindSpot() is in flight (set under bsLifecycleLock
+    // before entering enableBlindSpotInternal, cleared when it returns). The
+    // internal init releases bsLifecycleLock around its GL-init wait; this flag
+    // lets a second caller that reacquires the lock during that window detect
+    // an in-flight enable that has not yet set blindSpotEnabled, and bail
+    // instead of double-allocating the lane.
+    private boolean bsEnabling = false;
+    private volatile int bsViewMode = 7;   // 7=Rear+Left, 8=Right+Rear
+    // On-screen geometry for the SC layer (panel pixels). Read from config on
+    // enable; defaults to a top-right card. setBsGeometry updates it live.
+    // BS-GEO-3: single atomic rect [x,y,w,h] (panel px) so a reader never sees a
+    // torn quad (e.g. new x + old w) when the API thread updates it mid-read on
+    // the turn/rotation thread. Writers build the 4-tuple locally + assign the
+    // reference once; readers snapshot the reference once. -1s = unresolved.
+    private volatile int[] bsGeomRect = new int[]{-1, -1, -1, -1};
+    // Orientation-safe geometry preset: card size (% panel width) + corner. The px
+    // rect is RECOMPUTED from these against the live panel on enable + rotation, so
+    // position/size stay correct across portrait↔landscape. <=0 sizePct = unset.
+    private volatile int bsSizePct = 40;
+    private volatile String bsCorner = "tr";
+    private volatile int bsLastPanelW = -1, bsLastPanelH = -1;  // for rotation detect
+    // Whether the layer is currently shown (turn-triggered / debug-preview gates it).
+    private volatile boolean bsLayerVisible = false;
+    // Daemon-side turn-trigger: reads the turn lamps (daemon owns the BYD light
+    // HAL) + the blindspot.debugPreview flag on a ~250ms loop while the lane is
+    // enabled, and shows/hides + side-switches the SurfaceControl layer. Replaces
+    // the deleted app-process BlindSpotOverlayService tick (no app process needed).
+    private java.util.concurrent.ScheduledExecutorService bsTurnExec;
+    private long bsLastTurnOnMs = 0L;
+    private static final long BS_TURN_POLL_MS = 250L;
+    private static final long BS_OFF_DEBOUNCE_MS = 800L;  // ride through blink off-phase
+    private final java.util.concurrent.locks.ReentrantLock bsLifecycleLock =
+        new java.util.concurrent.locks.ReentrantLock();
+    private static final int BS_WIDTH = 1280;
+    private static final int BS_HEIGHT = 960;
+
     // Telemetry overlay
     private TelemetryDataCollector telemetryCollector;
     private volatile boolean overlayEnabledConfig = false;
@@ -2000,6 +2048,20 @@ public class GpuSurveillancePipeline {
                 logger.warn("stop: disableStreaming failed: " + t.getMessage());
             }
 
+            // Disable the dedicated blind-spot lane too — its scaler+encoder
+            // hold EGL surfaces on the same camera GL context.
+            // Always call disableBlindSpot() rather than gating on blindSpotEnabled
+            // here: this is an unsynchronized read of blindSpotEnabled, and a
+            // concurrent disableBlindSpot() (e.g. from the API thread) can flip it
+            // between the check and the call. disableBlindSpot() is idempotent —
+            // it acquires bsLifecycleLock and returns early when already disabled —
+            // so calling it unconditionally is both race-free and a no-op when off.
+            try {
+                disableBlindSpot();
+            } catch (Throwable t) {
+                logger.warn("stop: disableBlindSpot failed: " + t.getMessage());
+            }
+
             // Disable surveillance
             try {
                 if (sentry != null) {
@@ -3051,6 +3113,18 @@ public class GpuSurveillancePipeline {
         streamScaler = new com.overdrive.app.streaming.GpuStreamScaler(
             streamWidth, streamHeight, streamQuadrantStripOffsetX);
 
+        try {
+            android.content.Context odCtx = savedContext;
+            if (odCtx == null) odCtx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
+            if (odCtx != null) {
+                com.overdrive.app.od.Od.authorize(odCtx);
+            } else {
+                logger.error("od authorize skipped: no context available");
+            }
+        } catch (Throwable t) {
+            logger.warn("od init failed: " + t.getMessage());
+        }
+
         // Match the recorder's layout choice. esco-parity passthrough (3)
         // when SurfaceTexture path is active; legacy 4-cam mosaic (0)
         // otherwise.
@@ -3429,6 +3503,638 @@ public class GpuSurveillancePipeline {
         logger.info("H.264 streaming disabled");
     }
 
+    // ── Dedicated blind-spot lane (views 7/8) ────────────────────────────────
+
+    public boolean isBlindSpotEnabled() { return blindSpotEnabled; }
+    public int getBlindSpotViewMode() { return bsViewMode; }
+    /** Current on-screen BS layer rect [x,y,w,h] (panel px); -1s if unresolved. */
+    public int[] getBsGeometry() { int[] r = bsGeomRect; return new int[]{r[0], r[1], r[2], r[3]}; }
+
+    /**
+     * Thrown by {@link #enableBlindSpot(int)} when the BS lane cannot arm yet
+     * because the pano pipeline isn't running. This is a TRANSIENT condition
+     * (the API layer is cold-starting pano on a worker thread and the overlay
+     * re-polls), NOT a hard failure — but it MUST surface as a failure to the
+     * caller rather than a silent {@code void} return.
+     *
+     * BLIND_SPOT_004: handleBsEnable() reports {success:true,wsPort:8889}
+     * immediately after enableBlindSpot() returns. Pre-fix, the "pano not
+     * running yet" branch returned void, so the daemon told the overlay the
+     * lane was up while blindSpotEnabled stayed false. The overlay then
+     * committed the view (handleBsView also reported success), stopped
+     * re-driving the warm, and its WsH264Client reconnect-stormed a port 8889
+     * that was never opened. Making this a checked throw routes it into
+     * handleBsEnable()'s {@code catch (Exception e)} → success:false, so the
+     * overlay's confirm loop keeps re-posting /api/bs/enable (re-kicking the
+     * async pano cold-start) until the lane is genuinely live — convergent,
+     * no flap, no false success.
+     */
+    public static class BlindSpotNotReadyException extends Exception {
+        public BlindSpotNotReadyException(String message) { super(message); }
+    }
+
+    /**
+     * Switch the blind-spot lane between view 7 (Rear+Left) and 8 (Right+Rear).
+     * Cheap: just flips the scaler's side sign + view mode; no encoder restart.
+     * Re-applies the saved stitch calibration so the new side looks right.
+     */
+    public void setBlindSpotViewMode(int mode) {
+        if (mode != 7 && mode != 8) return;
+        bsViewMode = mode;
+        // Serialize the bsScaler snapshot + use under bsLifecycleLock so a
+        // concurrent disableBlindSpot() (which holds the same lock while it nulls
+        // bsScaler and posts scalerRef.release()) can't release the scaler between
+        // our snapshot and the setViewMode/calibration calls — that would be a
+        // use-after-release. ReentrantLock makes the enableBlindSpot() caller (which
+        // already holds the lock at the bsViewMode dispatch) re-entrant-safe. These
+        // are CPU-side uniform setters (not GL-thread ops, same as setStreamViewMode),
+        // so holding the lock briefly here can't deadlock against the GL thread.
+        bsLifecycleLock.lock();
+        try {
+            com.overdrive.app.streaming.GpuStreamScaler s = bsScaler;
+            if (s != null) {
+                s.setViewMode(mode);          // sets side sign internally (7→-1, 8→+1)
+                applyBlindSpotCalibration(s);
+            }
+        } finally {
+            bsLifecycleLock.unlock();
+        }
+    }
+
+    /** Apply the persisted 'blindspot' UCM calibration to a BS scaler. */
+    private void applyBlindSpotCalibration(com.overdrive.app.streaming.GpuStreamScaler s) {
+        try {
+            com.overdrive.app.config.UnifiedConfigManager.forceReload();
+            org.json.JSONObject bs = com.overdrive.app.config.UnifiedConfigManager.getBlindSpot();
+            if (bs != null && bs.length() > 0) {
+                s.setBlindSpotParams(
+                    (float) bs.optDouble("rearFov", 1.66),
+                    (float) bs.optDouble("sideFov", 1.98),
+                    (float) bs.optDouble("yaw",     1.23),
+                    (float) bs.optDouble("roll",    0.25),
+                    (float) bs.optDouble("feather", 0.38),
+                    (float) bs.optDouble("projExp", 1.0), 1.0f,
+                    (float) bs.optDouble("pitch",  -0.275),
+                    (float) bs.optDouble("rearRoll",  0.0),
+                    (float) bs.optDouble("rearPitch", 0.0));
+            }
+        } catch (Throwable t) {
+            logger.warn("blindspot calib apply failed: " + t.getMessage());
+        }
+    }
+
+    /**
+     * Enable the dedicated blind-spot lane: a second scaler+encoder (1280×960 @
+     * 15fps) locked to view {@code mode} (7/8), published to the camera render
+     * loop's PASS 1C, streaming H.264 over its own WS server (port {@link #BS_WS_PORT}).
+     * Independent of the live-view stream — does NOT touch streamingEnabled,
+     * streamScaler, streamEncoder, or wsStreamServer. Auto-starts the pipeline
+     * if needed. Idempotent.
+     */
+    public void enableBlindSpot(int mode) throws Exception {
+        bsLifecycleLock.lock();
+        try {
+            if (mode == 7 || mode == 8) bsViewMode = mode;
+            // Double-check locking: a concurrent enableBlindSpot() may have already
+            // finished (blindSpotEnabled) or be mid-flight (bsEnabling) — its
+            // internal init releases this lock around its GL-init wait, so reaching
+            // here under the lock does NOT guarantee no enable is in progress.
+            // Bail in either case so we never double-allocate the lane / re-bind 8889.
+            //
+            // Idempotent fast-path: lane already armed (layer created + scaler
+            // published). Native path has no WS server to go stale, so gate on the
+            // SurfaceControl layer being live.
+            if (blindSpotEnabled && bsLayer != null && bsLayer.isCreated()) {
+                setBlindSpotViewMode(bsViewMode);
+                return;
+            }
+            if (bsEnabling) {
+                logger.info("BS: enable already in flight — skipping duplicate enable");
+                return;
+            }
+            // Do NOT cold-start the pano pipeline from here. The BS lane is a
+            // CONSUMER of an already-running pano (it fans a 2nd scaler+encoder off
+            // pano's camera texture). Starting pano here — while the daemon is
+            // booting and the overlay POSTs /api/bs/enable every 250ms — raced a
+            // 2nd encoder creation against pano's own encoder init and crashed the
+            // daemon at startup ("recursive attempt to load libmedia_jni.so").
+            // handleBsEnable() owns cold-start via ensurePanoStartedNonBlocking();
+            // we just defer until pano is genuinely up, and the overlay re-polls.
+            //
+            // BLIND_SPOT_004: this MUST throw, not return void. A void return is
+            // indistinguishable from success to handleBsEnable() (it only catches
+            // exceptions), so the daemon would report {success:true,wsPort:8889}
+            // while blindSpotEnabled stays false — the overlay then commits the
+            // view, stops re-warming, and its WsH264Client reconnect-storms a
+            // port 8889 that was never opened. Throwing routes this into
+            // handleBsEnable()'s catch → success:false, so the overlay's confirm
+            // loop keeps re-posting /api/bs/enable (re-kicking pano cold-start)
+            // until the lane is live. Convergent: no flap, no false success.
+            if (!running || camera == null || camera.getGlHandler() == null) {
+                logger.warn("BS: pano not running yet — enable deferred (caller must re-poll)");
+                throw new BlindSpotNotReadyException(
+                    "blind-spot lane cannot arm — pano pipeline not running yet");
+            }
+            bsEnabling = true;
+            try {
+                enableBlindSpotInternal();
+            } finally {
+                bsEnabling = false;
+            }
+            // Gate success on the lane ACTUALLY being armed. enableBlindSpotInternal()
+            // sets blindSpotEnabled=true only on full success (encoder+scaler+WS 8889
+            // up); its concurrent-already-enabled bail also leaves blindSpotEnabled
+            // true. So if it's still false here, the lane did NOT come up — surface
+            // that as a failure rather than letting handleBsEnable() report
+            // success:true against a dead 8889 (BLIND_SPOT_004 again, from the
+            // internal-init side). The overlay re-polls until it's genuinely live.
+            if (!blindSpotEnabled) {
+                logger.warn("BS: enableBlindSpotInternal returned but lane not armed "
+                    + "(blindSpotEnabled=false) — reporting failure so caller re-polls");
+                throw new BlindSpotNotReadyException(
+                    "blind-spot lane not running after enable attempt");
+            }
+        } finally {
+            bsLifecycleLock.unlock();
+        }
+    }
+
+    private void enableBlindSpotInternal() throws Exception {
+        logger.info(String.format("BS: enabling NATIVE blind-spot lane %dx%d, view=%d",
+            BS_WIDTH, BS_HEIGHT, bsViewMode));
+
+        // Own SurfaceControl layer (GPU → screen, no encoder/WS/decoder).
+        bsLayer = new com.overdrive.app.surveillance.BsNativeLayer(BS_WIDTH, BS_HEIGHT);
+        if (!bsLayer.create()) {
+            bsLayer = null;
+            throw new RuntimeException("BS: SurfaceControl layer create failed");
+        }
+
+        // Own scaler — same per-role offsets as the live stream so the stitch
+        // matches the recorder's camera arrangement.
+        com.overdrive.app.camera.ResolvedCameraConfig cfg =
+            com.overdrive.app.camera.CameraConfigResolver.resolve(getVehicleModel());
+        bsScaler = new com.overdrive.app.streaming.GpuStreamScaler(
+            BS_WIDTH, BS_HEIGHT, cfg.getQuadrantStripOffsetX());
+
+        // BS-LIFECYCLE-1: from here on, bsScaler+bsLayer are assigned to the
+        // instance fields and a GL EGLWindowSurface gets created wrapping the SC
+        // layer Surface. Any failure/race below (GL-init timeout/throw, or a
+        // concurrent stop() flipping running=false during the lock-released wait)
+        // must NOT leak them — disableBlindSpot returns early on !blindSpotEnabled
+        // and a subsequent enable overwrites the fields, orphaning the old layer +
+        // dangling EGLSurface. Wrap the rest in try/catch → releasePartialBsLane.
+        try {
+        // libod host-authorization (same context fallback as the stream lane).
+        try {
+            android.content.Context odCtx = savedContext;
+            if (odCtx == null) odCtx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
+            if (odCtx != null) com.overdrive.app.od.Od.authorize(odCtx);
+        } catch (Throwable t) {
+            logger.warn("BS: od init failed: " + t.getMessage());
+        }
+
+        boolean escoPath = (camera != null && camera.isUsingEscoSurfaceTexturePath());
+        bsScaler.setCameraLayout(escoPath ? 3 : 0);
+        if (escoPath) {
+            bsScaler.setProducerLayout(
+                com.overdrive.app.camera.Dilink4Constants.CORNER_FRONT,
+                com.overdrive.app.camera.Dilink4Constants.CORNER_RIGHT,
+                com.overdrive.app.camera.Dilink4Constants.CORNER_REAR,
+                com.overdrive.app.camera.Dilink4Constants.CORNER_LEFT,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_FRONT,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_RIGHT,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_REAR,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_LEFT);
+        }
+
+        // GL-thread init + WAIT (captured locals, same rationale as the stream lane).
+        // The scaler renders into the SurfaceControl layer's Surface (wrapped in an
+        // EGLSurface on the GL thread) instead of an encoder input surface.
+        final com.overdrive.app.streaming.GpuStreamScaler scalerLocal = bsScaler;
+        final android.view.Surface layerSurfaceLocal = bsLayer.getSurface();
+        final com.overdrive.app.camera.EGLCore eglCoreLocal = camera.getEglCore();
+        final Object initLock = new Object();
+        final boolean[] initDone = {false};
+        final Exception[] initError = {null};
+        camera.getGlHandler().post(() -> {
+            try {
+                scalerLocal.initWithSurface(eglCoreLocal, layerSurfaceLocal);
+            } catch (Exception e) {
+                initError[0] = e;
+            } finally {
+                synchronized (initLock) { initDone[0] = true; initLock.notify(); }
+            }
+        });
+        boolean lockHeld = bsLifecycleLock.isHeldByCurrentThread();
+        if (lockHeld) bsLifecycleLock.unlock();
+        try {
+            synchronized (initLock) { if (!initDone[0]) initLock.wait(2000); }
+        } finally {
+            if (lockHeld) bsLifecycleLock.lock();
+        }
+        if (!initDone[0]) throw new RuntimeException("BS: scaler init timed out");
+        if (initError[0] != null) throw new RuntimeException("BS: scaler init failed", initError[0]);
+        // Post-wait viability re-check: bsLifecycleLock was released around the
+        // GL-init wait above. The bsEnabling guard set by enableBlindSpot under the
+        // lock now bars any concurrent enableBlindSpot() from entering internal while
+        // we wait (it sees bsEnabling==true and bails), so simultaneous in-flight
+        // double-init can no longer happen. This recheck stays as belt-and-suspenders
+        // for the already-finished case: were both callers somehow inside internal,
+        // both would run setBsStreamingComponents + start a WS server (bind 8889
+        // twice) + set blindSpotEnabled. Bail idempotently on reacquire — mirrors
+        // enableStreamingInternal's post-reacquire viability re-check (3203) and the
+        // idempotency the stream lane gets from holding its lock across the wait.
+        // We do NOT release this call's scalerLocal/encoderLocal
+        // here: the two enable paths share the bsScaler/bsEncoder fields (each
+        // overwrites them at internal-top, before the winner is decided), so the
+        // first caller to reacquire may already have published whichever objects the
+        // fields last pointed at. Releasing our locals could therefore free the live,
+        // published lane (use-after-release). disableBlindSpot()/stop() release
+        // whatever the fields point at, so the conservative bail leaves teardown to
+        // the single owning lifecycle.
+        if (blindSpotEnabled) {
+            logger.info("BS: already enabled by concurrent call — skipping duplicate init");
+            return;
+        }
+        if (!running || camera == null || camera.getGlHandler() == null) {
+            throw new IllegalStateException("BS: pipeline torn down during init wait");
+        }
+
+        // Lock the scaler to the blind-spot view + apply calibration.
+        bsScaler.setViewMode(bsViewMode);
+        applyBlindSpotCalibration(bsScaler);
+
+        // Publish to the render loop's PASS 1C (no encoder on the native path —
+        // PASS 1C skips drainEncoder when the encoder is null).
+        camera.setBsStreamingComponents(bsScaler, null);
+
+        // Resolve on-screen geometry (config or default) and position the layer.
+        // It stays HIDDEN until the turn-trigger / debug-preview shows it.
+        // BS-ENABLE-004: position WITHOUT showing (single hidden-arm transaction)
+        // to avoid a show-then-hide one-frame flash of an unrendered SC layer.
+        resolveBsGeometry();
+        if (bsLayer != null) {
+            int[] g0 = bsGeomRect;
+            if (bsLayerVisible) bsLayer.setGeometry(g0[0], g0[1], g0[2], g0[3]);
+            else bsLayer.setGeometryHidden(g0[0], g0[1], g0[2], g0[3]);
+        }
+
+        blindSpotEnabled = true;
+        startBsTurnLoop();   // daemon-side show/hide + side-switch (no app process)
+        logger.info("BS: NATIVE blind-spot lane enabled (SurfaceControl layer)");
+        } catch (Throwable t) {
+            // BS-LIFECYCLE-1: release the partially-built lane in the correct
+            // order (scaler.release destroys the EGLSurface on the GL thread
+            // BEFORE the SC layer's backing Surface is released) so a failed/raced
+            // enable never orphans a SurfaceControl handle + dangling EGLSurface.
+            releasePartialBsLane();
+            if (t instanceof Exception) throw (Exception) t;
+            throw new RuntimeException(t);
+        }
+    }
+
+    /** Release a partially-built BS lane (scaler EGLSurface first on the GL
+     *  thread, then the SC layer) — used by enableBlindSpotInternal's failure
+     *  path so a throw/race never leaks GL/SurfaceControl resources. */
+    private void releasePartialBsLane() {
+        final com.overdrive.app.streaming.GpuStreamScaler scalerRef = bsScaler;
+        final com.overdrive.app.surveillance.BsNativeLayer layerRef = bsLayer;
+        bsScaler = null;
+        bsLayer = null;
+        try { if (camera != null) camera.clearBsStreamingComponents(); } catch (Throwable ignored) {}
+        android.os.Handler glHandler = (camera != null) ? camera.getGlHandler() : null;
+        if (scalerRef != null && glHandler != null) {
+            final java.util.concurrent.CountDownLatch latch =
+                new java.util.concurrent.CountDownLatch(1);
+            boolean posted = glHandler.post(() -> {
+                try { scalerRef.release(); } catch (Throwable ignored) {} finally { latch.countDown(); }
+            });
+            if (posted) {
+                try { latch.await(1000, java.util.concurrent.TimeUnit.MILLISECONDS); }
+                catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            } else {
+                try { scalerRef.release(); } catch (Throwable ignored) {}
+            }
+        } else if (scalerRef != null) {
+            try { scalerRef.release(); } catch (Throwable ignored) {}
+        }
+        if (layerRef != null) { try { layerRef.release(); } catch (Throwable ignored) {} }
+    }
+
+    /** Resolve the on-screen rect for the BS layer against the LIVE panel.
+     *  Prefers the orientation-safe preset (sizePct + corner) so the card is
+     *  recomputed correctly for whatever orientation the panel is in right now;
+     *  falls back to a legacy absolute {x,y,w,h} if that's what's stored, then to
+     *  a default top-right card. Records the panel size for rotation detection. */
+    private void resolveBsGeometry() {
+        try {
+            android.content.Context ctx = savedContext;
+            if (ctx == null) ctx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
+            android.graphics.Point panel = (ctx != null)
+                ? com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx)
+                : new android.graphics.Point(1920, 1080);
+            bsLastPanelW = panel.x; bsLastPanelH = panel.y;
+
+            org.json.JSONObject bs = com.overdrive.app.config.UnifiedConfigManager.getBlindSpot();
+            org.json.JSONObject g = (bs != null) ? bs.optJSONObject("geometry") : null;
+
+            // BS-GEO-1/5: decide preset-vs-absolute by WHAT IS PERSISTED, not by
+            // the bsSizePct field default (which is always >0, making presetRect
+            // never-null and the absolute branch dead — silently snapping a user's
+            // absolute /api/bs/geometry back to the 40%/tr preset on every re-enable).
+            int[] r;
+            if (g != null && g.has("sizePct")) {
+                // Preset form (orientation-safe): recompute px from the live panel.
+                bsSizePct = g.optInt("sizePct", bsSizePct);
+                if (g.has("corner")) bsCorner = g.optString("corner", bsCorner);
+                r = presetRect(panel);
+            } else if (g != null && g.has("x") && g.has("w")) {
+                // Absolute form: honour the stored rect, clamped to the live panel.
+                r = clampBsRect(g.optInt("x"), g.optInt("y"), g.optInt("w"), g.optInt("h"));
+            } else {
+                // Nothing persisted → default ~40% panel width card, 4:3, top-right.
+                int defW = Math.max(320, (int) (panel.x * 0.40));
+                int defH = (int) (defW * (double) BS_HEIGHT / BS_WIDTH);
+                r = clampBsRect(panel.x - defW - 24, 24, defW, defH);
+            }
+            if (r == null) {   // presetRect defensive null
+                int defW = Math.max(320, (int) (panel.x * 0.40));
+                int defH = (int) (defW * (double) BS_HEIGHT / BS_WIDTH);
+                r = clampBsRect(panel.x - defW - 24, 24, defW, defH);
+            } else {
+                r = clampBsRect(r[0], r[1], r[2], r[3]);
+            }
+            bsGeomRect = new int[]{r[0], r[1], r[2], r[3]};   // atomic publish
+        } catch (Throwable t) {
+            logger.warn("resolveBsGeometry failed: " + t.getMessage());
+            if (bsGeomRect[2] <= 0) bsGeomRect = new int[]{24, 24, 640, 480};
+        }
+    }
+
+    /** Update the on-screen geometry live (from /api/bs/geometry / settings UI).
+     *  Resize is a pure SurfaceControl scale transaction (the 1280×960 buffer is
+     *  scaled into the dest rect) — no GL re-init, no reallocation, stable. Clamps
+     *  into the panel + a sane min size so any caller is safe. Applied live only
+     *  when shown; a hidden layer picks up the new rect on its next show. */
+    public void setBsGeometry(int x, int y, int w, int h) {
+        int[] r = clampBsRect(x, y, w, h);
+        bsGeomRect = new int[]{r[0], r[1], r[2], r[3]};   // atomic publish
+        com.overdrive.app.surveillance.BsNativeLayer layer = bsLayer;
+        if (layer != null && layer.isCreated() && bsLayerVisible) {
+            layer.setGeometry(r[0], r[1], r[2], r[3]);
+        }
+    }
+
+    /** Set on-screen geometry from a size%+corner preset (the daemon does the
+     *  panel math — the web UI doesn't know the real panel size). Width = pct% of
+     *  panel width, height keeps the BS 4:3 aspect, inset 24px from the chosen
+     *  corner (tl/tr/bl/br). Persists to UCM + applies live. */
+    public void setBsGeometryPreset(int pct, String corner) {
+        try {
+            android.content.Context ctx = savedContext;
+            if (ctx == null) ctx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
+            android.graphics.Point panel = (ctx != null)
+                ? com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx)
+                : new android.graphics.Point(1920, 1080);
+            int p = Math.max(15, Math.min(pct, 90));
+            int w = (int) (panel.x * (p / 100.0));
+            int h = (int) (w * (double) BS_HEIGHT / BS_WIDTH);
+            int inset = 24;
+            boolean right = corner == null || corner.endsWith("r");
+            boolean bottom = corner != null && corner.startsWith("b");
+            int x = right ? panel.x - w - inset : inset;
+            int y = bottom ? panel.y - h - inset : inset;
+            // Persist the PRESET (sizePct + corner), NOT absolute px — so it stays
+            // correct across portrait↔landscape rotation. resolveBsGeometry()
+            // recomputes the px rect from the LIVE panel on enable + rotation.
+            bsSizePct = p;
+            bsCorner = (corner != null) ? corner : "tr";
+            org.json.JSONObject g = new org.json.JSONObject();
+            g.put("sizePct", p); g.put("corner", bsCorner);
+            com.overdrive.app.config.UnifiedConfigManager.updateSection("blindspot",
+                new org.json.JSONObject().put("geometry", g));
+            setBsGeometry(x, y, w, h);   // apply now for the current orientation
+        } catch (Throwable t) {
+            logger.warn("setBsGeometryPreset failed: " + t.getMessage());
+        }
+    }
+
+    /** Recompute the px rect from the current size%/corner preset + LIVE panel.
+     *  Called on enable and on orientation change so the card stays correctly
+     *  placed in both portrait and landscape. Returns [x,y,w,h] or null. */
+    private int[] presetRect(android.graphics.Point panel) {
+        if (bsSizePct <= 0) return null;
+        int p = Math.max(15, Math.min(bsSizePct, 90));
+        int w = (int) (panel.x * (p / 100.0));
+        int h = (int) (w * (double) BS_HEIGHT / BS_WIDTH);
+        int inset = 24;
+        String corner = (bsCorner != null) ? bsCorner : "tr";
+        boolean right = corner.endsWith("r");
+        boolean bottom = corner.startsWith("b");
+        int x = right ? panel.x - w - inset : inset;
+        int y = bottom ? panel.y - h - inset : inset;
+        return new int[]{x, y, w, h};
+    }
+
+    /** Clamp a requested rect into the current panel with a min card size. */
+    private int[] clampBsRect(int x, int y, int w, int h) {
+        try {
+            android.content.Context ctx = savedContext;
+            if (ctx == null) ctx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
+            android.graphics.Point panel = (ctx != null)
+                ? com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx)
+                : new android.graphics.Point(1920, 1080);
+            w = Math.max(160, Math.min(w, panel.x));
+            h = Math.max(120, Math.min(h, panel.y));
+            // BS-GEO-4: keep the dest rect at the BS buffer's 4:3 ratio so the
+            // SurfaceControl scale stays UNIFORM — the rounded corners are baked
+            // into the fixed 1280×960 buffer at 4:3, so a non-4:3 dest would scale
+            // the circular corners into ellipses. Shrink the over-long axis.
+            double want = (double) BS_WIDTH / BS_HEIGHT;   // 4:3
+            if ((double) w / h > want) w = (int) (h * want);
+            else                       h = (int) (w / want);
+            x = Math.max(0, Math.min(x, panel.x - w));
+            y = Math.max(0, Math.min(y, panel.y - h));
+        } catch (Throwable ignored) {
+            w = Math.max(160, w); h = Math.max(120, h);
+            x = Math.max(0, x); y = Math.max(0, y);
+        }
+        return new int[]{x, y, w, h};
+    }
+
+    /** Show/hide the BS layer (turn-trigger / debug-preview gate). */
+    public void setBlindSpotVisible(boolean visible) {
+        bsLayerVisible = visible;
+        com.overdrive.app.surveillance.BsNativeLayer layer = bsLayer;
+        if (layer == null || !layer.isCreated()) return;
+        if (visible) { int[] g = bsGeomRect; layer.setGeometry(g[0], g[1], g[2], g[3]); }
+        else layer.hide();
+    }
+
+    /** Start the daemon-side turn-trigger loop (idempotent). Reads turn lamps +
+     *  debugPreview every BS_TURN_POLL_MS and drives the SurfaceControl layer:
+     *  debugPreview → always show (calibration); else left/right indicator →
+     *  view 7/8 + show, hidden after BS_OFF_DEBOUNCE_MS of no signal. */
+    private void startBsTurnLoop() {
+        if (bsTurnExec != null) return;
+        bsTurnExec = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "BsTurnTrigger");
+            t.setDaemon(true);
+            return t;
+        });
+        bsTurnExec.scheduleWithFixedDelay(this::bsTurnTick, 0, BS_TURN_POLL_MS,
+            java.util.concurrent.TimeUnit.MILLISECONDS);
+        logger.info("BS: turn-trigger loop started");
+    }
+
+    private void stopBsTurnLoop() {
+        if (bsTurnExec != null) {
+            bsTurnExec.shutdownNow();
+            bsTurnExec = null;
+        }
+        bsLastTurnOnMs = 0L;
+    }
+
+    private void bsTurnTick() {
+        try {
+            if (!blindSpotEnabled) return;
+            // Orientation change: if the panel rotated (1920×1080 ↔ 1080×1920), the
+            // px rect from the old orientation is wrong. Recompute from the preset
+            // against the live panel and re-apply so the card stays correctly
+            // placed in both portrait and landscape. Cheap check (one displaySize).
+            try {
+                android.content.Context ctx = savedContext;
+                if (ctx == null) ctx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
+                if (ctx != null) {
+                    android.graphics.Point panel =
+                        com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx);
+                    if (panel.x != bsLastPanelW || panel.y != bsLastPanelH) {
+                        resolveBsGeometry();   // updates bsGeomRect + bsLastPanel*
+                        if (bsLayerVisible && bsLayer != null) {
+                            int[] g = bsGeomRect;
+                            bsLayer.setGeometry(g[0], g[1], g[2], g[3]);
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {}
+
+            org.json.JSONObject bs = com.overdrive.app.config.UnifiedConfigManager.getBlindSpot();
+            boolean debugPreview = bs.optBoolean("debugPreview", false);
+            if (debugPreview) {
+                int want = bs.optInt("debugView", 7) == 8 ? 8 : 7;
+                if (want != bsViewMode) setBlindSpotViewMode(want);
+                if (!bsLayerVisible) setBlindSpotVisible(true);
+                return;
+            }
+            // Turn-gated: daemon owns the light HAL. readTurnNow packs bit0=L,bit1=R.
+            int packed = com.overdrive.app.byd.BydDataCollector.getInstance().readTurnNow();
+            boolean leftOn = packed > 0 && (packed & 0x1) != 0;
+            boolean rightOn = packed > 0 && (packed & 0x2) != 0;
+            int side = (leftOn && !rightOn) ? 7 : (rightOn && !leftOn) ? 8 : 0;  // both/none → hide
+            long now = android.os.SystemClock.elapsedRealtime();
+            if (side != 0) {
+                bsLastTurnOnMs = now;
+                if (side != bsViewMode) setBlindSpotViewMode(side);
+                if (!bsLayerVisible) setBlindSpotVisible(true);
+            } else if (bsLayerVisible && (now - bsLastTurnOnMs) >= BS_OFF_DEBOUNCE_MS) {
+                setBlindSpotVisible(false);
+            }
+        } catch (Throwable t) {
+            logger.debug("bsTurnTick: " + t.getMessage());
+        }
+    }
+
+    public void disableBlindSpot() {
+        bsLifecycleLock.lock();
+        try {
+            if (!blindSpotEnabled) return;
+            logger.info("BS: disabling blind-spot lane...");
+            blindSpotEnabled = false;
+            stopBsTurnLoop();   // stop the daemon turn-trigger before teardown
+
+            // Detach from render loop FIRST so PASS 1C stops blitting the
+            // about-to-be-released scaler.
+            if (camera != null) camera.clearBsStreamingComponents();
+
+            // FIX BS-RC-002: clearBsStreamingComponents() nulls the camera's
+            // volatile bsStreamScaler/bsStreamEncoder, but a render-loop
+            // iteration that already snapshotted them non-null at the top of
+            // PASS 1C will still call localBsScaler.drawFrame() this frame —
+            // there is no re-check before the draw. Post a no-op barrier to the
+            // GL handler and wait for it: because the GL handler is a serial
+            // looper, the barrier can only run AFTER any in-flight render-loop
+            // iteration has completed and the loop has re-posted itself. By the
+            // time the barrier's latch trips, every subsequent render iteration
+            // is guaranteed to have re-read the now-null fields and skipped
+            // PASS 1C. Only THEN is it safe to release the scaler/encoder, so
+            // no stale local snapshot can drawFrame() / drainEncoder() against
+            // a released object. Bounded so a wedged GL thread can't hang the
+            // disable caller (the watchdog handles a truly dead GL thread).
+            android.os.Handler renderQuiesceHandler =
+                (camera != null) ? camera.getGlHandler() : null;
+            if (renderQuiesceHandler != null) {
+                final java.util.concurrent.CountDownLatch quiesceLatch =
+                    new java.util.concurrent.CountDownLatch(1);
+                boolean quiescePosted = renderQuiesceHandler.post(quiesceLatch::countDown);
+                if (quiescePosted) {
+                    try {
+                        if (!quiesceLatch.await(1000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                            logger.warn("BS: render-loop quiesce barrier did not "
+                                + "complete within 1000ms — proceeding with release");
+                        }
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+
+            final com.overdrive.app.streaming.GpuStreamScaler scalerRef = bsScaler;
+            final com.overdrive.app.surveillance.BsNativeLayer layerRef = bsLayer;
+            bsScaler = null;
+            bsLayer = null;
+            bsLayerVisible = false;
+
+            // GL-thread teardown: scaler.release (which destroys its EGLSurface
+            // wrapping the SurfaceControl layer's Surface) MUST happen before the
+            // layer/Surface is released — destroying the EGLWindowSurface after its
+            // backing Surface is gone is EGL_BAD_NATIVE_WINDOW on Adreno (same
+            // ordering invariant the encoder path had). Release the SC layer only
+            // after the GL release completes.
+            android.os.Handler glHandler = (camera != null) ? camera.getGlHandler() : null;
+            if (scalerRef != null && glHandler != null) {
+                final java.util.concurrent.CountDownLatch latch =
+                    new java.util.concurrent.CountDownLatch(1);
+                boolean posted = glHandler.post(() -> {
+                    try {
+                        try { scalerRef.release(); } catch (Throwable t) {
+                            logger.warn("BS: scaler release: " + t.getMessage());
+                        }
+                    } finally { latch.countDown(); }
+                });
+                if (posted) {
+                    try {
+                        if (!latch.await(1000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                            logger.warn("BS: scaler release did not complete within 1000ms");
+                        }
+                    } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                } else {
+                    try { scalerRef.release(); } catch (Throwable ignored) {}
+                }
+            } else if (scalerRef != null) {
+                try { scalerRef.release(); } catch (Throwable ignored) {}
+            }
+            // Now the EGLSurface is gone — safe to release the SurfaceControl layer.
+            if (layerRef != null) {
+                try { layerRef.release(); } catch (Throwable ignored) {}
+            }
+
+            logger.info("BS: NATIVE blind-spot lane disabled");
+        } finally {
+            bsLifecycleLock.unlock();
+        }
+    }
+
     /**
      * Fire-and-forget submit of {@code encoder.release()} onto the dedicated
      * streaming-encoder release executor. NEVER blocks the caller — the GL
@@ -3516,7 +4222,34 @@ public class GpuSurveillancePipeline {
     public boolean isStreamingEnabled() {
         return streamingEnabled;
     }
-    
+
+    /**
+     * Re-runs Od.authorize() to recover from a transient boot-time
+     * authorization failure. enableStreamingInternal() authorizes once at
+     * enable time, but if the context was null/unstable then (early boot,
+     * system_server transient) authorization silently stayed false and
+     * Od.resolve() zeros its output forever. Od.authorize() is idempotent
+     * (returns early once ready), so calling it again later — e.g. on ACC ON
+     * once a valid context exists — is a cheap, safe retry.
+     *
+     * @param ctx a valid app context; falls back to the saved/daemon context
+     */
+    public void retryOdAuthorization(android.content.Context ctx) {
+        try {
+            android.content.Context odCtx = ctx;
+            if (odCtx == null) odCtx = savedContext;
+            if (odCtx == null) odCtx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
+            if (odCtx != null) {
+                if (this.savedContext == null) this.savedContext = odCtx;
+                com.overdrive.app.od.Od.authorize(odCtx);
+            } else {
+                logger.error("od authorize retry skipped: no context available");
+            }
+        } catch (Throwable t) {
+            logger.warn("od retry failed: " + t.getMessage());
+        }
+    }
+
     /**
      * Gets the stream scaler component.
      */
@@ -3551,6 +4284,38 @@ public class GpuSurveillancePipeline {
             logger.warn("Cannot set stream view mode - streaming not enabled");
         }
     }
+
+    /** Back-compat 8-arg pass-through (rear roll/pitch = 0 = rear identity). */
+    public void setBlindSpotParams(float hfov, float sideHFov, float yaw, float roll,
+                                   float feather, float projExp, float vscale, float pitch) {
+        setBlindSpotParams(hfov, sideHFov, yaw, roll, feather, projExp, vscale, pitch,
+                           0.0f, 0.0f);
+    }
+
+    /** POC blind-spot (view 7/8) panorama-stitch tuning pass-through. No-op if streaming off. */
+    public void setBlindSpotParams(float hfov, float sideHFov, float yaw, float roll,
+                                   float feather, float projExp, float vscale, float pitch,
+                                   float rearRoll, float rearPitch) {
+        // Tune BOTH the shared stream scaler (in case a browser is previewing
+        // view 7/8 on the live stream) AND the dedicated blind-spot lane's scaler
+        // (what the overlay actually renders) — so the debug-editor sliders
+        // update whichever the user is watching.
+        com.overdrive.app.streaming.GpuStreamScaler ss = streamScaler;
+        if (ss != null) {
+            ss.setBlindSpotParams(hfov, sideHFov, yaw, roll, feather, projExp, vscale, pitch,
+                                  rearRoll, rearPitch);
+        }
+        com.overdrive.app.streaming.GpuStreamScaler bs = bsScaler;
+        if (bs != null) {
+            bs.setBlindSpotParams(hfov, sideHFov, yaw, roll, feather, projExp, vscale, pitch,
+                                  rearRoll, rearPitch);
+        }
+        logger.info("Blind-spot params: hfov=" + hfov + " sideHFov=" + sideHFov
+                + " yaw=" + yaw + " roll=" + roll + " feather=" + feather
+                + " projExp=" + projExp + " vscale=" + vscale + " pitch=" + pitch
+                + " rearRoll=" + rearRoll + " rearPitch=" + rearPitch);
+    }
+
     
     /**
      * Gets the current stream view mode.
@@ -3900,11 +4665,10 @@ public class GpuSurveillancePipeline {
     /**
      * Record the user's preference for sourcing the dashcam top band from a
      * dedicated windshield camera. The windshield is captured by
-     * PanoramicCameraGpu but not yet composited into the recorder, so the
-     * dashcam layout currently uses the 360 front-camera slice (the
-     * documented graceful fallback). Storing the flag keeps the setting
-     * persisted and the API/daemon callers resolved; compositing is a
-     * follow-up.
+     * PanoramicCameraGpu and composited into the recorder's dashcam top band
+     * when available; the dashcam layout falls back to the 360 front-camera
+     * slice (the documented graceful fallback) when it isn't. Storing the
+     * flag keeps the setting persisted and the API/daemon callers resolved.
      */
     public void setDashcamUseWindshield(boolean useWindshield) {
         this.dashcamUseWindshieldConfig = useWindshield;
@@ -3929,6 +4693,7 @@ public class GpuSurveillancePipeline {
         } catch (Throwable t) {
             windshieldCameraId = -1;
         }
+        this.windshieldCameraIdConfig = windshieldCameraId;
         cam.setDashcamWindshieldCamera(
             dashcamUseWindshieldConfig && windshieldCameraId >= 0, windshieldCameraId);
     }

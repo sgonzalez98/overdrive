@@ -10,20 +10,39 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="theme-color" content="#00876C">
-    <script src="../shared/theme.js?v=4"></script>
+    <script src="../shared/theme.js?v=5"></script>
     <script src="../shared/app-shell.js"></script>
-    <link rel="stylesheet" href="../shared/styles.css?v=13">
+    <link rel="stylesheet" href="../shared/styles.css?v=14">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
     <style>
         /* Events Page Specific Styles */
+
+        /* Flexbox min-width:auto trap fix — the shared .main-content is a
+           flex child of .app-layout; without min-width:0 it refuses to
+           shrink below the intrinsic width of its content. The place
+           chip row (.filter-tabs-row2[data-filter-row="place"]) carries
+           an inline search input + up to 8 chips, whose combined
+           intrinsic width otherwise blows the whole column wider than
+           the viewport — defeating the row's own overflow-x:auto and
+           clipping the pagination Prev/Next on narrow devices. Letting
+           the chain collapse to viewport width is what makes the chip
+           row's horizontal scroller actually engage. Scoped to this
+           page so the shared shell is untouched. */
+        .main-content { min-width: 0; }
+
         .events-container {
             display: flex;
             flex-direction: column;
             gap: 16px;
             padding: 16px;
+            min-width: 0;
+            /* Live --vh (kept fresh across rotation by theme.js) instead of
+               100dvh, which resolves stale on Android WebView after a
+               landscape→portrait flip and left the recordings panel sized to
+               the old taller viewport. 100vh is the pre-theme.js fallback. */
             min-height: calc(100vh - var(--header-height) - 32px);
-            min-height: calc(100dvh - var(--header-height) - 32px);
+            min-height: calc(var(--vh, 1vh) * 100 - var(--header-height) - 32px);
         }
         
         /* Top Bar with Calendar Toggle & Filters */
@@ -419,6 +438,14 @@
             flex-direction: column;
             overflow: hidden;
             flex: 1;
+            /* min-height:0 lets this flex child shrink below the intrinsic
+               height of its (long) recordings list. Without it the panel
+               refuses to shrink in short/portrait viewports and the inner
+               list — instead of scrolling — pushes the pagination bar
+               (Prev/Next) off the bottom of the screen. The list's own
+               overflow-y:auto only engages once the panel is allowed to be
+               shorter than its content, which this unlocks. */
+            min-height: 0;
         }
         
         .recordings-header {
@@ -444,6 +471,10 @@
             flex: 1;
             overflow-y: auto;
             padding: 12px;
+            /* Pair with the panel's min-height:0 — the scroll container must
+               also be allowed to shrink below its content so overflow-y:auto
+               actually scrolls instead of expanding the column. */
+            min-height: 0;
         }
         
         /* Recording Card with Thumbnail */
@@ -699,6 +730,10 @@
             display: flex;
             flex-direction: column;
             gap: 6px;
+            /* Collapse to the column width so each child row's
+               overflow-x:auto governs its own horizontal extent rather
+               than the widest row dictating the column width. */
+            min-width: 0;
         }
         .filter-tabs-row2 {
             /* Override .filter-tabs flex:1 so multiple rows stack properly */
@@ -709,6 +744,11 @@
             padding: 4px 6px;
             background: var(--bg-surface);
             border-radius: var(--radius-md);
+            /* min-width:0 lets this row shrink to its flex-column parent's
+               width so overflow-x:auto can actually scroll the chips
+               instead of the row widening past the viewport. */
+            min-width: 0;
+            max-width: 100%;
             overflow-x: auto;
             -webkit-overflow-scrolling: touch;
             scrollbar-width: none;
@@ -994,7 +1034,7 @@
             max-width: 1200px;
             width: 100%;
             max-height: calc(100vh - 32px);
-            max-height: calc(100dvh - 32px);
+            max-height: calc(var(--vh, 1vh) * 100 - 32px);
             background: var(--bg-surface);
             border-radius: var(--radius-lg);
             overflow: hidden;
@@ -1031,10 +1071,10 @@
             inset: 0;
             width: 100vw;
             height: 100vh;
-            height: 100dvh;
+            height: calc(var(--vh, 1vh) * 100);
             max-width: 100vw;
             max-height: 100vh;
-            max-height: 100dvh;
+            max-height: calc(var(--vh, 1vh) * 100);
             border-radius: 0;
             background: #000;
             z-index: 2000;
@@ -1243,7 +1283,7 @@
 
             .video-container {
                 max-height: calc(100vh - 40px);
-                max-height: calc(100dvh - 40px);
+                max-height: calc(var(--vh, 1vh) * 100 - 40px);
             }
         }
         
@@ -1293,8 +1333,11 @@
             /* Cap height so portrait modal layouts (head unit rotated)
                don't make the video taller than the visible viewport; the
                4:3 mosaic + 320px modal width otherwise yields ~427px of
-               video which can clip the chrome under it. */
-            max-height: calc(100dvh - 32px - 64px - 80px);
+               video which can clip the chrome under it. Uses the live --vh
+               (fresh across rotation via theme.js) with a static-vh
+               fallback for the pre-script frame. */
+            max-height: calc(100vh - 32px - 64px - 80px);
+            max-height: calc(var(--vh, 1vh) * 100 - 32px - 64px - 80px);
             background: black;
             /* Quadrant zoom is implemented as a CSS transform on the
                <video> element (scale + transform-origin). overflow:hidden

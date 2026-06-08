@@ -3,6 +3,7 @@ package com.overdrive.app.roadsense.store
 import com.overdrive.app.roadsense.detect.HazardType
 import com.overdrive.app.roadsense.detect.Pose
 import com.overdrive.app.roadsense.detect.StoredHazard
+import com.overdrive.app.roadsense.detect.altitudeMatches
 import kotlin.math.abs
 import kotlin.math.cos
 
@@ -28,14 +29,17 @@ import kotlin.math.cos
  * The forward cone keeps things geometrically ahead, but that alone can still leak
  * a hazard on a PARALLEL/opposite/crossing road that happens to fall in the cone at
  * a bend or junction. So we ALSO require a ROAD MATCH: the hazard's stored detection
- * heading must align with our travel heading (same direction, or 180° opposite for a
- * two-way road) within [headingMatchDeg]. This is what guarantees "warn only for the
- * road we're actually driving on," not the next street over.
+ * heading must align with our travel heading in the SAME direction within
+ * [headingMatchDeg] (the opposite carriageway is NOT accepted — R-EXT-4). And when
+ * the heading is unreliable (crawl / no GPS bearing) we suppress entirely rather than
+ * warn omnidirectionally. This guarantees "warn only for the road we're driving, in
+ * our direction," not the next street over or the oncoming lane.
  *
  * Heading sanity: at very low speed GPS bearing is noisy/garbage, so the caller
- * passes whether the heading is trustworthy; when it isn't we fall back to
- * range-only ranking (no cone) so we still surface nearby hazards without
- * direction filtering on a bad bearing.
+ * passes whether the heading is trustworthy; when it isn't we SUPPRESS entirely
+ * (rank returns empty) rather than warn omnidirectionally — without a reliable
+ * heading we can't tell our road/direction from the opposite carriageway or a
+ * cross street, and at crawl speed the driver can already see the bump (R-EXT-4).
  */
 class ApproachEngine(
     private val forwardConeDeg: Double = DEFAULT_FORWARD_CONE_DEG,
@@ -97,7 +101,8 @@ class ApproachEngine(
      *
      * @param pose            live (or back-projected current) vehicle pose.
      * @param hazards         candidates from queryAhead (nearby tiles).
-     * @param headingReliable false at crawl speed / no-fix → skip the cone filter.
+     * @param headingReliable false at crawl speed / no-fix → rank returns empty
+     *                        (suppress; we can't judge road/direction without a bearing).
      */
     fun nextAhead(
         pose: Pose,
@@ -114,41 +119,53 @@ class ApproachEngine(
         hazards: List<StoredHazard>,
         headingReliable: Boolean,
     ): List<Approach> {
+        // R-EXT-4: direction-aware warning is mandatory. Below the heading-reliable
+        // floor (crawl / no usable GPS bearing) we CANNOT tell which road or which
+        // direction a hazard is on, so we must NOT warn at all rather than warn
+        // omnidirectionally (which surfaces opposite-carriageway / cross-street /
+        // behind-car hazards — exactly the "wrong road" complaint). At crawl speed the
+        // driver can already see the bump, so suppressing costs nothing.
+        if (!headingReliable) return emptyList()
+
         val out = ArrayList<Approach>(hazards.size)
         for (h in hazards) {
             val rangeM = GeoMath.haversineMeters(pose.lat, pose.lng, h.hazard.lat, h.hazard.lng)
             if (rangeM < minRangeM || rangeM > maxRangeM) continue
 
+            // ALTITUDE gate (the over/underpass fix): a hazard at a clearly different
+            // level than us is on a different road deck (flyover above, surface below,
+            // stacked ramp) and must not warn. Fail-OPEN: if EITHER altitude is unknown,
+            // or they're within ALTITUDE_MATCH_M, we keep the hazard — GPS altitude is
+            // too noisy (±10–30 m) to suppress on anything but a clear, large delta, so
+            // this never introduces a false-negative from noise.
+            if (!altitudeMatches(pose.altitudeM, h.hazard.altitudeM)) continue
+
             val absBearing = GeoMath.bearingDeg(pose.lat, pose.lng, h.hazard.lat, h.hazard.lng)
             val relBearing = signedRelative(pose.bearingDeg.toDouble(), absBearing)
 
-            // Direction-aware gate (R-EXT-4): only keep hazards inside the
-            // forward cone — UNLESS the heading is unreliable, in which case we
-            // can't trust the cone and fall back to range-only.
-            if (headingReliable && abs(relBearing) > forwardConeDeg) continue
+            // Direction-aware gate (R-EXT-4): only keep hazards inside the forward
+            // cone (car→hazard bearing within the travel cone). Heading is always
+            // reliable here (guarded above).
+            if (abs(relBearing) > forwardConeDeg) continue
 
-            // ROAD-MATCH gate (R-EXT-4, the "don't warn for the wrong road" fix):
-            // the forward cone alone keeps anything geometrically AHEAD — including a
-            // hazard on the opposite carriageway, a parallel road, or an over/underpass
-            // caught in the cone at a bend. So we ALSO require the hazard's STORED
-            // travel heading (the direction the car faced when it was detected) to
-            // align with OUR current travel heading. We accept SAME direction (≤
-            // [headingMatchDeg]) OR OPPOSITE (within [headingMatchDeg] of 180°) so both
-            // directions of a normal two-way road count as the same road; a cross/
-            // parallel road at a different heading is excluded. Only applied when the
-            // heading is reliable AND the stored heading is usable — otherwise we can't
-            // judge road identity and fall back to the cone result above.
+            // ROAD-MATCH gate (R-EXT-4, "warn only for our road, our direction"): the
+            // forward cone keeps anything geometrically AHEAD — including a hazard on
+            // the OPPOSITE carriageway, a parallel road, or an over/underpass caught in
+            // the cone at a bend. So we ALSO require the hazard's STORED travel heading
+            // (the direction the car faced when it was detected) to align with OUR
+            // current travel heading within [headingMatchDeg]. We accept ONLY the SAME
+            // direction — NOT the 180°-opposite case: per R-EXT-4 the opposite
+            // carriageway must not warn. Trade-off: a hazard mapped ONLY in the opposite
+            // direction won't warn until it's also observed in our direction.
             // Skip the road-match when the STORED heading is the "unknown" sentinel
             // (<0): it was recorded while the car's GPS bearing was unreliable, so we
             // can't judge road identity from it — fall back to the cone-only result
-            // rather than filtering on a bogus heading (audit accuracy S1).
-            if (headingReliable && h.hazard.headingDeg >= 0f) {
+            // above rather than filtering on a bogus heading (audit accuracy S1).
+            if (h.hazard.headingDeg >= 0f) {
                 val headingDelta = GeoMath.bearingDeltaDeg(
                     pose.bearingDeg.toDouble(), h.hazard.headingDeg.toDouble()
                 ) // 0..180
-                val sameDir = headingDelta <= headingMatchDeg
-                val oppositeDir = headingDelta >= (180.0 - headingMatchDeg)
-                if (!sameDir && !oppositeDir) continue
+                if (headingDelta > headingMatchDeg) continue
             }
 
             out.add(Approach(h, rangeM, absBearing, relBearing))
@@ -220,8 +237,8 @@ class ApproachEngine(
      * travel bearing. cos(relativeBearing) folds out the cross-track offset, so two
      * hazards in different lanes at the same range collapse to nearly the same
      * along-track value and a hazard genuinely farther down the road reads farther.
-     * When heading is unreliable the rank() fallback leaves relativeBearing as the
-     * raw car→hazard bearing delta; cos still degrades gracefully toward range.
+     * (When heading is unreliable rank() returns empty, so this is only ever called
+     * with a trustworthy bearing — relativeBearing is always meaningful here.)
      */
     private fun alongTrack(a: Approach): Double =
         a.rangeM * cos(Math.toRadians(a.relativeBearingDeg))
@@ -258,7 +275,10 @@ class ApproachEngine(
         // Rough-section if MOST members are ROUGH_SECTION rows, OR the zone is a
         // dense run of small hazards over a stretch (the washboard signature).
         val roughCount = members.count { it.stored.hazard.type == HazardType.ROUGH_SECTION }
-        val isRough = roughCount * 2 >= members.size && roughCount > 0
+        // Require count>1 so a lone ROUGH_SECTION row doesn't render as "Rough section
+        // · 0 m" (a singleton has lengthM=0); a one-off rough row announces as a normal
+        // single hazard. A genuine rough STRETCH is always ≥2 grouped rows.
+        val isRough = members.size > 1 && roughCount * 2 >= members.size && roughCount > 0
         return HazardZone(
             lead = lead,
             members = members,
@@ -301,11 +321,13 @@ class ApproachEngine(
         const val DEFAULT_ZONE_GAP_M = 30.0
 
         /** Max angle (deg) between our travel heading and the hazard's STORED detection
-         *  heading for it to count as "our road" — applied to BOTH the same-direction
-         *  case and (mirrored about 180°) the opposite-carriageway case, so both
-         *  directions of a two-way road match while a cross/parallel road is excluded.
-         *  50° tolerates GPS-bearing noise + real road curvature between detection and
-         *  approach without leaking an adjacent road at a sharp angle. PROVISIONAL. */
-        const val DEFAULT_HEADING_MATCH_DEG = 50.0
+         *  heading for it to count as "our road, our direction" — SAME-direction only
+         *  (the opposite-carriageway branch was removed per R-EXT-4). 35° covers GPS-
+         *  bearing noise (~±10–15° above the 2.5 m/s reliable floor) plus real road
+         *  curvature between detection and approach, while excluding genuine
+         *  intersecting / diverging roads (typically ≥45° off our heading). Was 50°,
+         *  too permissive once opposite-direction acceptance was dropped. PROVISIONAL —
+         *  widen toward 40° only if curvy mapped roads start false-negativing. */
+        const val DEFAULT_HEADING_MATCH_DEG = 35.0
     }
 }

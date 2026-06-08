@@ -37,6 +37,36 @@ public class GpuStreamScaler {
     private int programId;
     private int uCameraTexLocation;
     private int uViewModeLocation;
+    private int uBsRadiusLocation;
+    private int uBsAspectLocation;
+    private int uBsFeatherLocation;
+    // Rounded-corner card mask for the blind-spot views (7/8 only). Radius as a
+    // fraction of the shorter half-axis (0 = square, ~0.12 = SOTA card corners).
+    // Native SurfaceControl path composites the transparent corners directly.
+    private volatile float bsCornerRadius = 0.14f;
+    // ── 3D "curved glass card" framing (views 7/8 only) ──────────────────────
+    // The video stays FLAT + uniform-scale (never distorted); only the EDGE reads
+    // as 3D — a beveled rim that curves like a raised glass bezel, lit from the
+    // top and shadowed at the bottom, with a thin specular highlight on the top
+    // arc. No drop shadow (it read as a black band below the card on a dark map).
+    // All driven by one analytic rounded-box SDF in the fragment shader (no
+    // derivatives). A tiny margin keeps the rounded corners + AA inside the
+    // 1280×960 buffer; the video fills essentially the whole card.
+    private int uBsMarginLocation      = -1;
+    private int uBsBevelWLocation      = -1;
+    private int uBsBevelLightLocation  = -1;
+    private int uBsBevelDarkLocation   = -1;
+    private int uBsLightDirLocation    = -1;
+    private int uBsSpecWLocation       = -1;
+    private int uBsSpecIntLocation     = -1;
+    private volatile float bsMargin     = 0.014f;  // tiny inset: AA + corner room, video ~97%
+    private volatile float bsBevelW     = 0.045f;  // bevel band width — wider = rounder curve
+    private volatile float bsBevelLight = 0.42f;   // top-rim brighten gain (glassy highlight)
+    private volatile float bsBevelDark  = 0.36f;   // bottom-rim darken gain (curved-edge depth)
+    private volatile float bsLightDirX  = 0.0f;    // light from straight above
+    private volatile float bsLightDirY  = -1.0f;   // uv.y=0 is buffer top → -1 is "up"
+    private volatile float bsSpecW      = 0.009f;  // specular band half-width
+    private volatile float bsSpecInt    = 0.30f;   // specular add intensity
     private int uApaModeLocation;
     private int uTexMatrixLocation;
     private int uApplyManualYFlipLocation;
@@ -58,6 +88,20 @@ public class GpuStreamScaler {
     private int uApaCenterInsetLocation = -1;
     private volatile float apaCenterInset = 0.0f;
     private volatile boolean redMaskEnabled = false;
+    // View 7/8 sampler coefficients: an opaque set resolved by the native module
+    // (com.overdrive.app.od) and uploaded as five vec4 uniforms (uOd0..4). The
+    // shader does no geometry derivation itself.
+    private int uOd0Location = -1;
+    private int uOd1Location = -1;
+    private int uOd2Location = -1;
+    private int uOd3Location = -1;
+    private int uOd4Location = -1;
+    private final float[] odCoef = new float[20];
+    private final float[] odIn = new float[11];
+    // Opaque tuning scalars + per-side sign, forwarded to com.overdrive.app.od.
+    // Indices 5/8/9 default to their identity values (no change until dialed).
+    private final float[] odParam = { 1.66f, 1.98f, 1.23f, 0.25f, -0.275f, 1.0f, 1.0f, 0.38f, 0.0f, 0.0f };
+    private volatile float odSign = -1.0f;   // resolved for the active side
     private int aPositionLocation;
     private int aTexCoordLocation;
 
@@ -195,17 +239,37 @@ public class GpuStreamScaler {
      * @param encoder Hardware encoder for streaming
      */
     public void init(EGLCore eglCore, HardwareEventRecorderGpu encoder) {
-        this.eglCore = eglCore;
-        
         // Get encoder's input surface
-        encoderInputSurface = encoder.getInputSurface();
-        if (encoderInputSurface == null) {
+        android.view.Surface encSurf = encoder.getInputSurface();
+        if (encSurf == null) {
             throw new RuntimeException("Stream encoder input surface is null");
         }
-        
-        // Create EGL surface from encoder surface
+        initWithSurface(eglCore, encSurf);
+    }
+
+    /**
+     * Initialize the scaler to render into an ARBITRARY Android Surface instead of
+     * a MediaCodec encoder input surface — used by the NATIVE blind-spot path,
+     * where the target is a Surface wrapping a daemon-owned SurfaceControl layer
+     * (GPU → screen directly, no encoder/WebSocket/decoder). The render path is
+     * identical: drawFrame() makeCurrents `encoderSurface` (the EGLSurface) and
+     * swapBuffers to it — whether that's backed by an encoder or a SurfaceControl
+     * layer is opaque to the GL code.
+     *
+     * @param eglCore EGL context manager (the camera's shared context)
+     * @param targetSurface Android Surface to render into (SurfaceControl-backed)
+     */
+    public void initWithSurface(EGLCore eglCore, android.view.Surface targetSurface) {
+        this.eglCore = eglCore;
+
+        if (targetSurface == null) {
+            throw new RuntimeException("Target surface is null");
+        }
+        encoderInputSurface = targetSurface;
+
+        // Create EGL surface from the target surface (encoder input OR SC layer)
         encoderSurface = eglCore.createWindowSurface(encoderInputSurface);
-        
+
         // Compile shaders (profile-baked)
         programId = GlUtil.createProgram(VERTEX_SHADER, fragmentShader);
         if (programId == 0) {
@@ -217,6 +281,16 @@ public class GpuStreamScaler {
         aTexCoordLocation = GLES20.glGetAttribLocation(programId, "aTexCoord");
         uCameraTexLocation = GLES20.glGetUniformLocation(programId, "uCameraTex");
         uViewModeLocation = GLES20.glGetUniformLocation(programId, "uViewMode");
+        uBsRadiusLocation = GLES20.glGetUniformLocation(programId, "uBsRadius");
+        uBsAspectLocation = GLES20.glGetUniformLocation(programId, "uBsAspect");
+        uBsFeatherLocation = GLES20.glGetUniformLocation(programId, "uBsFeather");
+        uBsMarginLocation     = GLES20.glGetUniformLocation(programId, "uBsMargin");
+        uBsBevelWLocation     = GLES20.glGetUniformLocation(programId, "uBsBevelW");
+        uBsBevelLightLocation = GLES20.glGetUniformLocation(programId, "uBsBevelLight");
+        uBsBevelDarkLocation  = GLES20.glGetUniformLocation(programId, "uBsBevelDark");
+        uBsLightDirLocation   = GLES20.glGetUniformLocation(programId, "uBsLightDir");
+        uBsSpecWLocation      = GLES20.glGetUniformLocation(programId, "uBsSpecW");
+        uBsSpecIntLocation    = GLES20.glGetUniformLocation(programId, "uBsSpecInt");
         uApaModeLocation = GLES20.glGetUniformLocation(programId, "uApaMode");
         uTexMatrixLocation = GLES20.glGetUniformLocation(programId, "uTexMatrix");
         uApplyManualYFlipLocation = GLES20.glGetUniformLocation(programId, "uApplyManualYFlip");
@@ -230,6 +304,11 @@ public class GpuStreamScaler {
         uFlipForLeftLocation  = GLES20.glGetUniformLocation(programId, "uFlipForLeft");
         uRedMaskStrengthLocation = GLES20.glGetUniformLocation(programId, "uRedMaskStrength");
         uApaCenterInsetLocation = GLES20.glGetUniformLocation(programId, "uApaCenterInset");
+        uOd0Location = GLES20.glGetUniformLocation(programId, "uOd0");
+        uOd1Location = GLES20.glGetUniformLocation(programId, "uOd1");
+        uOd2Location = GLES20.glGetUniformLocation(programId, "uOd2");
+        uOd3Location = GLES20.glGetUniformLocation(programId, "uOd3");
+        uOd4Location = GLES20.glGetUniformLocation(programId, "uOd4");
         uOemTexLocation = GLES20.glGetUniformLocation(programId, "uOemTex");
         uOemTexMatrixLocation = GLES20.glGetUniformLocation(programId, "uOemTexMatrix");
         uOemActiveLocation = GLES20.glGetUniformLocation(programId, "uOemActive");
@@ -256,9 +335,13 @@ public class GpuStreamScaler {
             // `uOemActive` gate in the shader, not the bind.
         }
 
+        // Resolve initial sampler coefficients for the default side so the very
+        // first view-7/8 frame is correct even before any tuning call.
+        resolveCoef();
+
         logger.info("GpuStreamScaler initialized: " + outputWidth + "×" + outputHeight);
     }
-    
+
     /**
      * Renders a frame to the stream encoder.
      * 
@@ -270,11 +353,26 @@ public class GpuStreamScaler {
         
         // Set viewport
         GLES20.glViewport(0, 0, outputWidth, outputHeight);
-        
-        // Clear
-        GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
-        
+
+        // Blind-spot views (7/8) draw a 3D "curved glass card" with TRANSPARENT
+        // rounded corners (and transparent where the projection has no coverage)
+        // onto the SurfaceControl layer. Clear to fully transparent (not opaque
+        // black) so the cut-outs composite through, and enable premultiplied-alpha
+        // blending. The gate fires for ANY BS view (the card always needs the
+        // transparent corners); other views (live-view encoder) stay opaque —
+        // clear black, no blend — exactly as before.
+        boolean bsCard = (currentViewMode == 7 || currentViewMode == 8);
+        if (bsCard) {
+            GLES20.glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+            GLES20.glEnable(GLES20.GL_BLEND);
+            GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);  // premultiplied
+        } else {
+            GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+            GLES20.glDisable(GLES20.GL_BLEND);
+        }
+
         // Use shader
         GLES20.glUseProgram(programId);
         
@@ -292,6 +390,35 @@ public class GpuStreamScaler {
         if (uniformsDirty.compareAndSet(true, false)) {
             GLES20.glUniform1i(uViewModeLocation, currentViewMode);
             GLES20.glUniform1f(uApaModeLocation, (float) cameraLayout);
+            // Rounded-card mask params (only meaningful on views 7/8; the shader
+            // returns full coverage when uBsRadius<=0). aspect = w/h so corners are
+            // circular; feather ≈ 1.5px in output-height units for a clean AA edge.
+            if (uBsRadiusLocation >= 0) {
+                boolean bs = (currentViewMode == 7 || currentViewMode == 8);
+                GLES20.glUniform1f(uBsRadiusLocation, bs ? bsCornerRadius : 0.0f);
+            }
+            if (uBsAspectLocation >= 0) {
+                GLES20.glUniform1f(uBsAspectLocation,
+                    outputHeight > 0 ? (float) outputWidth / (float) outputHeight : 1.0f);
+            }
+            if (uBsFeatherLocation >= 0) {
+                GLES20.glUniform1f(uBsFeatherLocation,
+                    outputHeight > 0 ? 1.5f / (float) outputHeight : 0.003f);
+            }
+            // 3D curved-glass-card framing params. Gate margin to 0 on non-BS views
+            // so the framing branch (only reached on 7/8 anyway) is fully inert
+            // elsewhere; the rest are constant. uniformsDirty gates the upload so
+            // steady-state frames pay nothing for these uniforms.
+            {
+                boolean bsv = (currentViewMode == 7 || currentViewMode == 8);
+                if (uBsMarginLocation     >= 0) GLES20.glUniform1f(uBsMarginLocation,     bsv ? bsMargin : 0.0f);
+                if (uBsBevelWLocation     >= 0) GLES20.glUniform1f(uBsBevelWLocation,     bsBevelW);
+                if (uBsBevelLightLocation >= 0) GLES20.glUniform1f(uBsBevelLightLocation, bsBevelLight);
+                if (uBsBevelDarkLocation  >= 0) GLES20.glUniform1f(uBsBevelDarkLocation,  bsBevelDark);
+                if (uBsLightDirLocation   >= 0) GLES20.glUniform2f(uBsLightDirLocation,   bsLightDirX, bsLightDirY);
+                if (uBsSpecWLocation      >= 0) GLES20.glUniform1f(uBsSpecWLocation,      bsSpecW);
+                if (uBsSpecIntLocation    >= 0) GLES20.glUniform1f(uBsSpecIntLocation,    bsSpecInt);
+            }
             if (uApplyManualYFlipLocation >= 0) {
                 // Legacy → manual Y-flip; DiLink 4 → matrix handles it.
                 GLES20.glUniform1f(uApplyManualYFlipLocation,
@@ -302,6 +429,21 @@ public class GpuStreamScaler {
             }
             if (uApaCenterInsetLocation >= 0) {
                 GLES20.glUniform1f(uApaCenterInsetLocation, apaCenterInset);
+            }
+            if (uOd0Location >= 0) {
+                GLES20.glUniform4f(uOd0Location, odCoef[0], odCoef[1], odCoef[2], odCoef[3]);
+            }
+            if (uOd1Location >= 0) {
+                GLES20.glUniform4f(uOd1Location, odCoef[4], odCoef[5], odCoef[6], odCoef[7]);
+            }
+            if (uOd2Location >= 0) {
+                GLES20.glUniform4f(uOd2Location, odCoef[8], odCoef[9], odCoef[10], odCoef[11]);
+            }
+            if (uOd3Location >= 0) {
+                GLES20.glUniform4f(uOd3Location, odCoef[12], odCoef[13], odCoef[14], odCoef[15]);
+            }
+            if (uOd4Location >= 0) {
+                GLES20.glUniform4f(uOd4Location, odCoef[16], odCoef[17], odCoef[18], odCoef[19]);
             }
         }
         if (uTexMatrixLocation >= 0) {
@@ -403,15 +545,18 @@ public class GpuStreamScaler {
      * Sets the view mode for streaming.
      *
      * @param mode 0=Mosaic, 1=Front, 2=Right, 3=Rear, 4=Left,
-     *             5=Raw (legacy debug passthrough — pano strip), 6=OEM Dashcam
+     *             5=Raw (legacy debug passthrough — pano strip), 6=OEM Dashcam,
+     *             7=BlindSpot L, 8=BlindSpot R
      */
     public void setViewMode(int mode) {
-        if (mode < 0 || mode > 6) return;
-        if (mode == this.currentViewMode) return;   // idempotent — no upload needed
+        if (mode < 0 || mode > 8) return;
+        if (mode != 7 && mode != 8 && mode == this.currentViewMode) return;   // idempotent — no upload needed (BS modes 7/8 always re-apply side sign)
         this.currentViewMode = mode;
+        // Resolve the sampler coefficients for the active side (7 = -1, 8 = +1).
+        if (mode == 7) setBlindSpotSide(-1.0f);
+        else if (mode == 8) setBlindSpotSide(1.0f);
         this.uniformsDirty.set(true);
-        String[] modeNames = {"Mosaic", "Front", "Right", "Rear", "Left", "Raw", "OEM Dashcam"};
-        logger.info("Stream view mode set to " + mode + " (" + modeNames[mode] + ")");
+        logger.info("Stream view mode set to " + mode);
     }
 
     /**
@@ -599,6 +744,57 @@ public class GpuStreamScaler {
         this.uniformsDirty.set(true);
     }
 
+    /** Back-compat 8-arg overload (p8/p9 default to their identity value). */
+    public void setBlindSpotParams(float hfov, float sideHFov, float yaw, float roll,
+                                   float feather, float projExp, float vscale, float pitch) {
+        setBlindSpotParams(hfov, sideHFov, yaw, roll, feather, projExp, vscale, pitch,
+                           0.0f, 0.0f);
+    }
+
+    /**
+     * View 7/8 live tuning. Opaque scalar inputs forwarded to the native module
+     * (see com.overdrive.app.od.Od) which resolves them into the sampler
+     * coefficient set; this class never computes the mapping. Accepted ranges:
+     *   p0 [1.0,2.2]  p1 [1.0,2.2]  p2 [0.0,1.4]  p3 [-0.4,0.4]  p4 [-0.4,0.4]
+     *   p5 [0.4,1.6]  p6 [0.7,1.3]  p7 [0.0,1.0]  p8 [-0.4,0.4]  p9 [-0.4,0.4]
+     * Default values are the per-input identity (no change until dialed on-device).
+     */
+    public void setBlindSpotParams(float hfov, float sideHFov, float yaw, float roll,
+                                   float feather, float projExp, float vscale, float pitch,
+                                   float rearRoll, float rearPitch) {
+        odParam[0] = Math.max(1.0f, Math.min(2.2f, hfov));
+        odParam[1] = Math.max(1.0f, Math.min(2.2f, sideHFov));
+        odParam[2] = Math.max(0.0f, Math.min(1.4f, yaw));
+        odParam[3] = Math.max(-0.4f, Math.min(0.4f, roll));
+        odParam[4] = Math.max(-0.4f, Math.min(0.4f, pitch));
+        odParam[5] = Math.max(0.4f, Math.min(1.6f, projExp));
+        odParam[6] = Math.max(0.7f, Math.min(1.3f, vscale));
+        odParam[7] = Math.max(0.0f, Math.min(1.0f, feather));
+        odParam[8] = Math.max(-0.4f, Math.min(0.4f, rearRoll));
+        odParam[9] = Math.max(-0.4f, Math.min(0.4f, rearPitch));
+        resolveCoef();
+        this.uniformsDirty.set(true);
+    }
+
+    /** Set which side (view 7 = -1, view 8 = +1) the coefficients resolve for,
+     *  then re-resolve. Called when the view mode changes to 7/8. */
+    public void setBlindSpotSide(float sign) {
+        if (Float.compare(sign, this.odSign) == 0) return;
+        this.odSign = sign;
+        resolveCoef();
+        this.uniformsDirty.set(true);
+    }
+
+    /** Resolve the sampler coefficients via the native module. odIn is length 11:
+     *  indices 0-9 are the raw params (odParam) and index 10 is the per-side sign.
+     *  No-op-safe: Od zeroes the output if unauthorized. Reuses odIn (param-change
+     *  events only, never per-frame; same single-thread assumption as odCoef). */
+    private void resolveCoef() {
+        System.arraycopy(odParam, 0, odIn, 0, 10);
+        odIn[10] = odSign;
+        com.overdrive.app.od.Od.resolve(odIn, odCoef);
+    }
+
     public void setRedMaskEnabled(boolean enabled) {
         if (enabled == this.redMaskEnabled) return;   // idempotent
         this.redMaskEnabled = enabled;
@@ -695,7 +891,9 @@ public class GpuStreamScaler {
         // The legacy 4-strip math stays for uApaMode <= 2.5 paths.
         return String.format(Locale.US,
             "#extension GL_OES_EGL_image_external : require\n" +
-            "precision mediump float;\n" +
+            // highp: the view 7/8 sampler needs the extra precision (mediump, the
+            // Adreno 610 fragment default, shimmers the seam). Other paths insensitive.
+            "precision highp float;\n" +
             "uniform samplerExternalOES uCameraTex;\n" +
             "uniform samplerExternalOES uOemTex;\n" +
             "uniform mat4 uOemTexMatrix;\n" +
@@ -712,8 +910,153 @@ public class GpuStreamScaler {
             "uniform vec2 uFlipForLeft;\n" +
             "uniform float uRedMaskStrength;\n" +
             "uniform float uApaCenterInset;\n" +
+            // Resolved coefficient set (host-supplied; see com.overdrive.app.od.Od).
+            "uniform vec4 uOd0;\n" +
+            "uniform vec4 uOd1;\n" +
+            "uniform vec4 uOd2;\n" +
+            "uniform vec4 uOd3;\n" +
+            // 5th opaque coefficient vec4 (rear-tap params; defaults identity).
+            "uniform vec4 uOd4;\n" +
             "varying vec2 vTexCoord;\n" +
             "varying vec2 vUnit;\n" +
+            // View 7/8 sampler. All geometry is host-resolved into uOd0..3
+            // (com.overdrive.app.od); this only gathers from those coefficients.
+            "const float OD_C = 1.55334303;\n" +
+            "vec2 odMap(vec2 corner, vec2 rectSize, vec2 flip,\n" +
+            "           float pixAspect, float ang, float tH,\n" +
+            "           float y, float doRoll, float pitch, float cr, float sr) {\n" +
+            "    if (tH < 0.0001) return corner;\n" +
+            "    float a  = clamp(ang, -OD_C, OD_C);\n" +
+            "    float ca = max(cos(a), 0.0175);\n" +
+            // Resample exponent on uOd2.z; the > guard keeps the unauthorized/
+            // zero-coefficient path at the identity mapping.
+            "    float h1n = atan(tH);\n" +
+            "    float pexp = uOd2.z;\n" +
+            "    float an = clamp(abs(a) / h1n, 0.0, 1.0);\n" +
+            "    float xm = (pexp > 0.0001) ? pow(an, pexp) : an;\n" +
+            "    float xn = -sign(a) * xm;\n" +
+            "    float ly = y * 2.0 - 1.0;\n" +
+            "    float yn = (ly * pixAspect / ca) * uOd3.w;\n" +
+            "    float den = 1.0;\n" +
+            "    xn /= den;\n" +
+            "    yn /= den;\n" +
+            "    if (doRoll > 0.5) {\n" +
+            "        float par = 1.0;\n" +
+            "        if (flip.x > 0.5) par = -par;\n" +
+            "        if (flip.y > 0.5) par = -par;\n" +
+            // cr/sr are per-tap coefficients; par applies the quadrant mirror.
+            "        float srp = sr * par;\n" +
+            "        vec2  rxy = vec2(cr * xn - srp * yn, srp * xn + cr * yn);\n" +
+            "        xn = rxy.x;\n" +
+            "        yn = rxy.y + pitch;\n" +
+            "    }\n" +
+            "    xn = clamp(xn, -1.0, 1.0);\n" +
+            "    yn = clamp(yn, -1.0, 1.0);\n" +
+            "    float ql = xn * 0.5 + 0.5;\n" +
+            "    float qm = yn * 0.5 + 0.5;\n" +
+            "    if (flip.x > 0.5) ql = 1.0 - ql;\n" +
+            "    if (flip.y > 0.5) qm = 1.0 - qm;\n" +
+            "    vec2 uv = corner + vec2(ql, qm) * rectSize;\n" +
+            "    vec2 lo = corner + rectSize * 0.0020;\n" +
+            "    vec2 hi = corner + rectSize - rectSize * 0.0020;\n" +
+            "    return clamp(uv, lo, hi);\n" +
+            "}\n" +
+            "vec4 odBlend(vec2 cA, vec2 fA, vec2 cB, vec2 fB,\n" +
+            "             vec2 rectSize, float pixAspect,\n" +
+            "             float sideSign, float xOut, float yOut) {\n" +
+            "    float lo   = uOd0.x;\n" +
+            "    float hi   = uOd0.y;\n" +
+            "    float h0   = uOd0.w;\n" +
+            "    float h1   = uOd1.x;\n" +
+            "    float ctr  = uOd1.y;\n" +
+            "    float bMid = uOd1.z;\n" +
+            "    float bHf  = uOd1.w;\n" +
+            // Each card renders only its own side's half of the output axis.
+            "    float thA  = (sideSign > 0.0) ? hi : 0.0;\n" +
+            "    float thB  = (sideSign > 0.0) ? 0.0 : lo;\n" +
+            "    float th   = thA - clamp(xOut, 0.0, 1.0) * (thA - thB);\n" +
+            "    float c0  = step(abs(th),       h0);\n" +
+            "    float c1  = step(abs(th - ctr), h1);\n" +
+            "    float s   = (th - bMid) * sideSign;\n" +
+            "    float wOv = smoothstep(-bHf, bHf, s);\n" +
+            "    float wB  = c1 * (c0 * wOv + (1.0 - c0));\n" +
+            "    float cov = max(c0, c1);\n" +
+            "    vec4 a = vec4(0.0);\n" +
+            "    vec4 b = vec4(0.0);\n" +
+            "    if (c0 > 0.5) {\n" +
+            // tap A uses uOd4.xyz; defaults are the identity transform.
+            "        a = texture2D(uCameraTex, odMap(cA, rectSize, fA, pixAspect, th, uOd2.x, yOut, 1.0, uOd4.z, uOd4.x, uOd4.y));\n" +
+            "    }\n" +
+            "    if (c1 > 0.5) {\n" +
+            // tap B uses uOd3.xyz.
+            "        b = texture2D(uCameraTex, odMap(cB, rectSize, fB, pixAspect, th - ctr, uOd2.y, yOut, 1.0, uOd3.z, uOd3.x, uOd3.y));\n" +
+            "    }\n" +
+            // STRAIGHT (non-premultiplied) blended color in .rgb, coverage in .a.
+            // The BS card path does lighting on straight color then premultiplies
+            // ONCE by the final alpha, so no-coverage regions are TRANSPARENT (map
+            // shows through) — not opaque black, and no specular leaks at alpha 0.
+            // cov is binary (max of two step()s).
+            "    return vec4(mix(a, b, wB).rgb, cov);\n" +
+            "}\n" +
+            // Blind-spot card mask params (views 7/8 only). aspect = outputWidth/
+            // outputHeight so the rounded corners are circular, not stretched.
+            // uBsRadius = corner radius as a fraction of the SHORTER half-axis
+            // (0=square, 1=stadium); uBsFeather ≈ 1.5px for a clean AA edge. The
+            // coverage itself is computed inline in the 7/8 branches from the
+            // inset card SDF (bsRoundBoxSDF) so the same field drives the curved
+            // bevel — see the framing helpers below.
+            "uniform float uBsRadius;\n" +
+            "uniform float uBsAspect;\n" +
+            "uniform float uBsFeather;\n" +
+            // ── 3D "curved glass card" framing (views 7/8) ───────────────────────
+            // The video stays flat + uniform-scale; only the EDGE reads as 3D.
+            // One analytic rounded-box SDF (IQ form) drives card coverage + a lit,
+            // curved bevel rim with a thin specular edge — all in a single fragment
+            // pass, NO derivatives. No drop shadow. ES 2.0 / Chrome-58 safe.
+            "uniform float uBsMargin;\n" +      // card inset per side (buffer fraction)
+            "uniform float uBsBevelW;\n" +      // bevel band width (aspect-space SDF units)
+            "uniform float uBsBevelLight;\n" +  // top-rim brighten gain
+            "uniform float uBsBevelDark;\n" +   // bottom-rim darken gain
+            "uniform vec2  uBsLightDir;\n" +    // light dir in aspect space (top-lit)
+            "uniform float uBsSpecW;\n" +       // specular band half-width
+            "uniform float uBsSpecInt;\n" +     // specular add intensity
+            // Full IQ signed-distance to a rounded box (outside>0, inside<0). Reused
+            // for card coverage and the curved bevel band.
+            "float bsRoundBoxSDF(vec2 p, vec2 he, float r) {\n" +
+            "    vec2 d = abs(p) - (he - vec2(r));\n" +
+            "    return length(max(d, 0.0)) - r + min(max(d.x, d.y), 0.0);\n" +
+            "}\n" +
+            // Analytic outward normal (== gradient direction) of the rounded-box
+            // field, WITHOUT dFdx/dFdy. Outer/edge region: radial s*normalize(max(q,0));
+            // inner core: the dominant min-plane axis. One normalize, no taps.
+            "vec2 bsRoundBoxNormal(vec2 p, vec2 he, float r) {\n" +
+            "    vec2 q = abs(p) - (he - vec2(r));\n" +
+            "    vec2 s = sign(p);\n" +
+            "    vec2 outer = max(q, 0.0);\n" +
+            "    if (outer.x + outer.y > 1e-6) {\n" +
+            "        return s * normalize(outer + vec2(1e-6));\n" +
+            "    }\n" +
+            "    return (q.x > q.y) ? vec2(s.x, 0.0) : vec2(0.0, s.y);\n" +
+            "}\n" +
+            // Curved glass bezel: light the rim band of the inset card so the edge
+            // reads as a raised, rounded piece of glass — top rim catches the light,
+            // bottom rim falls into shadow (light from above), thin specular on the
+            // top arc. The bevel weight ramps QUADRATICALLY from the edge inward so
+            // the brightness rolls off like a curved surface, not a flat chamfer.
+            // 'sd' is the card SDF (negative inside); p is the aspect-space position.
+            "vec3 bsApplyRim(vec3 rgb, vec2 p, vec2 cardHe, float cardR, float sd) {\n" +
+            "    vec2  nrm = bsRoundBoxNormal(p, cardHe, cardR);\n" +
+            "    float t = clamp((-sd) / max(uBsBevelW, 1e-4), 0.0, 1.0);\n" +  // 0 at edge → 1 inward
+            "    float curve = (1.0 - t) * (1.0 - t);\n" +   // quadratic roll-off = rounded profile
+            "    float bevel = curve * step(-uBsBevelW - uBsFeather, sd);\n" +
+            "    float rim  = dot(nrm, uBsLightDir);\n" +
+            "    float lit  = bevel * max(rim, 0.0) * uBsBevelLight;\n" +   // top edge brightens
+            "    float shad = bevel * max(-rim, 0.0) * uBsBevelDark;\n" +   // bottom edge darkens
+            "    rgb = clamp(rgb * (1.0 + lit - shad), 0.0, 1.0);\n" +
+            "    float specBand = 1.0 - smoothstep(0.0, uBsSpecW, abs(sd));\n" +
+            "    float spec = specBand * max(-nrm.y, 0.0) * uBsSpecInt;\n" +  // thin top highlight
+            "    return clamp(rgb + vec3(spec), 0.0, 1.0);\n" +
+            "}\n" +
             "void main() {\n" +
             "    // View 6 with OEM bound: sample the OEM camera external\n" +
             "    // texture using its own transform matrix on the\n" +
@@ -770,6 +1113,50 @@ public class GpuStreamScaler {
             "        if (flip.y > 0.5) sampledLocal.y = 0.5 - sampledLocal.y;\n" +
             "        samplePos = corner + sampledLocal;\n" +
             com.overdrive.app.camera.GlUtil.APA_CENTER_INSET_GLSL +
+            "    } else if (uApaMode > 2.5 && (uViewMode == 7 || uViewMode == 8)) {\n" +
+            "        // View 7/8 sampler (DiLink 4).\n" +
+            "        //   mode 7 (camera blend mode L) = sideSign -1\n" +
+            "        //   mode 8 (camera blend mode R) = sideSign +1\n" +
+            "        // Camera identity is ground-truthed by the single-view modes that\n" +
+            "        // already render correctly: mode 4 (LEFT) reads uProducerForLeft,\n" +
+            "        // mode 2 (RIGHT) reads uProducerForRight. So uProducerForLeft IS\n" +
+            "        // the left cam; no swap.\n" +
+            "        bool isLeftBtn = (uViewMode == 7);\n" +
+            "        vec2  sideCorner = isLeftBtn ? uProducerForLeft : uProducerForRight;\n" +
+            "        vec2  sideFlip   = isLeftBtn ? uFlipForLeft     : uFlipForRight;\n" +
+            "        float sideSign   = isLeftBtn ? -1.0 : 1.0;\n" +
+            // 3D curved glass card: inset the video into the card region (uniform
+            // scale, no distortion) and light the curved bevel rim. One analytic
+            // SDF drives coverage + bevel. Alpha is gated on od coverage so the
+            // map shows through any region the projection doesn't fill.
+            "        vec2 he     = vec2(uBsAspect, 1.0) * 0.5;\n" +
+            "        vec2 p      = (vTexCoord - 0.5) * vec2(uBsAspect, 1.0);\n" +
+            "        float mh    = min(he.x, he.y);\n" +
+            "        float rr    = clamp(uBsRadius, 0.0, 1.0) * mh;\n" +
+            "        vec2 mrg    = vec2(uBsMargin * uBsAspect, uBsMargin);\n" +
+            "        vec2 cardHe = he - mrg;\n" +
+            "        float cardR = min(rr, min(cardHe.x, cardHe.y));\n" +
+            "        float sd    = bsRoundBoxSDF(p, cardHe, cardR);\n" +
+            "        float bsCov = 1.0 - smoothstep(-uBsFeather, uBsFeather, sd);\n" +
+            "        vec3 rgb = vec3(0.0);\n" +
+            "        float vidCov = 0.0;\n" +    // od coverage; 0 where the projection has no pixels
+            "        if (bsCov > 0.0029) {\n" +  // skip odBlend outside the card body
+            "            vec2 cardUv = clamp((vTexCoord - uBsMargin) / max(1.0 - 2.0 * uBsMargin, 1e-4), 0.0, 1.0);\n" +
+            "            vec4 bsCol = odBlend(uProducerForRear, uFlipForRear,\n" +
+            "                               sideCorner, sideFlip,\n" +
+            "                               vec2(0.5), 0.5,\n" +
+            "                               sideSign, cardUv.x, cardUv.y);\n" +
+            "            vidCov = bsCol.a;\n" +   // 1 where video covers, 0 where it doesn't
+            "            rgb = bsApplyRim(bsCol.rgb, p, cardHe, cardR, sd);\n" +
+            "        }\n" +
+            // Alpha = card coverage × video coverage: rounded corners AND any region
+            // the od projection doesn't fill are TRANSPARENT (map shows through), not
+            // opaque black. No drop shadow. rgb is STRAIGHT (lit) color; premultiply
+            // ONCE by the final alpha so corner AA + edge specular never leak color
+            // where alpha is 0.
+            "        float outA = bsCov * vidCov;\n" +
+            "        gl_FragColor = vec4(rgb * outA, outA);\n" +
+            "        return;\n" +
             "    } else if (uViewMode == 5) {\n" +
             "        samplePos = vTexCoord;\n" +
             "    } else if (uApaMode > 1.5) {\n" +
@@ -799,6 +1186,41 @@ public class GpuStreamScaler {
             "        float localX = mod(vTexCoord.x, 0.5) * 0.5;\n" +
             "        float localY = mod(vTexCoord.y, 0.5) * 2.0;\n" +
             "        samplePos = vec2(localX + stripOffsetX, localY);\n" +
+            "    } else if (uViewMode == 7 || uViewMode == 8) {\n" +
+            "        // View 7/8 sampler (legacy 4-strip).\n" +
+            "        //   mode 7 (camera blend mode L) = sideSign -1\n" +
+            "        //   mode 8 (camera blend mode R) = sideSign +1\n" +
+            "        // Camera identity per single-view modes (2=Right->rightOffset,\n" +
+            "        // 4=Left->leftOffset). So left btn reads leftOffset; no swap.\n" +
+            "        bool isLeftBtn = (uViewMode == 7);\n" +
+            "        float sideX    = isLeftBtn ? leftOffset : rightOffset;\n" +
+            "        float sideSign = isLeftBtn ? -1.0 : 1.0;\n" +
+            // 3D curved glass card (legacy 4-strip variant): same framing math as
+            // the DiLink-4 branch, only the odBlend arg list differs. Separate GLSL
+            // block scope, so the bs* locals are re-declared cleanly (no clash).
+            "        vec2 he     = vec2(uBsAspect, 1.0) * 0.5;\n" +
+            "        vec2 p      = (vTexCoord - 0.5) * vec2(uBsAspect, 1.0);\n" +
+            "        float mh    = min(he.x, he.y);\n" +
+            "        float rr    = clamp(uBsRadius, 0.0, 1.0) * mh;\n" +
+            "        vec2 mrg    = vec2(uBsMargin * uBsAspect, uBsMargin);\n" +
+            "        vec2 cardHe = he - mrg;\n" +
+            "        float cardR = min(rr, min(cardHe.x, cardHe.y));\n" +
+            "        float sd    = bsRoundBoxSDF(p, cardHe, cardR);\n" +
+            "        float bsCov = 1.0 - smoothstep(-uBsFeather, uBsFeather, sd);\n" +
+            "        vec3 rgb = vec3(0.0);\n" +
+            "        float vidCov = 0.0;\n" +
+            "        if (bsCov > 0.0029) {\n" +
+            "            vec2 cardUv = clamp((vTexCoord - uBsMargin) / max(1.0 - 2.0 * uBsMargin, 1e-4), 0.0, 1.0);\n" +
+            "            vec4 bsCol = odBlend(vec2(rearOffset, 0.0), vec2(0.0),\n" +
+            "                               vec2(sideX, 0.0),      vec2(0.0),\n" +
+            "                               vec2(0.25, 1.0), 0.5,\n" +
+            "                               sideSign, cardUv.x, cardUv.y);\n" +
+            "            vidCov = bsCol.a;\n" +
+            "            rgb = bsApplyRim(bsCol.rgb, p, cardHe, cardR, sd);\n" +
+            "        }\n" +
+            "        float outA = bsCov * vidCov;\n" +   // transparent corners + no-coverage
+            "        gl_FragColor = vec4(rgb * outA, outA);\n" +   // premultiplied once
+            "        return;\n" +
             "    } else {\n" +
             "        float startX = frontOffset;\n" +
             "        if (uViewMode == 2) startX = rightOffset;\n" +

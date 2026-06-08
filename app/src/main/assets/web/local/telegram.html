@@ -10,7 +10,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="theme-color" content="#00876C">
-    <script src="../shared/theme.js?v=4"></script>
+    <script src="../shared/theme.js?v=5"></script>
     <script src="../shared/app-shell.js"></script>
     <!--
       Bottom-tab manifest. Three task-based tabs:
@@ -26,7 +26,7 @@
         ];
     </script>
     <script src="../shared/app-tabs.js"></script>
-    <link rel="stylesheet" href="../shared/styles.css?v=13">
+    <link rel="stylesheet" href="../shared/styles.css?v=14">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
     <style>
@@ -64,8 +64,12 @@
             background: var(--bg-elevated);
             border-radius: 12px;
         }
-        .tg-bot-info .tg-bot-name { font-weight: 600; color: var(--text-primary); }
-        .tg-bot-info .tg-bot-handle { font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+        /* Ellipsize the name + monospace @handle: a long bot handle would
+           otherwise blow the row's width past a ~360px phone. The wrapping
+           <div> already carries flex:1;min-width:0, so a nowrap+ellipsis
+           here clips cleanly within the available width. */
+        .tg-bot-info .tg-bot-name { font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .tg-bot-info .tg-bot-handle { font-size: 12px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .tg-empty {
             text-align: center;
             padding: 28px 16px;

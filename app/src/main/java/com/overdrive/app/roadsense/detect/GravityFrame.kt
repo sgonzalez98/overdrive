@@ -69,6 +69,23 @@ class GravityFrame(
     private var hay = 0f
     private var haz = 0f
 
+    // LATCHED fore-aft (longitudinal) unit axis + the EFFECTIVE axis used by the
+    // pitch/roll split. The live EMA (hax/hay/haz) decays back toward 0 within ~1–2 s
+    // of horizontal accel returning to nil, so on the common "brake early, then coast
+    // the last stretch to the breaker" approach the axis would be GONE by the time the
+    // breaker is hit and the pitch vote would silently never fire. But the head unit is
+    // RIGIDLY MOUNTED, so the device-frame fore-aft direction is effectively constant
+    // for the whole drive — once we've seen it confidently we can hold it. So we LATCH
+    // the unit direction whenever the live EMA is strongly established (≥ LONG_AXIS_
+    // LATCH_MAG) and fall back to the latch when the live EMA has decayed below the
+    // usable floor. effLx/effLy/effLz + longAxisAvail are recomputed once per accel
+    // sample in update() (single IPC thread, same as the rest of the hot path → no
+    // volatile needed) and read by pitchRate/rollRate/pitchAxisReady on the gyro path.
+    private var latLx = 0f; private var latLy = 0f; private var latLz = 0f
+    private var longAxisLatched = false
+    private var effLx = 0f; private var effLy = 0f; private var effLz = 0f
+    private var longAxisAvail = false
+
     /**
      * Longitudinal (brake/accel, fore-aft) component of the most recent sample's
      * horizontal residual (m/s², ≥0): the projection of the gravity-free horizontal
@@ -159,6 +176,31 @@ class GravityFrame(
             val latSq = horizontalResidual * horizontalResidual - longComp * longComp
             lateralResidual = if (latSq > 0f) sqrt(latSq) else 0f
         }
+
+        // ---- Latched fore-aft axis for the PITCH/ROLL split (gyro path) -----------
+        // (The longitudinal/lateral RESIDUAL split above intentionally keeps using the
+        // LIVE EMA — it's about current brake/launch energy. Only the pitch/roll gyro
+        // split wants a held axis so it survives coasting up to the breaker.) When the
+        // live EMA is strongly established, refresh the latch to the current fore-aft
+        // unit direction (the rigid mount makes this constant for the drive, so a stale
+        // latch from earlier in the SAME drive is still valid). The EFFECTIVE axis is
+        // the live EMA when it's usable, else the latch.
+        if (laMag >= LONG_AXIS_LATCH_MAG) {
+            latLx = hax / laMag; latLy = hay / laMag; latLz = haz / laMag
+            longAxisLatched = true
+            effLx = latLx; effLy = latLy; effLz = latLz
+            longAxisAvail = true
+        } else if (laMag >= LONG_AXIS_MIN_MAG) {
+            // Live EMA still usable but not strong enough to (re)latch — use it as-is.
+            effLx = hax / laMag; effLy = hay / laMag; effLz = haz / laMag
+            longAxisAvail = true
+        } else if (longAxisLatched) {
+            // Live EMA decayed (coasting) → fall back to the held axis from this drive.
+            effLx = latLx; effLy = latLy; effLz = latLz
+            longAxisAvail = true
+        } else {
+            longAxisAvail = false
+        }
         return dot - mag
     }
 
@@ -167,6 +209,70 @@ class GravityFrame(
         val mag = gravityMagnitude
         return if (mag < 1e-3f) floatArrayOf(0f, 0f, 1f)
         else floatArrayOf(gx / mag, gy / mag, gz / mag)
+    }
+
+    /**
+     * Signed component of the vector (x,y,z) ALONG the measured gravity unit vector
+     * (i.e. about/along the true vertical), in the same units as the input.
+     * Allocation-free (no array) so it's safe to call on the 100 Hz gyro path — used
+     * to isolate the true YAW rate (rotation about vertical) from a bump's pitch/roll
+     * transient, which the old largest-axis proxy mis-read as cornering. Falls back to
+     * the raw Z component before the gravity estimate has seeded (degenerate magnitude),
+     * matching the pre-tilt-correction behaviour during warm-up.
+     */
+    fun alongGravity(x: Float, y: Float, z: Float): Float {
+        val m = gravityMagnitude
+        return if (m < 1e-3f) z else (x * gx + y * gy + z * gz) / m
+    }
+
+    /**
+     * True once the slow longitudinal-axis estimate has enough magnitude to define a
+     * fore-aft direction — the precondition for separating PITCH (about the lateral
+     * axis) from ROLL (about the longitudinal axis) in [pitchRate]/[rollRate]. The
+     * longitudinal axis is the EMA of gravity-free horizontal accel, so it firms up
+     * once the car brakes/accelerates (e.g. slowing for a breaker); before that the
+     * fore-aft direction is ambiguous and pitch/roll can't be cleanly split. When
+     * false, callers should treat the pitch reading as "not measured" (same posture as
+     * asymmetryValid), never as a real zero.
+     */
+    val pitchAxisReady: Boolean
+        get() = longAxisAvail
+
+    /**
+     * Signed PITCH rate (rad/s) of the gyro vector (x,y,z): its rotation about the
+     * LATERAL axis ŝ = ĝ × l̂ (ĝ = measured gravity/vertical unit, l̂ = the EFFECTIVE
+     * longitudinal unit — the live EMA when usable, else the latched fore-aft direction
+     * held from earlier in the drive so it survives coasting up to the breaker). Pitch
+     * is the nose-up→over→down rotation a transverse SPEED BREAKER taken head-on
+     * produces, somewhat speed-robust and distinct from the body ROLL a one-sided
+     * pothole causes — the signal RoadSense uses to corroborate breaker vs pothole (the
+     * user's "up-down gyro movement" ask). Returns 0 when no fore-aft axis is available
+     * ([pitchAxisReady] false). Allocation-free (hot 100 Hz gyro path). abs() by caller.
+     */
+    fun pitchRate(x: Float, y: Float, z: Float): Float {
+        val gMag = gravityMagnitude
+        if (gMag < 1e-3f || !longAxisAvail) return 0f
+        val ux = gx / gMag; val uy = gy / gMag; val uz = gz / gMag         // vertical unit
+        // effective longitudinal unit (already normalized in update())
+        // lateral axis = ĝ × l̂ (ĝ and l̂ are ~orthogonal — l̂ is gravity-free horizontal)
+        var sx = uy * effLz - uz * effLy
+        var sy = uz * effLx - ux * effLz
+        var sz = ux * effLy - uy * effLx
+        val sMag = sqrt(sx * sx + sy * sy + sz * sz)
+        if (sMag < 1e-3f) return 0f
+        sx /= sMag; sy /= sMag; sz /= sMag
+        return x * sx + y * sy + z * sz
+    }
+
+    /**
+     * Signed ROLL rate (rad/s) of the gyro vector (x,y,z): its rotation about the
+     * EFFECTIVE LONGITUDINAL (fore-aft) axis — the body roll a one-sided pothole/curb
+     * hit causes. Returns 0 when no fore-aft axis is available ([pitchAxisReady] false).
+     * Allocation-free; caller takes abs() for a peak.
+     */
+    fun rollRate(x: Float, y: Float, z: Float): Float {
+        if (!longAxisAvail) return 0f
+        return x * effLx + y * effLy + z * effLz
     }
 
     /** Tilt of the device's Z axis off true vertical, in degrees (diagnostics). */
@@ -181,6 +287,8 @@ class GravityFrame(
         gx = 0f; gy = 0f; gz = 0f; seeded = false; count = 0; horizontalResidual = 0f
         hax = 0f; hay = 0f; haz = 0f
         longitudinalResidual = 0f; lateralResidual = 0f
+        latLx = 0f; latLy = 0f; latLz = 0f; longAxisLatched = false
+        effLx = 0f; effLy = 0f; effLz = 0f; longAxisAvail = false
     }
 
     companion object {
@@ -199,6 +307,21 @@ class GravityFrame(
          *  enough that a ~180 ms bump transient barely perturbs the axis (so the
          *  bump's kick lands in the lateral remainder, not the longitudinal one). */
         const val LONG_AXIS_ALPHA = 0.01f
+
+        /** Min magnitude (m/s²) of the slow longitudinal-axis EMA before it defines a
+         *  trustworthy fore-aft direction for the pitch/roll split ([pitchRate]/
+         *  [rollRate]/[pitchAxisReady]). Below this the horizontal accel has been ~nil
+         *  (steady cruise, no braking/launch) so the axis is noise; ~0.3 m/s² is well
+         *  above sensor jitter yet easily reached by the deceleration before a breaker.
+         *  PROVISIONAL. */
+        const val LONG_AXIS_MIN_MAG = 0.3f
+
+        /** Min live-EMA magnitude (m/s²) to (re)LATCH the fore-aft direction for the
+         *  pitch/roll split. Higher than [LONG_AXIS_MIN_MAG] so we only capture the axis
+         *  from a CONFIDENT brake/accel (not marginal drift), then hold it for the drive
+         *  (rigid mount ⇒ fore-aft is constant) so the pitch vote survives coasting to
+         *  the breaker. ~0.6 m/s² ≈ a light-but-deliberate deceleration. PROVISIONAL. */
+        const val LONG_AXIS_LATCH_MAG = 0.6f
 
         /** ~2 s at 100 Hz before we call the gravity estimate "warm". */
         const val WARMUP_SAMPLES = 200L

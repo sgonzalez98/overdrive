@@ -23,6 +23,13 @@ public class WebSocketStreamServer extends WebSocketServer
     private static final DaemonLogger logger = DaemonLogger.getInstance(TAG);
     private static final int PORT = 8887;
     private static final long IDLE_TIMEOUT_MS = 30_000;
+    // KF-RESYNC-002: how long to wait before retrying a per-client SPS/PPS
+    // re-send when a "keyframe" request arrives before the encoder has
+    // published its format (cachedSpsPps still null). A freshly-started
+    // bsEncoder dequeues its first INFO_OUTPUT_FORMAT_CHANGED within a few
+    // frame intervals (~tens of ms at 10–15 fps); 50ms comfortably covers
+    // that one-frame race while keeping the deferral imperceptible at reveal.
+    private static final long KEYFRAME_RESEND_DEFER_MS = 50L;
 
     private volatile byte[] cachedSpsPps = null;
     
@@ -122,10 +129,77 @@ public class WebSocketStreamServer extends WebSocketServer
         }
     }
 
+    /** Optional hook to ask the owning encoder for a fresh IDR when a client
+     *  requests a keyframe. Set by the pipeline to encoder::requestSyncFrame. */
+    private Runnable keyframeRequestHook;
+    public void setKeyframeRequestHook(Runnable hook) { this.keyframeRequestHook = hook; }
+
     @Override
     public void onMessage(WebSocket conn, String message) {
         if ("keyframe".equals(message)) {
-            logger.info("Client requested keyframe");
+            // A client (e.g. the blind-spot overlay) requests a clean decode
+            // restart — typically because its decoder just (re)gained a Surface
+            // AFTER the connection's one-shot onOpen SPS/PPS replay was already
+            // sent and dropped (decoder had no Surface yet). Without re-delivering
+            // the parameter sets the decoder can never configure (maybeConfigure
+            // blocks on pps==null) and shows permanent black. So: (1) re-send the
+            // cached SPS/PPS to THIS client, and (2) ask the encoder for a fresh
+            // IDR so the next frame is independently decodable.
+            logger.info("Client requested keyframe — re-sending SPS/PPS + sync frame");
+            byte[] sps = cachedSpsPps;
+            if (sps != null && sps.length > 0) {
+                try { conn.send(sps); } catch (Exception e) {
+                    logger.warn("keyframe: SPS/PPS resend failed: " + e.getMessage());
+                }
+            } else {
+                // FIX KF-RESYNC-002: cachedSpsPps is still null because the owning
+                // encoder hasn't published its format yet. The drainer only calls
+                // onSpsPps() when it dequeues INFO_OUTPUT_FORMAT_CHANGED (the encoder's
+                // first coded output) — until then there are NO parameter sets to send.
+                // This races a fresh BS-lane enable: WsH264Client connects fast and its
+                // onOpen fires "keyframe" within milliseconds, often BEFORE the just-
+                // started bsEncoder dequeues its first frame. Silently dropping the
+                // re-send here is the toggle-ON black screen — the per-client re-deliver
+                // promised by this handler never happens, and once streamHeadersSent
+                // flips true the drainer won't re-emit on its own either, so a client
+                // that asked too early gets nothing and maybeConfigure() blocks on
+                // pps==null. Defer one short retry: by the time it fires the encoder
+                // has almost always published format, and we re-send to THIS client
+                // transparently. This adds NO teardown path and is bounded — it only
+                // touches a single deferred send per keyframe request (the requestSync
+                // hook below still fires immediately to bias the next frame to an IDR),
+                // so keep-warm intent is untouched. Use a one-shot daemon Timer so we
+                // never block the WS reader thread; conn.isOpen() guards a client that
+                // disconnected during the deferral window.
+                final WebSocket deferredConn = conn;
+                Timer t = new Timer("WS-KeyframeRetry", true);
+                t.schedule(new TimerTask() {
+                    @Override
+                    public void run() {
+                        byte[] late = cachedSpsPps;
+                        if (late != null && late.length > 0 && deferredConn.isOpen()) {
+                            try { deferredConn.send(late); } catch (Exception e) {
+                                logger.warn("keyframe: deferred SPS/PPS resend failed: " + e.getMessage());
+                            }
+                        } else if (late == null) {
+                            // Encoder STILL hasn't published format after the deferral —
+                            // log so a wedged-encoder lane is visible (W-level: app-side
+                            // logcat only surfaces W/E). The onOpen one-shot already ran,
+                            // and the drainer's first INFO_OUTPUT_FORMAT_CHANGED will
+                            // sendToAll() this client anyway, so this is the diagnostic,
+                            // not a second retry loop (which would risk an unbounded
+                            // timer storm against a genuinely dead encoder).
+                            logger.warn("keyframe: encoder format still unpublished after deferral — relying on drainer onSpsPps broadcast");
+                        }
+                    }
+                }, KEYFRAME_RESEND_DEFER_MS);
+            }
+            Runnable hook = keyframeRequestHook;
+            if (hook != null) {
+                try { hook.run(); } catch (Throwable t) {
+                    logger.warn("keyframe: sync-frame hook failed: " + t.getMessage());
+                }
+            }
         }
     }
 
@@ -187,6 +261,24 @@ public class WebSocketStreamServer extends WebSocketServer
                     idleShutdownCallback.run();
                 } catch (Exception e) {
                     logger.error("Idle shutdown callback error", e);
+                }
+            } else {
+                // FIX BS-RC-001: no idle-shutdown callback was registered. Without a
+                // callback the bound port would stay held forever after the last
+                // client disconnects — so self-release here so the port frees within
+                // IDLE_TIMEOUT_MS of the last disconnect. The live-view wsStreamServer
+                // always has a callback and takes the branch above. NOTE: arm/disarm
+                // POLICY for the blind-spot lane (ACC + blindspot.enabled + debug
+                // preview) lives in BlindSpotOverlayService.tick(), which holds the WS
+                // socket the whole time it wants the lane warm — so this idle branch
+                // only fires for the BS lane once the overlay has ALREADY decided to
+                // stop and disconnected, making a port self-release the correct
+                // cleanup, not a policy decision.
+                logger.info("Idle timeout with no shutdown callback - self-releasing port");
+                try {
+                    shutdown();
+                } catch (Exception e) {
+                    logger.error("Idle self-shutdown error", e);
                 }
             }
         }

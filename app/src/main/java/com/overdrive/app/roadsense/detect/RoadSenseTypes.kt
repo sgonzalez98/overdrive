@@ -18,6 +18,30 @@ package com.overdrive.app.roadsense.detect
  * unit-testable. See dev/roadsense/03-ARCHITECTURE.md for the design.
  */
 
+/** Sentinel for "GPS altitude not available" / "level unknown". NaN so it never
+ *  accidentally compares close to a real altitude (every NaN comparison is false),
+ *  which structurally forces the fail-open branch in every altitude gate. NOT 0.0 —
+ *  a real sea-level fix exists and must not read as unknown. */
+const val ALTITUDE_UNKNOWN: Double = Double.NaN
+
+/** True when an altitude value is a real reading (not the unknown sentinel). */
+fun altitudeKnown(a: Double): Boolean = !a.isNaN()
+
+/** Max altitude delta (m) for two points to count as the "same level". GPS altitude
+ *  on automotive GNSS is ±10–30 m noisy, so this is deliberately large: only a CLEAR
+ *  delta beyond the noise envelope means "different deck" (tall flyover / stacked
+ *  ramp). A low overpass (~5 m) won't be separated — that fails SAFE (we keep
+ *  warning) rather than risk suppressing a real same-level hazard. PROVISIONAL. */
+const val ALTITUDE_MATCH_M: Double = 20.0
+
+/** Fail-OPEN altitude match: same level if EITHER altitude is unknown OR they're
+ *  within [ALTITUDE_MATCH_M]. Only two KNOWN altitudes differing by more than the
+ *  threshold count as different levels. This guarantees altitude noise / missing
+ *  data can never SUPPRESS a real hazard — the only path to suppression is a
+ *  confident, large mismatch (a genuine flyover/ramp). */
+fun altitudeMatches(a: Double, b: Double): Boolean =
+    !altitudeKnown(a) || !altitudeKnown(b) || kotlin.math.abs(a - b) <= ALTITUDE_MATCH_M
+
 /**
  * Hazard kind. Separate axis from [Severity] (D-011).
  *
@@ -101,6 +125,23 @@ data class DetectionCandidate(
     /** Lateral asymmetry 0..1: 0 = symmetric (full-width breaker), 1 = one-sided
      *  (single-wheel pothole). Derived from horizontal accel components. */
     val lateralAsymmetry: Float = 0f,
+    /** Peak |pitch rate| (rad/s) over the event window — the body's nose-up/down
+     *  rotation about the lateral axis (GravityFrame.pitchRate). A transverse speed
+     *  breaker taken head-on pitches the car hard; a one-sided pothole rolls it (low
+     *  pitch). This is the gyro "up-down" signature, somewhat speed-robust where the
+     *  vertical-accel peak is weak (slow crossings). Consumers MUST gate on
+     *  [pitchValid] — when false this is 0 ("not measured"), never a real zero. */
+    val peakPitchRate: Float = 0f,
+    /** Peak |roll rate| (rad/s) over the event window — body roll about the fore-aft
+     *  axis (GravityFrame.rollRate). High roll + low pitch ⇒ one-sided (pothole);
+     *  high pitch + low roll ⇒ full-width (breaker). Gate on [pitchValid]. */
+    val peakRollRate: Float = 0f,
+    /** Whether the pitch/roll split was actually established for this event (the slow
+     *  longitudinal-axis estimate had enough magnitude — GravityFrame.pitchAxisReady —
+     *  for at least one gyro sample in the window). When false, [peakPitchRate] /
+     *  [peakRollRate] are 0 and the classifier ignores the pitch vote (same posture as
+     *  [asymmetryValid]). Default false so tests/callers without gyro stay inert. */
+    val pitchValid: Boolean = false,
     /** Whether [lateralAsymmetry] is actually MEASURED for this event. The
      *  horizontal-accel stage IS built (GravityFrame splits the gravity-free
      *  horizontal residual into lateral/longitudinal; EventDetector pairs the
@@ -140,6 +181,11 @@ data class Pose(
     val speedMps: Float,
     val bearingDeg: Float,
     val accuracyM: Float,
+    /** WGS-84 ellipsoidal altitude (m) from the GPS fix, or [ALTITUDE_UNKNOWN] (NaN)
+     *  when the fix carried none. GPS altitude is noisy (±10–30 m), so it's used ONLY
+     *  as a coarse level disambiguator (flyover vs road below), never fine geometry.
+     *  Default unknown so any caller that omits it stays fail-open. */
+    val altitudeM: Double = ALTITUDE_UNKNOWN,
 )
 
 /**
@@ -157,6 +203,10 @@ data class RoadSenseHazard(
     val speedKmh: Float,
     val aVertPeak: Float,
     val tMs: Long,
+    /** Altitude (m, WGS-84) of the car when this hazard was detected, or
+     *  [ALTITUDE_UNKNOWN] (NaN). Disambiguates a flyover hazard from one on the
+     *  surface road directly below. Default unknown → fail-open match. */
+    val altitudeM: Double = ALTITUDE_UNKNOWN,
 )
 
 /**

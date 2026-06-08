@@ -338,8 +338,22 @@ public class TelemetryDataCollector {
             boolean deviceFailed = false;
             try {
                 double rawSpeed = (double) getCurrentSpeedMethod.invoke(speedDevice);
-                speedKmh = (int) rawSpeed;
-                lastSpeedKmh = speedKmh;
+                // BYDAutoSpeedDevice.getCurrentSpeed() returns the value in the
+                // cluster's configured unit (mph on imperial trims), so normalize
+                // to canonical km/h here — matching the contract every downstream
+                // consumer assumes (overlay display, trip scoring). On km trims the
+                // factor is 1.0, so this is a no-op. Mirrors the conversion
+                // BydDataCollector already applies on its own speed path.
+                //
+                // Guard the SDK sentinel (-2.147482624E9, returned without throwing
+                // when the value is unavailable) and any negative/NaN glitch BEFORE
+                // the multiply: sentinel × the imperial factor overflows int32 into
+                // a bogus +838M km/h that would poison the overlay and the trip's
+                // max/avg/histogram. On a bad read we keep the last-known-good speed.
+                if (isValidRawSpeed(rawSpeed)) {
+                    speedKmh = (int) Math.round(rawSpeed * speedToKmhFactor());
+                    lastSpeedKmh = speedKmh;
+                }
             } catch (Exception e) {
                 logger.warn("Failed to read speed: " + e.getMessage());
                 deviceFailed = true;
@@ -372,7 +386,8 @@ public class TelemetryDataCollector {
             if (speedKmh == prevSpeedForStaleCheck && !(speedKmh == 0 && lastGearMode == 1)) {
                 staleSpeedCount++;
                 if (staleSpeedCount >= STALE_THRESHOLD) {
-                    logger.warn("Speed device appears stale (same value " + speedKmh + " for " + (staleSpeedCount * POLL_INTERVAL_MS / 1000) + "s), reconnecting");
+                    long pollIntervalMs = overlayRecordingActive ? POLL_INTERVAL_MS : SLOW_POLL_INTERVAL_MS;
+                    logger.warn("Speed device appears stale (same value " + speedKmh + " for " + (staleSpeedCount * pollIntervalMs / 1000) + "s), reconnecting");
                     boolean reconnected = tryReconnectSpeedDevice();
                     if (reconnected) {
                         speedKmh = lastSpeedKmh;
@@ -513,6 +528,40 @@ public class TelemetryDataCollector {
     }
 
     /**
+     * Factor to convert a raw BYDAutoSpeedDevice.getCurrentSpeed() reading into
+     * canonical km/h. On imperial trims this is MILES_TO_KM (~1.609); on metric
+     * trims it is 1.0 (no-op). Sourced from {@link BydDataCollector}, the single
+     * place that detects the cluster's mileage unit. Defensive: any failure (or
+     * an uninitialized collector, where the factor still defaults to 1.0) falls
+     * back to 1.0 so a metric trim — the overwhelming majority — is never altered.
+     */
+    private double speedToKmhFactor() {
+        try {
+            com.overdrive.app.byd.BydDataCollector collector =
+                    com.overdrive.app.byd.BydDataCollector.getInstance();
+            if (collector != null) {
+                double f = collector.getDistanceToKmFactor();
+                if (f > 0) return f;
+            }
+        } catch (Throwable ignored) {
+            // BydDataCollector unavailable — treat as metric (factor 1.0)
+        }
+        return 1.0;
+    }
+
+    /**
+     * Whether a raw getCurrentSpeed() reading is a usable value rather than the
+     * SDK's "not available" sentinel (-2.147482624E9, returned without throwing),
+     * a negative glitch, or NaN. The {@code >= 0} floor covers all three (NaN
+     * comparisons are false), and crucially prevents the sentinel from being
+     * scaled by the imperial factor into an int32 overflow.
+     */
+    private static boolean isValidRawSpeed(double rawSpeed) {
+        return rawSpeed >= 0
+                && rawSpeed != com.overdrive.app.byd.BydFeatureIds.SDK_NOT_AVAILABLE;
+    }
+
+    /**
      * Try to re-obtain the BYDAutoSpeedDevice reference and verify it returns fresh data.
      * This can happen if the BYD service restarts between trips.
      * Returns true if reconnect succeeded and fresh data was obtained.
@@ -528,10 +577,16 @@ public class TelemetryDataCollector {
             double testSpeed = (double) getCurrentSpeedMethod.invoke(newDevice);
             int testAccel = (int) getAccelerateDeepnessMethod.invoke(newDevice);
             int testBrake = (int) getBrakeDeepnessMethod.invoke(newDevice);
-            
+
             // If we get here without exception, the device is alive
             speedDevice = newDevice;
-            lastSpeedKmh = (int) testSpeed;
+            // Normalize to km/h, same as the main poll path (no-op on metric trims).
+            // Guard the sentinel/negative so a not-yet-ready value doesn't overflow
+            // into a bogus speed; the device is still considered alive (the reads
+            // didn't throw), we just keep the last-known-good speed this tick.
+            if (isValidRawSpeed(testSpeed)) {
+                lastSpeedKmh = (int) Math.round(testSpeed * speedToKmhFactor());
+            }
             lastAccelPercent = testAccel;
             lastBrakePercent = testBrake;
             logger.info("Re-obtained BYDAutoSpeedDevice — verified working (speed=" + lastSpeedKmh + ")");

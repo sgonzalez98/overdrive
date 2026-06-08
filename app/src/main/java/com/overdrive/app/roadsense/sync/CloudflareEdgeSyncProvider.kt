@@ -1,10 +1,12 @@
 package com.overdrive.app.roadsense.sync
 
 import com.overdrive.app.logging.DaemonLogger
+import com.overdrive.app.roadsense.detect.ALTITUDE_UNKNOWN
 import com.overdrive.app.roadsense.detect.HazardType
 import com.overdrive.app.roadsense.detect.RoadSenseHazard
 import com.overdrive.app.roadsense.detect.Severity
 import com.overdrive.app.roadsense.detect.StoredHazard
+import com.overdrive.app.roadsense.detect.altitudeKnown
 import com.overdrive.app.roadsense.store.SpatialIndex
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -87,11 +89,17 @@ class CloudflareEdgeSyncProvider(
                     lng = o.optDouble("lng"),
                     type = typeFromOrdinal(o.optInt("type", 2)),
                     severity = severityFromLevel(o.optInt("severity", 1)),
-                    headingDeg = o.optDouble("heading", 0.0).toFloat(),
+                    // Heading may be null (unknown) on a cloud row — default to the
+                    // -1 sentinel, NOT 0.0, so the road-match gate treats it as
+                    // "unknown" (cone-only) rather than a real due-north heading.
+                    headingDeg = if (o.isNull("heading")) -1f else o.optDouble("heading", -1.0).toFloat(),
                     confidence = o.optDouble("confidence", 0.0).toFloat(),
                     speedKmh = 0f,            // cloud rows don't carry the original speed
                     aVertPeak = 0f,           // nor the raw peak — not needed for warnings
                     tMs = o.optLong("createdMs", updated),
+                    // Altitude may be null (unknown level) → fail-open sentinel.
+                    altitudeM = if (o.isNull("altitude")) ALTITUDE_UNKNOWN
+                        else o.optDouble("altitude", ALTITUDE_UNKNOWN),
                 )
             )
             val cur = highWater[tile] ?: 0L
@@ -117,6 +125,8 @@ class CloudflareEdgeSyncProvider(
                         .put("severity", h.severity.level)
                         .put("heading", h.headingDeg.toDouble())
                         .put("confidence", h.confidence.toDouble())
+                        // Altitude: send the real value or JSON null (unknown level).
+                        .put("altitude", if (altitudeKnown(h.altitudeM)) h.altitudeM else JSONObject.NULL)
                         .put("observedMs", sh.updatedMs)
                         .put("humanVerified", sh.humanVerified)
                 )

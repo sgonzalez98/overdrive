@@ -507,6 +507,35 @@ public class SohEstimator {
                     } catch (Exception e) {
                         logger.info("[diag] getBatteryCapacity failed: " + describeException(e));
                     }
+                    // getBatteryPowerHEV is the PHEV-priority remainKwh source in
+                    // collectBodywork — yet it was the ONE battery getter this dump
+                    // never logged. Field reports show it reading ~half the true
+                    // remaining energy at full charge (9.1 on an 18.3 kWh pack,
+                    // ratio≈0.497, constant across pack sizes). Log it raw next to
+                    // SOC so a single ACC-on capture at a known SOC confirms whether
+                    // the halving is in this getter specifically and whether it is a
+                    // clean 2.0× vs a per-string / tenths artifact.
+                    try {
+                        Object hev = bodyCls.getMethod("getBatteryPowerHEV").invoke(bodyDev);
+                        String hevHint = "";
+                        if (hev instanceof Number) {
+                            double hevVal = ((Number) hev).doubleValue();
+                            try {
+                                VehicleDataMonitor vdm = VehicleDataMonitor.getInstance();
+                                BatterySocData sd = vdm != null ? vdm.getBatterySoc() : null;
+                                if (sd != null && sd.socPercent > 0) {
+                                    double impliedFull = hevVal / (sd.socPercent / 100.0);
+                                    hevHint = " (raw kWh; soc=" + String.format("%.0f", sd.socPercent)
+                                        + "% → impliedFull=" + String.format("%.1f", impliedFull)
+                                        + " kWh, ×2=" + String.format("%.1f", hevVal * 2)
+                                        + "; compare to gross nominal " + nominalCapacityKwh + " kWh)";
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                        logger.info("[diag] BYDAutoBodyworkDevice.getBatteryPowerHEV = " + hev + hevHint);
+                    } catch (Exception e) {
+                        logger.info("[diag] getBatteryPowerHEV failed: " + describeException(e));
+                    }
                 }
             } catch (ClassNotFoundException e) {
                 logger.info("[diag] BYDAutoBodyworkDevice not on this firmware");
@@ -1272,6 +1301,26 @@ public class SohEstimator {
      */
     public void updateFromCapacityAh(double bmsReportedAh, int cellCount, boolean isPhev,
                                      double currentSocPercent) {
+        // grossNominalKwh<=0 → derive factory Ah from the nominalCapacityKwh field
+        // (correct when that field is already gross, e.g. BEV / PHEV auto-detect).
+        updateFromCapacityAh(bmsReportedAh, cellCount, isPhev, currentSocPercent, 0);
+    }
+
+    /**
+     * As {@link #updateFromCapacityAh(double, int, boolean, double)} but with an
+     * explicit gross-frame nameplate kWh for the factory-Ah derivation.
+     *
+     * <p>The BMS coulomb-count Ah ({@code bmsReportedAh}) is a PHYSICAL gross-frame
+     * measurement (~71 Ah on an 18.3 kWh gross / 15.2 kWh usable Blade pack). The
+     * factory Ah it is compared against must therefore also be GROSS. When the
+     * nominal field is in the USABLE frame (PHEV model-picker, e.g. 15.2), passing
+     * the usable value here would derive ~59 Ah and rail the anchor SOH to 110%+
+     * (rejected) — silently killing the anchor. {@code grossNominalKwh} carries the
+     * nameplate so the Ah math stays gross-consistent while the live SOH formula
+     * keeps using the usable field. Pass {@code 0} to fall back to the field.
+     */
+    public void updateFromCapacityAh(double bmsReportedAh, int cellCount, boolean isPhev,
+                                     double currentSocPercent, double grossNominalKwh) {
         synchronized (autoDetectLock) {
             if (!isPhev) return;                 // BEV: live formula is enough.
             if (capacityAhDisabled) return;
@@ -1279,8 +1328,11 @@ public class SohEstimator {
             if (bmsReportedAh <= 0 || cellCount <= 0) return;
 
             // Derive factory Ah first — needed by both the nameplate detector
-            // and the SOC-coupling detector to interpret bmsReportedAh.
-            double nominalAh = (nominalCapacityKwh * 1000.0)
+            // and the SOC-coupling detector to interpret bmsReportedAh. Use the
+            // gross-frame nameplate (see method contract) so the comparison
+            // against the physical BMS Ah counter is frame-consistent.
+            double grossKwh = (grossNominalKwh > 0) ? grossNominalKwh : nominalCapacityKwh;
+            double nominalAh = (grossKwh * 1000.0)
                 / (cellCount * BYD_BLADE_REFERENCE_CELL_VOLTAGE);
             if (nominalAh < 30 || nominalAh > 350) {
                 logger.debug("Capacity-Ah anchor rejected: derived nominal "
@@ -2058,6 +2110,15 @@ public class SohEstimator {
 
     private static double mapCarTypeToCapacity(String carType) {
         String ct = carType.toUpperCase();
+        // PHEV / DM-i marketing strings FIRST — otherwise "Seal U DM-i" falls into
+        // the BEV "SEAL U" branch (71.8) and "Destroyer 05" matches nothing. These
+        // return the GROSS nameplate (18.3); the live SOH formula reads it against
+        // the usable-frame remainKwh (~15.2) and the frame-mismatch anchor then
+        // nudges the user to the usable value. Keeps PHEV auto-detect in the right
+        // pack class instead of a wildly-wrong BEV capacity.
+        boolean isDmiString = ct.contains("DM-I") || ct.contains("DMI") || ct.contains("DM-P");
+        if (ct.contains("DESTROYER")) return 18.3;
+        if (isDmiString && (ct.contains("SEAL U") || ct.contains("SEALU") || ct.contains("SEAL-U"))) return 18.3;
         if (ct.contains("SEALION 6") || ct.contains("SEALION6") || ct.contains("SEA LION 6")) return 26.6;
         if (ct.contains("SEALION") || ct.contains("SEA LION")) return 91.3;
         if (ct.contains("SEAL U") || ct.contains("SEALU") || ct.contains("SEAL-U") || ct.contains("S7")) return 71.8;

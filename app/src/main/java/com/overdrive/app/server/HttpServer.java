@@ -181,7 +181,11 @@ public class HttpServer {
                 while (running && CameraDaemon.isRunning() && !serverSocket.isClosed()) {
                     try {
                         Socket client = serverSocket.accept();
-                        CameraDaemon.log("HTTP client: " + client.getRemoteSocketAddress());
+                        // (Removed per-accept "HTTP client:" log — it fired for
+                        // EVERY request including the blind-spot overlay's 250ms
+                        // /api/stream/turn poll, flooding the daemon log. The
+                        // per-request line below already records real requests and
+                        // now skips the high-frequency polling endpoints.)
                         threadPool.execute(() -> handleClient(client));
                     } catch (java.net.SocketException e) {
                         if (running) {
@@ -233,8 +237,17 @@ public class HttpServer {
                 return;
             }
             
-            CameraDaemon.log("HTTP: " + requestLine);
-            
+            // Skip logging high-frequency polling endpoints to keep the daemon log
+            // readable: the blind-spot overlay polls /api/stream/turn every 250ms
+            // (safety turn-indicator read) and /api/bs/status during warm, and the
+            // UI polls /status — at ~4-8 req/s these drown out everything else.
+            // All other requests still log.
+            if (!(requestLine.contains("/api/stream/turn")
+                    || requestLine.contains("/api/bs/status")
+                    || requestLine.startsWith("GET /status"))) {
+                CameraDaemon.log("HTTP: " + requestLine);
+            }
+
             // Parse headers
             String line;
             int contentLength = 0;
@@ -642,7 +655,13 @@ public class HttpServer {
         if (path.startsWith("/api/stream")) {
             return StreamingApiHandler.handle(method, path, body, out);
         }
-        
+
+        // Blind-spot dedicated-pipeline API (separate from /api/stream so it
+        // never shares the live-view stream's view/quality state).
+        if (path.startsWith("/api/bs/")) {
+            return StreamingApiHandler.handleBlindSpot(method, path, body, out);
+        }
+
         // GPS API
         if (path.startsWith("/api/gps")) {
             return GpsApiHandler.handle(method, path, body, out);
@@ -725,7 +744,18 @@ public class HttpServer {
         if (path.startsWith("/api/debug/car-property")) {
             return CarPropertyDebugApiHandler.handle(method, path, body, out);
         }
-        
+
+        // THROWAWAY de-risk spike for the native SurfaceControl blind-spot path:
+        // proves whether a non-fullscreen, GL-fed, positioned SurfaceControl layer
+        // composites on this firmware. Renders a red 400x300 box at (100,100) for
+        // ~6s and returns a capability report. Remove with BsSurfaceControlSpike.
+        if (path.startsWith("/api/debug/bs-spike")) {
+            org.json.JSONObject report =
+                com.overdrive.app.surveillance.BsSurfaceControlSpike.run();
+            HttpResponse.sendJson(out, report.toString());
+            return true;
+        }
+
         // Performance API
         if (path.startsWith("/api/performance")) {
             return PerformanceApiHandler.handle(method, path, body, out);
@@ -966,6 +996,12 @@ public class HttpServer {
                 // Without this, the UI can't tell a stuck activation from a
                 // normal cold-start delay.
                 recordingStatus.put("modeActive", rmm.isModeActive());
+                // wedged: modeActive is true (we think we're recording) but the
+                // encoder is structurally stuck — nothing is being written. Lets
+                // the status overlay / web card paint the RED fault state instead
+                // of a false GREEN "recording" during a stuck activation. Always
+                // false for PROXIMITY_GUARD and for a healthy/deferred recorder.
+                recordingStatus.put("wedged", rmm.isRecordingWedged());
                 // Diagnostic: number of consecutive GearMonitor.start() failures
                 // from the resync ticker. 0 = healthy; positive = HAL flaky.
                 int gmRetries = rmm.getGearMonitorRetryFailures();

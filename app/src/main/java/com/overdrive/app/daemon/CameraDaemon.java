@@ -4421,11 +4421,20 @@ public class CameraDaemon {
             if (com.overdrive.app.surveillance.NativeMotion.isLibraryLoaded()) {
                 log("Surveillance library loaded successfully");
             } else {
-                log("WARN: Surveillance library NOT available: " + 
+                log("WARN: Surveillance library NOT available: " +
                     com.overdrive.app.surveillance.NativeMotion.getLoadError());
             }
         } else {
             log("Surveillance library already loaded");
+        }
+
+        // Load libod.so via explicit path too — System.loadLibrary("od") can't
+        // resolve by name in the app_process daemon (same reason as surveillance).
+        // Without this, Od.resolve() returns zeros in the daemon and the view-7/8
+        // stitch shader gets all-zero coefficients → black blind-spot stream.
+        if (nativeLibDir != null) {
+            boolean odLoaded = com.overdrive.app.od.Od.tryLoadLibrary(nativeLibDir);
+            log("od native lib loaded (daemon): " + odLoaded);
         }
     }
     

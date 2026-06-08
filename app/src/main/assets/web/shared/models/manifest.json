@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "default": "seal",
   "baseUrl": "https://github.com/yash-srivastava/Overdrive-release/releases/download/models-v1/",
   "paintPresets": [
@@ -54,7 +54,9 @@
       "sizeBytes": 1711432,
       "sha256": "23a2b08e382a5c81fdda2c24df60173bd0a8a0d13713e434491d7eb2b182743b",
       "bundled": false,
-      "nominalKwh": 18.3
+      "phev": true,
+      "nominalKwh": 18.3,
+      "usableKwh": 15.2
     },
     {
       "id": "dolphin",
@@ -117,7 +119,9 @@
       "sizeBytes": 1708884,
       "sha256": "f2728598afcaaafc09899a36bd3f06900644935b14ec373a825b03bc6b13799b",
       "bundled": false,
-      "nominalKwh": 18.3
+      "phev": true,
+      "nominalKwh": 18.3,
+      "usableKwh": 15.2
     }
   ]
 }

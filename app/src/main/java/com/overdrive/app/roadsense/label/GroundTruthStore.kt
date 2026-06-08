@@ -68,8 +68,22 @@ class GroundTruthStore private constructor() {
                     // RAW detection features (the labeled input the detector saw)
                     "peak_up DOUBLE, peak_down DOUBLE, rise_ms INT, duration_ms INT," +
                     "dip_leading INT, speed_mps DOUBLE, axle_gap_ms INT, lateral_asym DOUBLE," +
+                    // gyro-derived pitch/roll features (breaker-vs-pothole; pitch_valid gates them)
+                    "peak_pitch_rate DOUBLE, peak_roll_rate DOUBLE, pitch_valid INT," +
                     "lat DOUBLE, lng DOUBLE, created_ms BIGINT);"
             )
+        }
+        // Migration: CREATE TABLE IF NOT EXISTS won't add columns to a pre-existing
+        // table, so add the pitch/roll features idempotently for older databases.
+        // H2 supports ADD COLUMN IF NOT EXISTS; a failure here must not crash init.
+        try {
+            connection?.createStatement()?.use { st ->
+                st.execute("ALTER TABLE roadsense_labels ADD COLUMN IF NOT EXISTS peak_pitch_rate DOUBLE;")
+                st.execute("ALTER TABLE roadsense_labels ADD COLUMN IF NOT EXISTS peak_roll_rate DOUBLE;")
+                st.execute("ALTER TABLE roadsense_labels ADD COLUMN IF NOT EXISTS pitch_valid INT;")
+            }
+        } catch (e: Exception) {
+            logger.error("GroundTruthStore pitch-column migration failed: " + e.message, e)
         }
     }
 
@@ -98,7 +112,8 @@ class GroundTruthStore private constructor() {
                     "INSERT INTO roadsense_labels (id, hazard_id, confirmed, user_severity, " +
                         "user_type, algo_type, algo_severity, algo_confidence, peak_up, peak_down, " +
                         "rise_ms, duration_ms, dip_leading, speed_mps, axle_gap_ms, lateral_asym, " +
-                        "lat, lng, created_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);"
+                        "peak_pitch_rate, peak_roll_rate, pitch_valid, " +
+                        "lat, lng, created_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);"
                 ).use { ps ->
                     ps.setString(1, UUID.randomUUID().toString())
                     ps.setString(2, hazardId)
@@ -116,9 +131,12 @@ class GroundTruthStore private constructor() {
                     ps.setDouble(14, candidate.speedMps.toDouble())
                     if (candidate.axlePairGapMs != null) ps.setInt(15, candidate.axlePairGapMs!!) else ps.setNull(15, java.sql.Types.INTEGER)
                     ps.setDouble(16, candidate.lateralAsymmetry.toDouble())
-                    ps.setDouble(17, lat)
-                    ps.setDouble(18, lng)
-                    ps.setLong(19, nowMs)
+                    ps.setDouble(17, candidate.peakPitchRate.toDouble())
+                    ps.setDouble(18, candidate.peakRollRate.toDouble())
+                    ps.setInt(19, if (candidate.pitchValid) 1 else 0)
+                    ps.setDouble(20, lat)
+                    ps.setDouble(21, lng)
+                    ps.setLong(22, nowMs)
                     ps.executeUpdate()
                 }
                 logger.info("ground-truth label: confirmed=$confirmed algo=$algoType/$algoSeverity hazard=$hazardId")

@@ -20,7 +20,11 @@ import java.io.File
 data class LogConfig(
     val logDir: String = "",
     val retentionHours: Int = 24,
-    val cleanupIntervalHours: Int = 6,
+    // 4h: matches DaemonLauncher.LOG_POLL_INTERVAL_SEC so the app-side cleaner
+    // and the daemon-side shell poller run on one coherent housekeeping cadence.
+    val cleanupIntervalHours: Int = 4,
+    // 5MB: matches DaemonLauncher.LOG_MAX_BYTES so a single log size policy
+    // governs both app-context logs and daemon stdout-redirect logs.
     val maxFileSizeMB: Int = 5,
     val rotationCount: Int = 3,
     val enableConsoleLog: Boolean = true,
@@ -81,12 +85,18 @@ data class LogConfig(
     
     /**
      * Validate configuration values.
+     *
+     * Upper bounds matter: `maxFileSizeMB` is consumed as
+     * `maxFileSizeMB * 1024 * 1024`. Even with the Long-arithmetic fix in
+     * LogManager, an absurd value (multi-GB cap) defeats rotation entirely, so
+     * we clamp it to a sane 1 GB ceiling here — the gate every persist path
+     * (updateLoggingConfig / importConfig) already runs through.
      */
     fun isValid(): Boolean {
         if (enableFileLog && logDir.isEmpty()) return false
-        return retentionHours >= 1 &&
-               cleanupIntervalHours >= 1 &&
-               maxFileSizeMB >= 1 &&
-               rotationCount >= 1
+        return retentionHours in 1..(24 * 30) &&     // ≤ 30 days
+               cleanupIntervalHours in 1..(24 * 7) && // ≤ 1 week
+               maxFileSizeMB in 1..1024 &&            // ≤ 1 GB (no Int overflow)
+               rotationCount in 1..100
     }
 }

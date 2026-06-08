@@ -68,7 +68,7 @@
         { divider: true, label: 'Settings', i18n: 'nav.settings_group' },
         { href: 'surveillance.html',                      i18n: 'nav.surveillance',   label: 'Surveillance',   svg: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>' },
         { href: 'recording.html',                         i18n: 'nav.recording_settings', label: 'Recording Settings', svg: '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>' },
-        { href: 'road-sense.html',                        i18n: 'nav.road_sense',     label: 'RoadSense',      svg: '<path d="M12 3v6"/><path d="M12 12h.01"/><path d="M7 21l3-7"/><path d="M17 21l-3-7"/><path d="M12 21v-2"/><path d="M12 17.5v-2"/>', svgExtra: 'stroke-linecap="round" stroke-linejoin="round"' },
+        { href: 'road-sense.html',                        i18n: 'nav.road_sense',     label: 'RoadSense',      svg: '<path d="M3.2 20.2 L8.6 11 L15.4 11 L20.8 20.2 Z"/><path d="M12 12.4v1.3M12 15.7v1.6M12 18.7v1.1"/><path d="M12 3.2v2.4"/><path d="M12 7.6h.01"/>', svgExtra: 'stroke-linecap="round" stroke-linejoin="round"' },
         { href: 'notifications.html',                     i18n: 'nav.notifications',  label: 'Notifications',  svg: '<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>' },
 
         // ===== About ===== — version, license, source, support links,
@@ -750,7 +750,13 @@
             }
             return;
         }
-        var view = (aux.view === 'top') ? 'top' : 'side';
+        // Preserve the aux's actual view ('top' | 'three-quarter' | 'side')
+        // so the sprite-cache key here matches the one mountVehicleCanvas
+        // filed the snapshot under. Collapsing to a 'top'|'side' binary
+        // mis-keyed the dashboard hero's 'three-quarter' canvas as 'side',
+        // so every colour change missed the cache and re-rendered WebGL +
+        // orphaned a sprite under the wrong key.
+        var view = (aux.view === 'top' || aux.view === 'three-quarter') ? aux.view : 'side';
         if (aux._spriteOnly) {
             // Sprite-only aux: setModel/setColor on the pseudo-instance
             // re-try the cache. On miss they upgrade to a live mount,

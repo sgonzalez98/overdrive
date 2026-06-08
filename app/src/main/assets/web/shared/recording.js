@@ -2002,7 +2002,7 @@ BYD.recording = {
     },
 
     _updateWindshieldToggleVisibility(layout) {
-        const subSetting = document.getElementById('dashcamWindshieldSetting');
+        const subSetting = document.getElementById('dashcamWindshieldRow');
         if (subSetting) {
             subSetting.style.display = layout === 'dashcam' ? 'flex' : 'none';
         }
@@ -2058,6 +2058,98 @@ BYD.recording = {
             }
         } catch (e) {
             if (BYD.utils && BYD.utils.toast) BYD.utils.toast(BYD.i18n.t('recording.layout_update_failed'), 'error');
+        }
+    },
+
+    /**
+     * Drive the "Recording Status" card (badge + Current State row) from the
+     * live daemon /status payload. core.js calls this on every status poll.
+     *
+     * Before this hook the card was hard-bound to the static "IDLE"/"Idle"
+     * markup in recording.html and never updated by any JS, so it read
+     * "not recording" permanently even while a clip was being written. We
+     * read the same recordingStatus.{isRecording,modeActive,pipelineRunning}
+     * fields the native status pill consumes — isRecording is the raw
+     * recorder boolean (momentarily false during the deferred-record window
+     * at cold start / ACC-on), and modeActive stays true across it, so we
+     * treat (isRecording || (modeActive && pipelineRunning)) as "recording"
+     * for the continuous-style modes. PROXIMITY_GUARD's not-recording state
+     * is the normal armed/idle state, so it shows "Armed" rather than a
+     * false "not recording".
+     */
+    updateFromStatus(status) {
+        var badge = document.getElementById('recStatusBadge');
+        var state = document.getElementById('recState');
+        if (!badge && !state) return;
+
+        var rec = status && status.recordingStatus;
+        // No recordingStatus in the payload (old daemon / daemon not yet up):
+        // leave the card on its last-known text rather than blanking it.
+        if (!rec) return;
+
+        var mode = rec.configuredMode || 'NONE';
+        var isRecording = !!rec.isRecording;
+        // Default the compound fields to isRecording so an older daemon that
+        // only emits isRecording behaves exactly as the bare flag.
+        var modeActive = (typeof rec.modeActive === 'boolean') ? rec.modeActive : isRecording;
+        var pipelineRunning = (typeof rec.pipelineRunning === 'boolean') ? rec.pipelineRunning : isRecording;
+        // wedged: modeActive is true but the encoder is structurally stuck —
+        // nothing is being written. Defaults false (healthy / older daemon).
+        var wedged = (rec.wedged === true);
+        var gear = rec.gear || 'P';
+        var accOn = (rec.accOn === true);
+        var isProximity = (mode === 'PROXIMITY_GUARD');
+        var off = (mode === 'NONE' || mode === 'UNKNOWN');
+
+        // Mirror the native status pill (StatusOverlayService.updateUI):
+        // the deferred-record window (modeActive && pipelineRunning while
+        // isRecording is momentarily false) counts as live, EXCEPT when the
+        // daemon reports the activation is wedged — then it must fall through
+        // to the fault state instead of a false "recording".
+        var deferredActive = !isProximity && modeActive && pipelineRunning && !wedged;
+        var recordingLive = isRecording || deferredActive;
+
+        // shouldBeRecording mirrors StatusOverlayService.shouldRecordingBeActive:
+        // CONTINUOUS records whenever ACC is on; DRIVE_MODE records in a driving
+        // gear (D/R/S/M/N, not P). Used only to paint the RED fault state when a
+        // continuous-style mode should be writing but isn't (wedged / stuck).
+        var driving = (gear === 'D' || gear === 'R' || gear === 'S' || gear === 'M' || gear === 'N');
+        var shouldBeRecording = accOn && (mode === 'CONTINUOUS'
+            || (mode === 'DRIVE_MODE' && driving));
+
+        var cls, badgeKey, stateKey;
+        if (off) {
+            cls = 'inactive'; badgeKey = 'recording.status_idle'; stateKey = 'common.idle';
+        } else if (recordingLive) {
+            cls = 'active'; badgeKey = 'recording.status_recording'; stateKey = 'recording.state_recording';
+        } else if (isProximity) {
+            // Armed, waiting for a radar trigger — not a fault.
+            cls = 'inactive'; badgeKey = 'recording.status_armed'; stateKey = 'recording.state_armed';
+        } else if (shouldBeRecording) {
+            // Continuous/drive mode SHOULD be writing but isn't (wedged encoder
+            // or stuck activation). Paint the red fault state — mirrors the
+            // native pill's status_danger branch so the secondary web card
+            // doesn't silently downgrade a real fault to a benign IDLE.
+            cls = 'errored'; badgeKey = 'recording.status_problem'; stateKey = 'recording.state_problem';
+        } else {
+            // Configured continuous/drive mode but standby (parked / ACC off).
+            cls = 'inactive'; badgeKey = 'recording.status_idle'; stateKey = 'common.idle';
+        }
+
+        if (badge) {
+            badge.classList.remove('active', 'inactive', 'errored');
+            badge.classList.add(cls);
+            // Re-point the data-i18n binding to the live key (rather than
+            // stripping it) so a runtime language switch — which re-translates
+            // [data-i18n] nodes via hydrate(document) — repaints this badge
+            // instantly in the new language instead of freezing it until the
+            // next status poll. All keys above are static catalog keys.
+            badge.setAttribute('data-i18n', badgeKey);
+            badge.textContent = BYD.i18n.t(badgeKey);
+        }
+        if (state) {
+            state.setAttribute('data-i18n', stateKey);
+            state.textContent = BYD.i18n.t(stateKey);
         }
     }
 };

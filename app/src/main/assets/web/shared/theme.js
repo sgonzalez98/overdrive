@@ -25,6 +25,67 @@
     var STORAGE_KEY = 'overdrive_theme';
     var DEFAULT_THEME = 'dark';
 
+    // ─── Step 0: viewport-height stabilizer ─────────────────────────────────
+    // Android System WebView (and iOS Safari) resolve vh / dvh / svh / lvh
+    // ONCE and don't reliably recompute them when the device rotates. After a
+    // landscape→portrait flip the layout root keeps the OLD (taller-landscape)
+    // height, so the bottom of the page is pushed past the visible viewport —
+    // i.e. "the page is cut off". This was previously papered over with a
+    // standalone-PWA @media svh/lvh dance in styles.css; the real fix is to
+    // publish the live height as a CSS custom property and keep it fresh.
+    //
+    // Layout roots consume `calc(var(--vh, 1vh) * 100)` (and the raw
+    // `var(--app-height)` where a px value is wanted). Because this script is
+    // a synchronous <head> include on every page, --vh is set BEFORE first
+    // paint — no flash, no stale first frame.
+    //
+    // orientationchange does not reliably emit a `resize`, and the new
+    // dimensions aren't ready the instant it fires, so we re-read on a couple
+    // of deferred ticks and broadcast a synthetic `resize`. That synthetic
+    // event transparently drives every existing resize-consumer —
+    // performance.js (chart canvas), vehicle-control.js (WebGL renderer),
+    // map.js (Leaflet invalidateSize), and this file's own theme-picker
+    // anchor — so canvases / maps / 3D re-measure on rotation without each
+    // page needing its own orientation handler.
+    function setViewportUnit() {
+        var h = window.innerHeight;
+        var root = document.documentElement;
+        // Runs in <head> before <body> parses; <html> always exists by spec,
+        // but guard anyway to mirror the innerHeight check and stay null-safe.
+        if (!h || !root) return;
+        root.style.setProperty('--vh', (h * 0.01) + 'px');
+        root.style.setProperty('--app-height', h + 'px');
+    }
+    setViewportUnit();
+
+    var vhDebounce = null;
+    function onViewportResize() {
+        if (vhDebounce) clearTimeout(vhDebounce);
+        vhDebounce = setTimeout(setViewportUnit, 80);
+    }
+    window.addEventListener('resize', onViewportResize);
+
+    function dispatchSyntheticResize() {
+        try {
+            window.dispatchEvent(new Event('resize'));
+        } catch (e) {
+            // Defensive: very old engines without the Event constructor.
+            var ev = document.createEvent('Event');
+            ev.initEvent('resize', true, false);
+            window.dispatchEvent(ev);
+        }
+    }
+    window.addEventListener('orientationchange', function () {
+        // Pass 0 reflows instantly (dims may still be stale); the deferred
+        // passes correct it once the WebView settles the post-rotation size.
+        [0, 250].forEach(function (delay) {
+            setTimeout(function () {
+                setViewportUnit();
+                dispatchSyntheticResize();
+            }, delay);
+        });
+    });
+
     // ─── Step 1: instant first paint ────────────────────────────────────────
     function readStoredTheme() {
         try {

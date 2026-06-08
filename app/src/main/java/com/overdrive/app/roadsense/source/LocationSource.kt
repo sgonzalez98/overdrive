@@ -1,6 +1,7 @@
 package com.overdrive.app.roadsense.source
 
 import com.overdrive.app.monitor.GpsMonitor
+import com.overdrive.app.roadsense.detect.ALTITUDE_UNKNOWN
 import com.overdrive.app.roadsense.detect.Pose
 
 /**
@@ -52,6 +53,10 @@ class LocationSource(
             speedMps = m.speed,         // GpsMonitor.getSpeed() is m/s (Location.getSpeed)
             bearingDeg = m.heading,
             accuracyM = m.accuracy,
+            // GpsMonitor stores 0.0 when the fix had no altitude (Location.hasAltitude
+            // false) — indistinguishable from a real sea-level fix, so map 0.0 to
+            // UNKNOWN and stay fail-open rather than risk a bogus level mismatch.
+            altitudeM = m.altitude.let { if (it == 0.0) ALTITUDE_UNKNOWN else it },
         )
     }
 

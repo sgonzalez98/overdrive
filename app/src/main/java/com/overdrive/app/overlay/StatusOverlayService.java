@@ -104,6 +104,25 @@ public class StatusOverlayService extends Service {
     // State
     private volatile String configuredMode = "NONE";
     private volatile boolean isRecording = false;
+    // Compound recording truth exported by the daemon alongside isRecording
+    // (HttpServer recordingStatus.modeActive / .pipelineRunning). isRecording
+    // is the raw recorder.isRecording() boolean, which is momentarily FALSE
+    // during the deferred-record window (cold start / ACC-on / hardReset:
+    // pendingRecordingPrefix set, recordingMode=true, but recorder hasn't
+    // latched yet) and on a transient writer-abort. modeActive stays TRUE
+    // across that window (RecordingModeManager keeps it true while
+    // pipeline.isRunning() && (isRecording || pendingRecordingPrefix!=null)),
+    // so the pill can show "active" instead of a false red REC for the
+    // multi-second window a poll tick would otherwise sample. See
+    // RecordingModeManager.java:487-488.
+    private volatile boolean modeActive = false;
+    private volatile boolean pipelineRunning = false;
+    // Daemon-reported wedge flag: modeActive is true but the encoder is
+    // structurally stuck (nothing being written). When set, the deferred-record
+    // window must NOT paint green — the pill falls through to the red fault
+    // branch so a stuck CONTINUOUS/DRIVE activation stays visible rather than
+    // being masked by modeActive. Defaults false (healthy / older daemon).
+    private volatile boolean recordingWedged = false;
     private volatile boolean tripEnabled = false;
     private volatile boolean tripActive = false;
     private volatile boolean daemonReachable = false;
@@ -490,15 +509,28 @@ public class StatusOverlayService extends Service {
         tvMicLabel = overlayView.findViewById(R.id.tvMicLabel);
 
         // Tap on REC chip → toggle the expanded action bar with mode
-        // quick-actions. If the daemon is showing a should-be-running-
-        // but-isn't state, the same tap doubles as the legacy "kick the
-        // recording" repair gesture so we don't lose that affordance.
+        // quick-actions.
+        //
+        // The action bar is the ONLY entry point to the mode chips, so the
+        // tap MUST always open/close it — regardless of recording state.
+        // The previous implementation early-returned after restartRecording()
+        // whenever (!isRecording && shouldRecordingBeActive()), which is the
+        // normal post-arm state for CONTINUOUS / DRIVE_MODE / PROXIMITY_GUARD
+        // before the first clip starts. That shadowed setActionBarExpanded()
+        // and made the chips unreachable in exactly those modes — the user
+        // saw "the pill isn't clickable" for everything except the GREEN
+        // (isRecording=true) state.
+        //
+        // We keep the legacy "kick a should-be-running-but-isn't daemon"
+        // repair gesture, but fire it only on the OPENING edge so that
+        // (a) re-tapping to collapse the bar doesn't queue redundant restart
+        // sockets, and (b) the bar stays collapsible by re-tap.
         recContainer.setOnClickListener(v -> {
-            if (!isRecording && shouldRecordingBeActive()) {
+            boolean willExpand = !actionBarExpanded;
+            if (willExpand && !isRecording && shouldRecordingBeActive()) {
                 restartRecording();
-                return;
             }
-            setActionBarExpanded(!actionBarExpanded);
+            setActionBarExpanded(willExpand);
         });
 
         // Long-press on REC → fast quick-toggle for the muscle-memory
@@ -1087,6 +1119,14 @@ public class StatusOverlayService extends Service {
                     configuredMode = recStatus.optString("configuredMode", "NONE");
                 }
                 isRecording = recStatus.optBoolean("isRecording", false);
+                // modeActive defaults to isRecording so an older daemon that
+                // emits recordingStatus but not modeActive/pipelineRunning
+                // still behaves exactly as before (no false "active").
+                modeActive = recStatus.optBoolean("modeActive", isRecording);
+                pipelineRunning = recStatus.optBoolean("pipelineRunning", isRecording);
+                // Older daemon without the wedge flag → defaults false, so the
+                // deferred-active path behaves as before (no wedge masking).
+                recordingWedged = recStatus.optBoolean("wedged", false);
                 currentGear = recStatus.optString("gear", "P");
                 accOn = recStatus.optBoolean("accOn", false);
             } else {
@@ -1095,6 +1135,12 @@ public class StatusOverlayService extends Service {
                 // We can't know the configured mode, so read it from the config file directly
                 org.json.JSONArray recArray = status.optJSONArray("recording");
                 isRecording = recArray != null && recArray.length() > 0;
+                // Old daemon has no separate modeActive/pipelineRunning signal —
+                // mirror isRecording so the compound gate below collapses to the
+                // pre-existing bare-isRecording behavior on that path.
+                modeActive = isRecording;
+                pipelineRunning = isRecording;
+                recordingWedged = false;
                 accOn = status.optBoolean("acc", false);
 
                 // Read configured mode from UnifiedConfigManager.
@@ -1187,12 +1233,19 @@ public class StatusOverlayService extends Service {
         // camera-overlay segment, so we only force-show when the user
         // hasn't disabled that segment in Settings.
         boolean keepAliveForActionBar = actionBarExpanded && cameraOverlayEnabled;
-        boolean anythingToShow = (recConfigured && cameraOverlayEnabled)
+        // The camera segment, when enabled, always warrants the overlay —
+        // even with recording stopped (mode NONE) — because the REC pill
+        // is the ONLY entry point to the action bar's mode chips. Without
+        // a persistent anchor the user has no way to START recording from
+        // the overlay once it's off. (recConfigured no longer gates this.)
+        boolean anythingToShow = cameraOverlayEnabled
                 || (tripEnabled && tripOverlayEnabled)
                 || keepAliveForActionBar;
 
-        Log.d(TAG, "updateUI: mode=" + configuredMode + " isRec=" + isRecording 
-                + " gear=" + currentGear + " acc=" + accOn 
+        Log.d(TAG, "updateUI: mode=" + configuredMode + " isRec=" + isRecording
+                + " modeActive=" + modeActive + " pipelineRunning=" + pipelineRunning
+                + " wedged=" + recordingWedged
+                + " gear=" + currentGear + " acc=" + accOn
                 + " tripEnabled=" + tripEnabled + " tripActive=" + tripActive
                 + " recConfigured=" + recConfigured + " shouldRec=" + (recConfigured && shouldRecordingBeActive())
                 + " pollFails=" + consecutivePollFailures);
@@ -1243,9 +1296,12 @@ public class StatusOverlayService extends Service {
         // Proximity guard should stay visible even when idle/armed (waiting for
         // a radar trigger) — hiding it would make users think the feature is off.
         boolean isProximityMode = "PROXIMITY_GUARD".equals(configuredMode);
-        boolean shouldShowRec = (recConfigured && cameraOverlayEnabled
-                && (isRecording || shouldRecordingBeActive() || isProximityMode))
-                || keepAliveForActionBar;
+        // Show the REC pill whenever the camera segment is enabled — it's
+        // the tappable anchor for the mode action bar, so it must remain
+        // present even when recording is stopped (mode NONE) or in a
+        // standby state (drive mode parked). The pill's color/label below
+        // communicates the actual state (off / armed / recording).
+        boolean shouldShowRec = cameraOverlayEnabled || keepAliveForActionBar;
         boolean shouldShowTrip = tripEnabled && tripOverlayEnabled;
         // Mic visibility piggybacks on REC visibility. Show whenever audio
         // is armed (configured + recording mode set) so the "armed/idle"
@@ -1288,24 +1344,51 @@ public class StatusOverlayService extends Service {
         
         overlayView.setVisibility(View.VISIBLE);
 
-        // Recording: show if configured AND user hasn't toggled the
-        // camera segment off in Settings → Status overlay; or if the
-        // user just popped the action bar from an OFF state (we paint a
-        // muted "OFF" chip so they have a visible anchor to tap a mode
-        // chip on, instead of the pill blinking out from under them).
-        if (keepAliveForActionBar && !recConfigured) {
-            recContainer.setVisibility(View.VISIBLE);
-            ivRecIcon.setImageResource(R.drawable.ic_overlay_rec_inactive);
-            tvRecLabel.setText(R.string.overlay_mode_off_label);
-            tvRecLabel.setTextColor(getColor(R.color.status_warning));
-        } else if (recConfigured && cameraOverlayEnabled) {
+        // Recording pill. The pill is the ONLY entry point to the mode
+        // action bar (tap → expand → OFF/CONT/DRIVE/PROX chips), so while
+        // the camera segment is enabled we keep it visible in EVERY state
+        // — including stopped (mode NONE) and standby (drive-mode parked).
+        // Previously those states set the pill GONE, which made it
+        // impossible to start recording from the overlay once it was off.
+        // The icon/label/color below still communicate the real state.
+        if (cameraOverlayEnabled || keepAliveForActionBar) {
             recContainer.setVisibility(View.VISIBLE);
 
-            // Determine if recording SHOULD be happening right now given mode + gear + ACC
             boolean shouldBeRecording = shouldRecordingBeActive();
             boolean isProximity = "PROXIMITY_GUARD".equals(configuredMode);
 
-            if (isRecording) {
+            // Compound "recording is live right now" truth. The daemon's raw
+            // isRecording (recorder.isRecording()) reads FALSE for the
+            // multi-second deferred-record window at cold start / ACC-on /
+            // hardReset (encoder format not yet published — pendingRecordingPrefix
+            // set, recordingMode=true) and on a transient writer-abort, even
+            // though a clip is genuinely being set up and frames land moments
+            // later. A 1-3s poll tick samples that window and used to paint a
+            // false red "REC" / "not recording". modeActive stays TRUE across it
+            // (RecordingModeManager continuousHealthy), so OR-ing (modeActive &&
+            // pipelineRunning) suppresses that false negative.
+            //
+            // BUT modeActive is ALSO re-affirmed true on every wedge-retry for a
+            // structurally stuck encoder (pending prefix that never resolves), so
+            // modeActive alone would mask a genuine fault as GREEN forever. We
+            // therefore also require !recordingWedged — the daemon publishes that
+            // flag from the SAME wedge detection that drives its retry, so a stuck
+            // activation falls through to the red shouldBeRecording branch below
+            // instead of showing a false "recording". PROXIMITY_GUARD is excluded
+            // (its not-recording state is the normal armed/idle state, handled by
+            // its own amber branch below).
+            boolean deferredActive = !isProximity && modeActive && pipelineRunning
+                    && !recordingWedged;
+            boolean recordingLive = isRecording || deferredActive;
+
+            if (!recConfigured) {
+                // Recording is OFF. Muted anchor so the user can tap to
+                // open the mode chips and turn it on. This is the state
+                // the previous code never rendered (pill was GONE).
+                ivRecIcon.setImageResource(R.drawable.ic_overlay_rec_inactive);
+                tvRecLabel.setText(R.string.overlay_mode_off_label);
+                tvRecLabel.setTextColor(getColor(R.color.status_stopped));
+            } else if (recordingLive) {
                 // All good — recording as expected. Green for every mode,
                 // including PROXIMITY_GUARD: when a radar trigger has actually
                 // started a clip, the pill goes green so the user can tell at a
@@ -1336,9 +1419,13 @@ public class StatusOverlayService extends Service {
                 tvRecLabel.setText("REC");
                 tvRecLabel.setTextColor(getColor(R.color.status_danger));
             } else {
-                // Not recording, but that's expected (e.g., drive mode in P gear)
-                // Hide the recording indicator since conditions don't require it
-                recContainer.setVisibility(View.GONE);
+                // Configured (e.g. drive mode) but standby — not recording is
+                // expected here (drive mode in P gear). Keep the pill visible
+                // as a muted standby anchor instead of hiding it, so the user
+                // can still open the action bar to switch modes while parked.
+                ivRecIcon.setImageResource(R.drawable.ic_overlay_rec_inactive);
+                tvRecLabel.setText(R.string.overlay_rec_inactive_label);
+                tvRecLabel.setTextColor(getColor(R.color.status_stopped));
             }
         } else {
             recContainer.setVisibility(View.GONE);

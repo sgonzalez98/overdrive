@@ -481,10 +481,22 @@ public class SocHistoryDatabase {
                         if (col != null && col.isInitialized() && col.isPhevPublic()) {
                             com.overdrive.app.byd.BydVehicleData vd = col.getData();
                             if (vd != null && !Double.isNaN(vd.capacityAh) && vd.capacityAh > 0) {
+                                // The capacity-Ah anchor works in the GROSS frame: the
+                                // BMS Ah is a physical coulomb count, and cellCount /
+                                // factory-Ah must match the nameplate pack. On PHEV the
+                                // nominal field may be USABLE (e.g. 15.2) — which maps to
+                                // no cell count and mis-derives the factory Ah. Prefer the
+                                // model's gross nameplate; fall back to the (usable or
+                                // gross) nominal field when no model is selected.
+                                double grossKwh = com.overdrive.app.server.ModelsApiHandler
+                                        .grossNameplateKwhForSelectedModel();
+                                double cellLookupKwh = grossKwh > 0
+                                        ? grossKwh : sohEst.getNominalCapacityKwh();
                                 int cells = com.overdrive.app.abrp.SohEstimator
-                                        .cellCountForCapacity(sohEst.getNominalCapacityKwh());
+                                        .cellCountForCapacity(cellLookupKwh);
                                 if (cells > 0) {
-                                    sohEst.updateFromCapacityAh(vd.capacityAh, cells, true, soc);
+                                    sohEst.updateFromCapacityAh(
+                                            vd.capacityAh, cells, true, soc, grossKwh);
                                 }
                             }
                         }

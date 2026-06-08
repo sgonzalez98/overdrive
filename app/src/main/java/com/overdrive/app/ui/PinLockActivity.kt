@@ -1,5 +1,9 @@
 package com.overdrive.app.ui
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Bundle
 import android.os.CountDownTimer
 import android.os.Handler
@@ -77,6 +81,26 @@ class PinLockActivity : AppCompatActivity() {
     private var verifyExecutor: ExecutorService? = null
     @Volatile private var verifyInFlight: Boolean = false
 
+    /**
+     * Minimizes the keypad when ACC turns ON.
+     *
+     * The PIN screen can reach the foreground on a non-user background launch
+     * (app-update relaunch, daemon/keepalive `am start`, process revival) while
+     * ACC is OFF — those launch paths don't carry the boot `minimize_on_start`
+     * suppression, so [MainActivity.maybeShowPinLock] gates and pushes us on
+     * top. When the driver then turns ACC ON, the keypad would otherwise sit
+     * over the BYD home screen with nothing to dismiss it. BootReceiver already
+     * receives these BYD ACC broadcasts; we register a process-local receiver
+     * for the same actions and [moveTaskToBack] (NOT finish) on the ON edge so
+     * MainActivity stays behind us with the PIN gate still armed.
+     *
+     * Event-driven by design: no polling, no HAL probe. AccMonitor.probeAccState
+     * blocks the caller up to ~400ms on a sentinel reading (Thread.sleep retry
+     * loop) and is unproven from the app UID, so it must not be polled on the
+     * keypad's looper.
+     */
+    private var accOnReceiver: BroadcastReceiver? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -124,6 +148,67 @@ class PinLockActivity : AppCompatActivity() {
 
         val info = PinManager.getLockoutInfo()
         if (info.lockedOut) startLockoutCountdown(info.remainingMs)
+
+        registerAccOnReceiver()
+    }
+
+    /**
+     * Register a process-local receiver for the BYD ACC-ON broadcasts so the
+     * keypad self-minimizes when the car wakes. Idempotent.
+     *
+     * Registered with the plain 2-arg form (no export flag) to match the
+     * codebase convention for external broadcasts — BydDataCollector's
+     * plug-edge receiver and ScreenOffReceiver register the same way. These
+     * are vendor broadcasts sent from the BYD system UID, so the receiver
+     * MUST be able to receive cross-UID broadcasts; RECEIVER_NOT_EXPORTED
+     * would silently block them. targetSdk=25 is exempt from the API-34
+     * mandatory-flag requirement, so the un-flagged form is safe on the head
+     * unit and preserves external delivery.
+     */
+    private fun registerAccOnReceiver() {
+        if (accOnReceiver != null) return
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    "com.byd.action.ACC_ON",
+                    "com.byd.action.IGN_ON" -> {
+                        // Unambiguous ACC/ignition ON edge — minimize the keypad.
+                        // We deliberately listen ONLY to the ON-specific actions,
+                        // not com.byd.accmode.ACC_MODE_CHANGED, which fires on BOTH
+                        // edges and carries no readable direction here: keying off
+                        // it would let an ACC-OFF transition dismiss a keypad the
+                        // user is actively typing into. moveTaskToBack just sends
+                        // the task behind home — the PIN gate stays armed and
+                        // re-fires on the next foreground entry. NOT finish().
+                        android.util.Log.i("PinLockActivity",
+                            "ACC ON broadcast ${intent.action} — minimizing keypad")
+                        moveTaskToBack(true)
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction("com.byd.action.ACC_ON")
+            addAction("com.byd.action.IGN_ON")
+        }
+        try {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(r, filter)
+            accOnReceiver = r
+        } catch (t: Throwable) {
+            android.util.Log.w("PinLockActivity",
+                "Failed to register ACC-on receiver: ${t.message}")
+        }
+    }
+
+    private fun unregisterAccOnReceiver() {
+        val r = accOnReceiver ?: return
+        accOnReceiver = null
+        try {
+            unregisterReceiver(r)
+        } catch (t: Throwable) {
+            // Already unregistered / never registered — benign.
+        }
     }
 
     override fun onPause() {
@@ -158,6 +243,7 @@ class PinLockActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        unregisterAccOnReceiver()
         lockoutTimer?.cancel()
         lockoutTimer = null
         verifyExecutor?.shutdownNow()

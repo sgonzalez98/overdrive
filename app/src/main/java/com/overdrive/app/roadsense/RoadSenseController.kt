@@ -13,6 +13,7 @@ import com.overdrive.app.roadsense.detect.HazardType
 import com.overdrive.app.roadsense.detect.ImuAccelSample
 import com.overdrive.app.roadsense.detect.ImuGyroSample
 import com.overdrive.app.roadsense.detect.ImuStream
+import com.overdrive.app.roadsense.detect.RawImuRecorder
 import com.overdrive.app.roadsense.detect.RejectionFilter
 import com.overdrive.app.roadsense.detect.RoadSenseHazard
 import com.overdrive.app.roadsense.detect.SeverityClassifier
@@ -90,6 +91,16 @@ class RoadSenseController @JvmOverloads constructor(
     private val calibrator = VehicleCalibrator()
     private val gpsBuffer = GpsRingBuffer()
     private val imuStream = DaemonImuStream()
+    // Debug raw-IMU recorder (D-036): captures raw 100 Hz accel+gyro + derived features to a
+    // size-capped CSV when roadSense.rawRecord is on, so RECALL (missed breakers) can be
+    // measured offline and the PROVISIONAL constants re-fit. Default-off; storage-bounded
+    // (see RawImuRecorder caps). @Volatile rawRecord: written on the tick thread
+    // (onWarningTick toggle), read on the IPC hot path (onAccel/onGyro).
+    private val rawRecorder = RawImuRecorder(clock = clock)
+    @Volatile private var rawRecord = false
+    // Last consumed ground-truth-mark timestamp (roadSense.rawMark), so a single adb/web poke
+    // records exactly one M row. Tick thread only.
+    private var lastRawMarkTs = 0L
     // Route coverage: which tiles we've driven (distinct from vehicle calibration).
     // Updated from the live pose; supplies the overlay's "new road vs mapped" signal.
     private val coverage = com.overdrive.app.roadsense.store.RouteCoverage()
@@ -120,6 +131,19 @@ class RoadSenseController @JvmOverloads constructor(
     private var peakYawTMs = 0L
     private var peakRoll = 0f
     private var peakRollTMs = 0L
+    // Separate, AXIS-RESOLVED pitch/roll peaks for the classifier's breaker-vs-pothole
+    // vote (the user's "up-down gyro movement" signal). DISTINCT from peakRoll above,
+    // which is the legacy pitch+roll-combined proxy kept untouched for RejectionFilter
+    // (G-4 cornering reject is heavily tuned — we don't perturb it). peakPitch is the
+    // body's nose-up/down rotation about the lateral axis (strong on a transverse
+    // breaker); peakTrueRoll is the fore-aft-axis roll (strong on a one-sided pothole).
+    // pitchEverValid records whether GravityFrame could isolate the axes for ≥1 gyro
+    // sample in the event window (longitudinal axis established).
+    private var peakPitch = 0f
+    private var peakPitchTMs = 0L
+    private var peakTrueRoll = 0f
+    private var peakTrueRollTMs = 0L
+    private var pitchEverValid = false
 
     // Persistent IMU-flow heartbeat state (diagnostics; IPC thread only).
     private var imuBatchCount = 0L
@@ -137,6 +161,9 @@ class RoadSenseController @JvmOverloads constructor(
     private val dropRejects = HashMap<String, Int>()
     // Coverage-persistence throttle (daemon tick thread only).
     private var lastCoveragePersistMs = 0L
+    // Sidecar stall-recovery relaunch throttle (daemon tick thread only) — don't spam
+    // `am start` while a just-relaunched sidecar is still coming up.
+    private var lastSidecarRelaunchMs = 0L
 
     // Rolling candidate rate for washboard rejection (events in the last window).
     private val recentCandidateMs = ArrayDeque<Long>()
@@ -187,13 +214,44 @@ class RoadSenseController @JvmOverloads constructor(
     // Last successful sync wall-clock, PERSISTED in UCM (roadSense.lastSyncMs) so a
     // daemon restart / new ACC session doesn't force an immediate re-sync — the
     // 2.5 h cadence survives reboots. -1 = not yet loaded.
-    private var lastSyncMs = -1L
+    // @Volatile: the actual sync now runs OFF the tick thread on [syncExecutor] (so a
+    // blocking download/upload can't stall the warn tick / overlay publish — see
+    // maybeSync). The tick thread only READS lastSyncMs for the cheap "is it due?"
+    // gate; it is WRITTEN solely on syncExecutor (single-threaded). Volatile gives the
+    // tick thread visibility of the latest write without a lock.
+    @Volatile private var lastSyncMs = -1L
     // Last uploaded row's updated_ms, PERSISTED in UCM (roadSense.lastUploadCursor)
     // so a daemon restart / ACC cycle doesn't re-scan and re-upload every eligible
     // local row from 0 (wasted bandwidth) and — worse — re-contribute this device's
     // own backlog under a NEW rotating deviceId after the 30-day id rotation,
     // self-inflating distinct-device consensus (audit network #5). -1 = not loaded.
+    // Read AND written ONLY on syncExecutor (never the tick thread), so no volatile
+    // needed — single-threaded access within the sync body, same as tileCursor.
     private var lastUploadCursor = -1L
+    // Dedicated single-thread executor for the BLOCKING crowdsource sync (download/
+    // upload are OkHttp calls with 10 s connect / 15 s read timeouts — see
+    // CloudflareEdgeSyncProvider). It MUST NOT run on the warn-tick thread: that thread
+    // is the same one that drives the regime poll AND publishes the overlay state every
+    // tick, and scheduleWithFixedDelay won't fire the next tick until the current one
+    // returns. A timing-out sync (~30 s) on that thread starves the overlay publish for
+    // ~30 s, the app's 4 s staleness window trips, and the overlay falls back to "Idle"
+    // — the exact production symptom. Created in start(), shutdownNow()+nulled in stop().
+    private var syncExecutor: java.util.concurrent.ExecutorService? = null
+    // True while a sync is submitted-but-not-yet-finished on syncExecutor. The tick
+    // thread checks this in the due-gate and SKIPS submitting another sync if one is
+    // already in flight, so a string of ticks during a slow/timing-out sync can't queue
+    // up a backlog of concurrent syncs. @Volatile: set by the tick thread on submit,
+    // cleared by syncExecutor in a finally when the task completes.
+    @Volatile private var syncInFlight = false
+    // Earliest wall-clock at which the NEXT sync attempt may run. 0 = no backoff in
+    // effect (the normal 2.5 h SYNC_MS cadence on lastSyncMs governs). Set to
+    // now + SYNC_RETRY_BACKOFF_MS by syncExecutor when an attempt completes with NO
+    // success, so a persistently-unreachable worker is retried every ~5 min rather than
+    // every tick (which, combined with the old "lastSyncMs only advances on success"
+    // design, was a permanent block-retry storm). Cleared (set 0) on success — success
+    // falls back to the existing 2.5 h lastSyncMs cadence. @Volatile: READ in the tick
+    // due-gate, WRITTEN on syncExecutor.
+    @Volatile private var nextSyncAttemptMs = 0L
 
     private data class PendingLabel(
         val hazardId: String,
@@ -227,6 +285,15 @@ class RoadSenseController @JvmOverloads constructor(
         ticker = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
             Thread(r, "roadsense-tick").apply { isDaemon = true }
         }
+        // Dedicated single-thread executor for the BLOCKING crowdsource sync, kept OFF
+        // the tick thread (see syncExecutor field doc): a timing-out OkHttp sync must
+        // never stall the regime poll / overlay publish that the tick drives. Single-
+        // thread (so the relocated lastSyncMs/lastUploadCursor/tileCursor/store/UCM work
+        // stays serialized exactly as it was when it ran inline on the one tick thread),
+        // daemon thread so it never blocks daemon shutdown.
+        syncExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "roadsense-sync").apply { isDaemon = true }
+        }
         ticker?.scheduleWithFixedDelay({
             try { onVehicleStatePoll(); onWarningTick() }
             catch (t: Throwable) { Log.w(TAG, "tick error: ${t.message}") }
@@ -239,11 +306,20 @@ class RoadSenseController @JvmOverloads constructor(
         started = false
         ticker?.shutdownNow()
         ticker = null
+        // Tear down the sync executor too. shutdownNow() interrupts any in-flight
+        // blocking OkHttp call so a timing-out sync can't hold shutdown open; it's a
+        // daemon thread anyway. Don't await — best-effort, the cursors are persisted
+        // per-success and the next start() reloads them.
+        syncExecutor?.shutdownNow()
+        syncExecutor = null
         imuStream.stop()
         // Stop the scoped fast-dynamics poll if it was running (DRIVING at shutdown).
         try { vehicleSource.collectorOrNull()?.stopFastDynamicsPoll() } catch (_: Throwable) {}
         RoadSenseImuSidecarService.stop(appContext)
         warnings.release()
+        // Flush + close any open raw recording (debug, D-036).
+        try { rawRecorder.stop() } catch (_: Throwable) {}
+        rawRecord = false
         // Flush learned state on a clean shutdown so the last minute isn't lost (the
         // throttled persists may not have fired right before stop). Best-effort.
         try {
@@ -263,7 +339,19 @@ class RoadSenseController @JvmOverloads constructor(
      * Entry point for the IPC server's `IMU_BATCH` case (DEFERRED patch). Decodes
      * the wire line and feeds the pipeline. Returns samples processed (for the
      * IPC ack), 0 if not an IMU_BATCH line or detector is paused.
+     *
+     * @Synchronized (audit threading): the IPC server dispatches on a fixed 8-thread
+     * pool (SurveillanceIpcServer newFixedThreadPool(8)), one line per connection. The
+     * sidecar normally batches ~10×/s over short-lived connections, but nothing
+     * GUARANTEES batch N's handler finishes before batch N+1's thread starts — a
+     * slow/stalled handler can overlap, and the whole detection pipeline (GravityFrame,
+     * EventDetector ring buffers, gyro peaks, calibrator, gpsBuffer, store-merge maps)
+     * is single-writer-by-contract and non-volatile on the hot path. Serializing here
+     * upholds that contract at ~10 calls/s cost — same posture as applyConfig's
+     * CONFIG_LOCK. onAccel/onGyro are only ever reached THROUGH this method (via
+     * imuStream.feed), so locking the entry point covers the entire pipeline.
      */
+    @Synchronized
     fun onImuBatch(line: String): Int {
         if (!started || regime != VehicleStateGate.Regime.DRIVING) return 0
         // Perform any pending reset HERE (on this single IPC/sensor thread) so all
@@ -334,14 +422,38 @@ class RoadSenseController @JvmOverloads constructor(
         regime = newRegime
 
         when {
-            action.startImu -> RoadSenseImuSidecarService.start(
-                appContext, RoadSenseImuSidecarService.ImuRate.FAST
-            )
+            action.startImu -> {
+                RoadSenseImuSidecarService.start(
+                    appContext, RoadSenseImuSidecarService.ImuRate.FAST
+                )
+                // Give the freshly-launched sidecar its grace window before the warn-tick
+                // stall check would consider relaunching it: lastFeedMs can be stale from
+                // a prior DRIVING stint (live stays true across RELAXED/OFF), so without
+                // this the first DRIVING tick after an OFF period would see a "stall" and
+                // fire a redundant `am start` on the service we just launched.
+                lastSidecarRelaunchMs = now
+            }
             action.slowImu -> RoadSenseImuSidecarService.start(
                 appContext, RoadSenseImuSidecarService.ImuRate.SLOW
             )
             action.stopImu -> RoadSenseImuSidecarService.stop(appContext)
         }
+
+        // App-side overlay lifecycle (D-024): show the floating pill/card whenever the
+        // feature is alive (ACC on + enabled ⇒ DRIVING or RELAXED), tear it down on OFF.
+        // The daemon launches it via `am` (startFromDaemon) because the overlay must
+        // appear on ACC-on WITHOUT the user opening MainActivity — its only other launch
+        // path. We only reach here on a real regime EDGE (the newRegime==regime early-
+        // return above already filtered no-ops), so this is one `am` per transition, not
+        // per tick. startFromDaemon is idempotent on a DRIVING↔RELAXED flip (am reuses
+        // the running service via onStartCommand). The overlay self-guards overlay
+        // permission, so this no-ops cleanly when it isn't granted.
+        if (newRegime == VehicleStateGate.Regime.OFF) {
+            com.overdrive.app.roadsense.overlay.RoadSenseOverlayService.stopFromDaemon()
+        } else {
+            com.overdrive.app.roadsense.overlay.RoadSenseOverlayService.startFromDaemon()
+        }
+
         if (action.persistState && newRegime != VehicleStateGate.Regime.DRIVING) {
             // Hazards are already persisted per-detection (map from drive one);
             // nothing buffered to flush. Request a transient-state reset so a stale
@@ -458,6 +570,8 @@ class RoadSenseController @JvmOverloads constructor(
         detector.reset()
         gpsBuffer.reset()
         peakYaw = 0f; peakYawTMs = 0L; peakRoll = 0f; peakRollTMs = 0L
+        peakPitch = 0f; peakPitchTMs = 0L; peakTrueRoll = 0f; peakTrueRollTMs = 0L
+        pitchEverValid = false
         recentCandidateMs.clear()
         lastRoughSectionMs = 0L
         cachedDynamics = null
@@ -490,7 +604,24 @@ class RoadSenseController @JvmOverloads constructor(
         // Refresh the Calibration-Mode flag BEFORE the regime gate so a card opened
         // while driving still reacts to the user toggling Calibration Mode off after
         // they've stopped (regime → RELAXED/OFF). Cheap mtime-gated read.
-        calibrationMode = RoadSenseConfig.snapshot(forceReload = false).calibrationMode
+        val cfgTick = RoadSenseConfig.snapshot(forceReload = false)
+        calibrationMode = cfgTick.calibrationMode
+
+        // Raw-IMU recorder lifecycle (D-036, debug): start/stop with the rawRecord flag, and
+        // consume a one-shot ground-truth MARK poked into roadSense.rawMark (adb/web). Runs
+        // every tick regardless of regime so you can arm recording + drop a "real breaker
+        // HERE" mark whether driving or stopped. Cheap mtime-gated reads; off the hot path.
+        //
+        // BuildConfig.DEBUG gate: the recorder is a DEV/tuning tool, never a shipped feature.
+        // In a release build BuildConfig.DEBUG is a compile-time `false` constant, so R8
+        // dead-strips this whole block — the shipped binary has NO path to start the recorder
+        // even if someone flips roadSense.rawRecord in the on-device config (it's a plain JSON
+        // file). rawRecord then stays false forever, so every capture site (the `if (rawRecord)`
+        // guards in onAccel/onGyro) is also dead. Same posture as Od.authorize's debug bypass.
+        if (com.overdrive.app.BuildConfig.DEBUG) {
+            maybeToggleRawRecorder(cfgTick.rawRecord)
+            if (rawRecord) maybeConsumeRawMark(now)
+        }
 
         // Consume any Calibration-Mode verdict / fire the G-7 auto-accept timeout
         // BEFORE the regime gate (and regardless of regime): a confirm card stays up
@@ -513,6 +644,24 @@ class RoadSenseController @JvmOverloads constructor(
         // The rest (approach warnings, coverage, sync) is only meaningful while DRIVING.
         if (regime != VehicleStateGate.Regime.DRIVING) return
 
+        // SIDECAR STALL RECOVERY (audit: isStalled was built but never wired). The IMU
+        // sidecar is an app-process foreground service started START_NOT_STICKY; if the
+        // OS kills it under memory pressure mid-DRIVING, batches stop arriving and the
+        // whole pipeline silently goes dark — calibration freezes and NO hazard is ever
+        // detected — until the next regime transition happens to re-launch it (which may
+        // be the entire trip away). Detect the gap here on the ~2 Hz tick and re-launch
+        // FAST, throttled so we don't spam `am` while a freshly-launched sidecar is still
+        // coming up. Only meaningful once data has flowed at least once (isStalled guards
+        // lastFeedMs>0), so a not-yet-started stream on a cold tick doesn't false-trip.
+        if (imuStream.isStalled(now) && (now - lastSidecarRelaunchMs) > SIDECAR_RELAUNCH_MS) {
+            lastSidecarRelaunchMs = now
+            Log.w(TAG, "IMU sidecar stalled → relaunch FAST")
+            plog.info("imu sidecar stalled (no batch >${DaemonImuStream.DEFAULT_STALL_MS}ms) → relaunching FAST")
+            try {
+                RoadSenseImuSidecarService.start(appContext, RoadSenseImuSidecarService.ImuRate.FAST)
+            } catch (t: Throwable) { Log.w(TAG, "sidecar relaunch failed: ${t.message}") }
+        }
+
         val cfg = RoadSenseConfig.snapshot(forceReload = false)
 
         val pose = locationSource.latest(now)
@@ -522,7 +671,8 @@ class RoadSenseController @JvmOverloads constructor(
             return
         }
         // Heading is reliable only when actually moving (GPS bearing is noise at
-        // crawl); ApproachEngine falls back to range-only when this is false.
+        // crawl); ApproachEngine SUPPRESSES warnings entirely when this is false
+        // (can't tell our road/direction without a reliable bearing — R-EXT-4).
         val headingReliable = pose.speedMps > HEADING_RELIABLE_MPS
 
         // Route coverage: record this tile (only while genuinely MOVING, so a parked
@@ -535,9 +685,10 @@ class RoadSenseController @JvmOverloads constructor(
         lastCoverageLevel = coverage.levelAt(pose.lat, pose.lng).ordinal
 
         warnings.onTick(pose, cfg, headingReliable)
-        // onTick already wrote overlay state when there was a hazard; when nothing
-        // is ahead WarningCoordinator calls clearApproach() (which writes idle), so
-        // the heartbeat is covered either way.
+        // onTick always publishes overlay state on every DRIVING tick, so the app
+        // overlay's 4 s staleness window never trips: a hazard ahead in a visual mode
+        // writes the card via showApproach; nothing ahead (or AUDIO-only mode, which
+        // shows no card) writes idle via clearApproach. Heartbeat covered in every mode.
 
         // Crowdsource sync runs on a much slower cadence than the warn tick.
         maybeSync(cfg, pose, now)
@@ -551,13 +702,28 @@ class RoadSenseController @JvmOverloads constructor(
      * Opt-in crowdsource sync (Phase 8, D-009). Throttled to [SYNC_MS]. Download
      * pulls confirmed hazards in the tiles around the current pose (delta-by-tile,
      * R-CRD-5); upload pushes this device's high-confidence local hazards (D-016).
-     * Both directions independently gated by config (default OFF, R-CRD-6). All
-     * network is blocking but we're on the slow daemon tick, off the IMU path.
+     * Both directions independently gated by config (default OFF, R-CRD-6).
+     *
+     * THREADING (production fix): the actual download()/upload() are BLOCKING OkHttp
+     * calls (10 s connect / 15 s read timeouts — CloudflareEdgeSyncProvider). They MUST
+     * NOT run on the warn-tick thread, which also drives the regime poll and publishes
+     * the overlay state every tick: scheduleWithFixedDelay won't fire the next tick
+     * until the current one returns, so a timing-out sync (~30 s) stalls the overlay
+     * publish past the app's 4 s staleness window and the overlay reads "Idle". So this
+     * method ONLY does the cheap "is a sync due?" gate on the tick thread, then SUBMITS
+     * the blocking body to the dedicated [syncExecutor]. The submitted body keeps all
+     * the existing audit-driven correctness (cursor tie guards, per-tile high-water,
+     * upsertCloudHazard, forceReload-before-write) verbatim — it's RELOCATED, not
+     * rewritten. Only ONE sync runs at a time ([syncInFlight] guard); overlapping ticks
+     * during a slow sync skip submitting another.
      */
     private fun maybeSync(cfg: RoadSenseConfig.Snapshot, pose: com.overdrive.app.roadsense.detect.Pose, now: Long) {
         if (!cfg.crowdDownload && !cfg.crowdUpload) return
+        // Already syncing on syncExecutor → don't queue another (one at a time).
+        if (syncInFlight) return
         // Lazy-load the persisted last-sync time on first use so a reboot doesn't
-        // re-sync. (cfg is fresh this tick; read the raw section for the long.)
+        // re-sync. (cfg is fresh this tick; read the raw section for the long.) Cheap
+        // file read, happens once; still on the tick thread but never blocks network.
         if (lastSyncMs < 0L) {
             lastSyncMs = try {
                 com.overdrive.app.config.UnifiedConfigManager.loadConfig()
@@ -565,12 +731,54 @@ class RoadSenseController @JvmOverloads constructor(
             } catch (_: Throwable) { 0L }
         }
         if (now - lastSyncMs < SYNC_MS) return
+        // Failure backoff: a prior attempt that made NO progress (worker unreachable,
+        // network down) parks the next attempt SYNC_RETRY_BACKOFF_MS out instead of
+        // letting it retry next tick. This preserves "retry transient failures sooner
+        // than 2.5 h" (audit network #5b) WITHOUT the every-tick block-retry storm the
+        // old design produced (lastSyncMs only advanced on success, so a persistently-
+        // failing worker was hammered as fast as the block allowed, forever).
+        if (now < nextSyncAttemptMs) return
+
+        // Due. Mark in-flight and hand the BLOCKING body to syncExecutor. Capture the
+        // pose/cfg/now by value (data-class snapshot + immutable args) so the task
+        // doesn't read shared tick-thread state. lastSyncMs/lastUploadCursor/tileCursor/
+        // store/UCM are all mutated INSIDE the task on the single sync thread — the tick
+        // thread only READ lastSyncMs above for the due-gate (volatile) — so there's no
+        // concurrent mutation of those fields.
+        syncInFlight = true
+        val exec = syncExecutor
+        if (exec == null || exec.isShutdown) { syncInFlight = false; return }
+        try {
+            exec.execute {
+                try { runSync(cfg, pose, now) }
+                catch (t: Throwable) { Log.w(TAG, "sync error: ${t.message}") }
+                finally { syncInFlight = false }
+            }
+        } catch (t: java.util.concurrent.RejectedExecutionException) {
+            // Executor shut down between the null-check and submit (stop() race) —
+            // clear the guard so a later start() can sync again.
+            syncInFlight = false
+        }
+    }
+
+    /**
+     * The BLOCKING crowdsource-sync body, RELOCATED off the warn-tick thread onto the
+     * single-thread [syncExecutor] (see maybeSync). Runs at most one-at-a-time, so the
+     * fields it reads/writes (lastSyncMs, lastUploadCursor, tileCursor) + the store /
+     * UnifiedConfigManager calls are single-writer here exactly as they were when this
+     * ran inline on the lone tick thread — the tick thread no longer mutates any of
+     * them (it only READS the volatile lastSyncMs for the due-gate). Internals (cursor
+     * tie guards, per-tile high-water advance, upsertCloudHazard vs upsertDetection,
+     * forceReload-before-write) are unchanged.
+     */
+    private fun runSync(cfg: RoadSenseConfig.Snapshot, pose: com.overdrive.app.roadsense.detect.Pose, now: Long) {
         // Don't advance/persist the cadence cursor until at least one enabled
         // direction actually succeeded (audit network #5b): download()/upload() are
         // designed to return ok=false (network down, worker unreachable, proxy mid-
         // transition) rather than throw, so advancing here would burn the full 2.5 h
         // window on a transient blip and defer the next retry for hours. A failed
-        // tick instead retries on the next housekeeping tick.
+        // attempt instead re-arms via the SYNC_RETRY_BACKOFF_MS cooldown below (the
+        // next attempt runs ~5 min out, not every tick — see the `else` branch).
         var anyOk = false
         // Set when the server capped the response and more rows match (cold/dense
         // first sync): schedule the NEXT sync SOON to drain the remaining pages
@@ -645,6 +853,14 @@ class RoadSenseController @JvmOverloads constructor(
                     anyOk = true
                     lastUploadCursor = batch.maxOf { it.updatedMs }
                     try {
+                        // forceReload BEFORE the merge-write (audit concurrency D, same
+                        // as persistCalibration): updateSection rewrites the WHOLE
+                        // roadSense section by merging our key onto our CACHED config. If
+                        // the app just toggled warnMode and ext4's 1 s mtime granularity
+                        // hides it from our mtime-gated cache, our rewrite would clobber
+                        // it back. Rebuild the merge from fresh disk so app-owned keys
+                        // survive (narrow window — only when crowd-upload is enabled).
+                        com.overdrive.app.config.UnifiedConfigManager.forceReload()
                         com.overdrive.app.config.UnifiedConfigManager.updateSection(
                             "roadSense",
                             org.json.JSONObject().put("lastUploadCursor", lastUploadCursor),
@@ -665,10 +881,29 @@ class RoadSenseController @JvmOverloads constructor(
         // instead of waiting the full cadence (cold/dense first sync only).
         if (anyOk) {
             lastSyncMs = if (morePending) now - SYNC_MS + SYNC_PAGE_DRAIN_MS else now
+            // Clear any failure backoff — success returns us to the normal cadence,
+            // governed by lastSyncMs (or the fast page-drain back-date above).
+            nextSyncAttemptMs = 0L
             try {
+                // forceReload first (audit concurrency D) — see lastUploadCursor write.
+                com.overdrive.app.config.UnifiedConfigManager.forceReload()
                 com.overdrive.app.config.UnifiedConfigManager.updateSection(
                     "roadSense", org.json.JSONObject().put("lastSyncMs", lastSyncMs))
             } catch (_: Throwable) {}
+        } else {
+            // No enabled direction made progress (worker unreachable / network down /
+            // proxy mid-transition; download()/upload() return ok=false rather than
+            // throw). We deliberately DON'T advance lastSyncMs (so a transient blip
+            // doesn't burn the 2.5 h window — audit network #5b), but we also must not
+            // retry every single tick: the old code did exactly that, and with a
+            // months-old lastSyncMs success the SYNC_MS guard never short-circuited, so
+            // a permanently-unreachable worker was retried as fast as the ~30 s block
+            // allowed, forever (the production block-retry storm). Park the next attempt
+            // ~SYNC_RETRY_BACKOFF_MS out instead — the due-gate in maybeSync respects
+            // nextSyncAttemptMs. NOT persisted to UCM: this is an in-memory cooldown, so
+            // it costs no config rewrite and naturally resets on daemon restart (where a
+            // fresh attempt is reasonable anyway).
+            nextSyncAttemptMs = now + SYNC_RETRY_BACKOFF_MS
         }
     }
 
@@ -764,6 +999,53 @@ class RoadSenseController @JvmOverloads constructor(
         Log.i(TAG, "calibration verdict id=$id confirmed=$confirmed sevΔ=$userSeverity typeΔ=$userType → label recorded")
     }
 
+    // ── Raw-IMU recorder (D-036, debug) ────────────────────────────────────────
+
+    /**
+     * Start/stop the raw recorder to match the rawRecord flag (tick thread). The IPC hot path
+     * reads only the @Volatile [rawRecord] boolean; actual file open/close happens here, off
+     * the 100 Hz path. We flip rawRecord true ONLY after a successful start() (a failed open —
+     * e.g. low disk — leaves it off so the hot path stays a clean no-op).
+     */
+    private fun maybeToggleRawRecorder(wantOn: Boolean) {
+        // The writer may have AUTO-STOPPED at the size cap while rawRecord was still true.
+        // Reconcile: flip our flag off so the hot path stops offering, and log why. The user
+        // re-arms (toggle rawRecord off→on) for a fresh capped file if they need more.
+        if (rawRecord && rawRecorder.capped) {
+            rawRecord = false
+            plog.info("raw IMU recorder auto-stopped at size cap (written=${rawRecorder.rowsWritten}) → ${rawRecorder.path}")
+            return
+        }
+        if (wantOn == rawRecord) return
+        if (wantOn) {
+            val p = try { rawRecorder.start() } catch (t: Throwable) { Log.w(TAG, "rawRec start: ${t.message}"); null }
+            rawRecord = (p != null)
+            if (rawRecord) { lastRawMarkTs = clock(); plog.info("raw IMU recorder ON → $p") }
+        } else {
+            try { rawRecorder.stop() } catch (_: Throwable) {}
+            rawRecord = false
+            plog.info("raw IMU recorder OFF (queued=${rawRecorder.rowsQueued} written=${rawRecorder.rowsWritten} dropped=${rawRecorder.rowsDropped})")
+        }
+    }
+
+    /**
+     * Consume a one-shot ground-truth MARK from roadSense.rawMark — "a REAL hazard was HERE",
+     * the recall anchor (replay matches marks against detections). The web/adb writes a JSON
+     * {ts, label}; we record one M row per NEW ts at the current pose. forceReload because the
+     * APP UID writes it; only reached while recording, so the cross-UID read cost is rare.
+     */
+    private fun maybeConsumeRawMark(now: Long) {
+        val mk = try {
+            com.overdrive.app.config.UnifiedConfigManager.forceReload()
+                .optJSONObject("roadSense")?.optJSONObject("rawMark")
+        } catch (_: Throwable) { null } ?: return
+        val ts = mk.optLong("ts", 0L)
+        if (ts <= lastRawMarkTs) return
+        lastRawMarkTs = ts
+        val pose = locationSource.latest(now)
+        rawRecorder.mark(mk.optString("label", "hazard"), pose, lastSeenSpeedKmh)
+    }
+
     // ── ImuStream.Listener (pipeline hot path, IPC reader thread) ──────────────
 
     override fun onAccel(sample: ImuAccelSample) {
@@ -801,7 +1083,19 @@ class RoadSenseController @JvmOverloads constructor(
         // 4) feed the silent vehicle calibrator (quiet samples only — it self-gates)
         calibrator.onSample(aVert, speedKmh, detector.inEvent, eventsPerSec())
 
-        // 5) detection (uses the sensor sample's own tMs, not wall-clock). Pass
+        // 5) raw-IMU recorder (D-036, debug). Capture EVERY accel sample + its derived
+        //    features BEFORE the detector's gate/early-return — recall measurement needs the
+        //    full stream around a missed breaker, not just the samples that became events.
+        //    Non-blocking + size-capped (RawImuRecorder); a no-op when rawRecord is off.
+        if (rawRecord) {
+            rawRecorder.recordAccel(
+                sample.tMs, sample.ax, sample.ay, sample.az,
+                aVert, gravity.lateralResidual, gravity.longitudinalResidual, speedKmh,
+                dyn, gpsBuffer.latest(), detector.inEvent,
+            )
+        }
+
+        // 6) detection (uses the sensor sample's own tMs, not wall-clock). Pass
         //    the gravity-free LATERAL + LONGITUDINAL residuals from the SAME
         //    projection so the detector can derive lateral asymmetry (one-sided vs
         //    full-width) while gating out fore-aft brake/launch energy (audit #6).
@@ -815,22 +1109,46 @@ class RoadSenseController @JvmOverloads constructor(
     }
 
     override fun onGyro(sample: ImuGyroSample) {
-        // Track peak yaw/roll over the (current) event window for rejection. Yaw
-        // ≈ rotation about vertical (turn); roll ≈ about the travel axis. We don't
-        // know the device's exact axis mapping, so use the two largest-magnitude
-        // components as a robust proxy — RejectionFilter only needs "is the body
-        // rotating hard" (F-006), not precise axis attribution.
-        val ax = abs(sample.gx); val ay = abs(sample.gy); val az = abs(sample.gz)
-        val maxC = maxOf(ax, ay, az)
-        val midC = (ax + ay + az) - maxC - minOf(ax, ay, az)
+        // Track peak yaw/roll over the (current) event window for rejection. Yaw =
+        // rotation ABOUT TRUE VERTICAL (a turn); that is the signal RejectionFilter
+        // Rule 3 keys on. The old proxy used max(|gx|,|gy|,|gz|) as "yaw", but on the
+        // 9.2°-tilted mount a sharp transverse BUMP fires its own pitch/roll-rate
+        // transient onto a non-vertical axis, which became maxC and false-rejected the
+        // genuine straight-line hazard as "cornering" — worst for exactly the severe,
+        // sharp-edged hazards (audit: gyro-yaw false-reject). Fix: project the gyro
+        // vector onto the MEASURED gravity unit vector to isolate the true yaw rate
+        // about vertical (allocation-free, hot-path safe). The remaining magnitude
+        // orthogonal to vertical is the body's pitch/roll, carried as the roll proxy.
+        val yaw = abs(gravity.alongGravity(sample.gx, sample.gy, sample.gz))
+        val totalSq = sample.gx * sample.gx + sample.gy * sample.gy + sample.gz * sample.gz
+        val perpSq = totalSq - yaw * yaw
+        val roll = if (perpSq > 0f) kotlin.math.sqrt(perpSq) else 0f
         // Age out a peak older than ~one event window so a turn made before the
         // current jolt no longer dominates (audit detection #1). Uses the sensor
         // sample's own tMs (same clock the detector/rate window use), not wall-clock.
         val tMs = sample.tMs
         if (tMs - peakYawTMs > GYRO_PEAK_WINDOW_MS) peakYaw = 0f
         if (tMs - peakRollTMs > GYRO_PEAK_WINDOW_MS) peakRoll = 0f
-        if (maxC >= peakYaw) { peakYaw = maxC; peakYawTMs = tMs }
-        if (midC >= peakRoll) { peakRoll = midC; peakRollTMs = tMs }
+        if (yaw >= peakYaw) { peakYaw = yaw; peakYawTMs = tMs }
+        if (roll >= peakRoll) { peakRoll = roll; peakRollTMs = tMs }
+
+        // AXIS-RESOLVED pitch/roll peaks for the breaker-vs-pothole classifier vote
+        // (separate from the combined-roll proxy above; see field docs). Same age-out
+        // window so only rotation concurrent with the jolt votes. pitchAxisReady gates
+        // both — when the longitudinal axis isn't established the split is meaningless.
+        if (gravity.pitchAxisReady) {
+            val pitch = abs(gravity.pitchRate(sample.gx, sample.gy, sample.gz))
+            val trueRoll = abs(gravity.rollRate(sample.gx, sample.gy, sample.gz))
+            if (tMs - peakPitchTMs > GYRO_PEAK_WINDOW_MS) peakPitch = 0f
+            if (tMs - peakTrueRollTMs > GYRO_PEAK_WINDOW_MS) peakTrueRoll = 0f
+            if (pitch >= peakPitch) { peakPitch = pitch; peakPitchTMs = tMs }
+            if (trueRoll >= peakTrueRoll) { peakTrueRoll = trueRoll; peakTrueRollTMs = tMs }
+            pitchEverValid = true
+        }
+
+        // Raw-IMU recorder (D-036, debug): capture the raw gyro vector so pitch/roll can be
+        // re-derived offline with different params. Non-blocking; no-op when off.
+        if (rawRecord) rawRecorder.recordGyro(sample.tMs, sample.gx, sample.gy, sample.gz)
     }
 
     override fun onStreamState(state: ImuStream.State) {
@@ -839,7 +1157,19 @@ class RoadSenseController @JvmOverloads constructor(
 
     // ── Candidate → assessment → store ─────────────────────────────────────────
 
-    private fun handleCandidate(candidate: DetectionCandidate, dyn: VehicleDynamics?, now: Long) {
+    private fun handleCandidate(rawCandidate: DetectionCandidate, dyn: VehicleDynamics?, now: Long) {
+        // Fuse the axis-resolved gyro pitch/roll peaks (the user's "up-down gyro
+        // movement" signal) onto the candidate so SeverityClassifier can vote
+        // breaker-vs-pothole on body PITCH (full-width breaker) vs ROLL (one-sided
+        // pothole). Captured HERE, before resetEventGyro() clears the peaks. The peaks
+        // are tracked over GYRO_PEAK_WINDOW_MS around the jolt (onGyro), so they reflect
+        // rotation concurrent with THIS event. pitchValid mirrors asymmetryValid:
+        // false ⇒ classifier ignores the pitch vote (longitudinal axis wasn't ready).
+        val candidate = rawCandidate.copy(
+            peakPitchRate = if (pitchEverValid) peakPitch else 0f,
+            peakRollRate = if (pitchEverValid) peakTrueRoll else 0f,
+            pitchValid = pitchEverValid,
+        )
         trackCandidateRate(candidate.tMs)
         // Master toggle: if the feature is disabled we still let the detector +
         // calibrator run (cheap, keeps calibration warm) but we map nothing.
@@ -898,6 +1228,7 @@ class RoadSenseController @JvmOverloads constructor(
             speedKmh = candidate.speedMps * 3.6f,
             aVertPeak = assessment.normalizedPeak,
             tMs = candidate.tMs,
+            altitudeM = pose.altitudeM,
         )
         val id = store.upsertDetection(hazard, now)
         val hazardMsg = "hazard ${assessment.type}/${assessment.severity} " +
@@ -923,7 +1254,11 @@ class RoadSenseController @JvmOverloads constructor(
         }
     }
 
-    private fun resetEventGyro() { peakYaw = 0f; peakYawTMs = 0L; peakRoll = 0f; peakRollTMs = 0L }
+    private fun resetEventGyro() {
+        peakYaw = 0f; peakYawTMs = 0L; peakRoll = 0f; peakRollTMs = 0L
+        peakPitch = 0f; peakPitchTMs = 0L; peakTrueRoll = 0f; peakTrueRollTMs = 0L
+        pitchEverValid = false
+    }
 
     /**
      * Heading to STORE for a hazard, or a sentinel when it's untrustworthy (audit
@@ -977,6 +1312,7 @@ class RoadSenseController @JvmOverloads constructor(
             speedKmh = candidate.speedMps * 3.6f,
             aVertPeak = jolt,
             tMs = candidate.tMs,
+            altitudeM = pose.altitudeM,
         )
         val id = store.upsertDetection(hazard, now)
         Log.i(TAG, "rough_section sev=$severity @${pose.lat},${pose.lng} id=$id")
@@ -1001,7 +1337,8 @@ class RoadSenseController @JvmOverloads constructor(
          *  so this is generous; keeps brakeAgeMs fresh enough for rejection. */
         private const val VEHICLE_POLL_MS = 500L
         /** GPS bearing is noise below ~walking pace; above this we trust heading
-         *  for the ApproachEngine forward-cone (else it falls back to range-only). */
+         *  for the ApproachEngine forward-cone + road-match (below it, the engine
+         *  suppresses warnings entirely rather than warn direction-blind). */
         private const val HEADING_RELIABLE_MPS = 2.5f
         /** Sentinel stored heading meaning "heading was unreliable at detection" — the
          *  ApproachEngine road-match gate skips the heading test for these (audit S1). */
@@ -1017,6 +1354,11 @@ class RoadSenseController @JvmOverloads constructor(
         private const val CAL_PERSIST_MS = 60_000L
         /** How often to persist route coverage (only when a new tile was entered). */
         private const val COVERAGE_PERSIST_MS = 30_000L
+        /** Min gap between sidecar stall-recovery relaunches. A freshly-`am`-launched
+         *  app FGS takes a beat to bind, request sensors, and stream the first batch;
+         *  5 s lets it come up before we'd consider relaunching again, so a transient
+         *  GC pause or one dropped batch run can't trigger a relaunch storm. */
+        private const val SIDECAR_RELAUNCH_MS = 5_000L
         /** G-7 auto-accept timeout for the Calibration-Mode confirm card: if the
          *  driver hasn't tapped confirm/reject within this window, the card auto-
          *  dismisses and the algorithm's own assessment is recorded as the label, so
@@ -1032,6 +1374,15 @@ class RoadSenseController @JvmOverloads constructor(
          *  instead of waiting the full cadence — drains a cold/dense first sync over
          *  a few quick ticks, then settles back to SYNC_MS. */
         private const val SYNC_PAGE_DRAIN_MS = 15_000L
+        /** Failure backoff: when a sync attempt makes NO progress (worker unreachable,
+         *  network down), park the NEXT attempt this far out rather than retrying every
+         *  tick. Distinct from the 2.5 h SUCCESS cadence (SYNC_MS): we still want to
+         *  retry transient failures sooner than 2.5 h (audit network #5b), but ~5 min is
+         *  far enough apart to avoid the every-tick block-retry storm a persistently-
+         *  unreachable worker used to cause. Each failed attempt is one blocking
+         *  download/upload (~30 s) on the off-tick syncExecutor — bounded, not free, so
+         *  we don't poll it tightly. In-memory only (resets on daemon restart). */
+        private const val SYNC_RETRY_BACKOFF_MS = 5 * 60 * 1000L  // 5 minutes
         /** Upload batch cap — MUST match the provider/server cap (256) so the cursor
          *  advance and the sent slice agree (audit network #1). */
         private const val MAX_UPLOAD_BATCH = 256

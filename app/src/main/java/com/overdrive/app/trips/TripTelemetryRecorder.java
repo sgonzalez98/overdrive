@@ -65,8 +65,12 @@ public class TripTelemetryRecorder {
     private long speedSumKmh = 0;
     private long speedSampleCount = 0;
     
-    // GPS distance tracking (running haversine sum)
-    private double totalDistanceKm = 0;
+    // GPS distance tracking (running haversine sum).
+    // volatile: written only on the 5Hz sampler thread but read on the
+    // detector/finalize thread via getTotalDistanceKm() (the GPS-distance
+    // fallback). Single writer, so volatile fully resolves the cross-thread
+    // visibility — the finalize read sees the latest accumulated distance.
+    private volatile double totalDistanceKm = 0;
     private double lastLat = 0;
     private double lastLon = 0;
     private boolean hasLastGps = false;
@@ -277,6 +281,13 @@ public class TripTelemetryRecorder {
             int accelPedal = 0;
             int brakePedal = 0;
             boolean brakePedalPressed = false;
+            // True when we couldn't read a fresh dynamics snapshot this tick.
+            // Such a sample carries synthetic zeros — fine to persist in the raw
+            // .jsonl.gz for timeline continuity, but it must NOT feed the scoring
+            // buffer or the speed stats, where a fabricated 0 km/h would
+            // manufacture a phantom stop / launch / coast and dilute the jerk and
+            // consistency windows.
+            boolean dynamicsStale = true;
             if (snapshot != null) {
                 // Check if snapshot is stale (older than 2 seconds means poller may have died)
                 long snapshotAge = now - snapshot.timestampMs;
@@ -285,6 +296,7 @@ public class TripTelemetryRecorder {
                     accelPedal = snapshot.accelPedalPercent;
                     brakePedal = snapshot.brakePedalPercent;
                     brakePedalPressed = snapshot.brakePedalPressed;
+                    dynamicsStale = false;
                 } else {
                     // Stale snapshot — record zeros instead of frozen values
                     if (snapshotAge < 5000) {
@@ -323,16 +335,24 @@ public class TripTelemetryRecorder {
                 hasLastGps = true;
             }
 
-            // Track stats
-            if (speedKmh > maxSpeedKmh) {
-                maxSpeedKmh = speedKmh;
+            // Track stats — only from real readings; synthetic stale zeros would
+            // drag the average down and never affect max anyway.
+            if (!dynamicsStale) {
+                if (speedKmh > maxSpeedKmh) {
+                    maxSpeedKmh = speedKmh;
+                }
+                speedSumKmh += speedKmh;
+                speedSampleCount++;
             }
-            speedSumKmh += speedKmh;
-            speedSampleCount++;
 
-            // Add to scoring buffer (all 5Hz samples)
-            synchronized (allSamplesLock) {
-                allSamples.add(sample);
+            // Add to scoring buffer (real-dynamics 5Hz samples only). Stale
+            // synthetic-zero samples are still written to the flush buffer below
+            // for raw-timeline continuity, but are kept out of the single-pass
+            // scoring stream so they can't fabricate stop/launch/coast events.
+            if (!dynamicsStale) {
+                synchronized (allSamplesLock) {
+                    allSamples.add(sample);
+                }
             }
 
             // Add to flush buffer
