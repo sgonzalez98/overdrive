@@ -88,6 +88,16 @@ public class MqttPublisherService implements MqttCallback {
 
         String effectiveClientId = config.getEffectiveClientId(deviceId);
 
+        // Tear down any stale client before opening a new one. Without this, a reconnect after a
+        // dropped/half-open connection leaves the old Paho client (same clientId) abandoned but not
+        // closed — the broker then sees two clients with the same id and the new connect can fail
+        // with "Client is connected" (Paho reason 32100). Closing it first releases the clientId.
+        if (client != null) {
+            try { if (client.isConnected()) client.disconnect(1000); } catch (Exception ignored) {}
+            try { client.close(); } catch (Exception ignored) {}
+            client = null;
+        }
+
         MqttClient newClient = null;
         try {
             // Create client with in-memory persistence (no filesystem needed)

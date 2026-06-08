@@ -14,6 +14,11 @@ import java.io.InputStreamReader;
  *                  (survives quick app-switches; pauses shortly after leaving ABRP).
  *   - running    : the ABRP process is alive at all (better for background navigation).
  *
+ * The grace window only smooths the telemetry *gate* ({@link #isActive()}) so a quick
+ * app-switch doesn't tear the stream down. The status string ({@link #describe()})
+ * reports the *current* observed state instead, so closing ABRP flips it away from
+ * "foreground" on the next poll rather than lingering for the whole grace window.
+ *
  * No installed-check — if ABRP isn't on the device it simply won't appear as
  * foreground or running, so the gate naturally returns false without extra logic.
  *
@@ -32,17 +37,24 @@ public class AbrpAppPresence {
 
     private volatile long lastCheckMs = 0;
     private volatile long lastForegroundSeenMs = 0;
+    private volatile boolean lastForegroundNow = false;
     private volatile boolean lastProcessAlive = false;
 
     public AbrpAppPresence(AbrpConfig config) {
         this.config = config;
     }
 
-    /** Human-readable presence for the status panel: "foreground" / "running" / "not running". */
+    /**
+     * Human-readable presence for the status panel: "foreground" / "background" / "not running".
+     *
+     * Reflects the most recent observation, NOT the grace window — so when the user leaves
+     * ABRP the panel stops saying "foreground" within one check cycle ({@link #CHECK_TTL_MS}),
+     * even though {@link #isActive()} may keep the stream alive through the grace period.
+     */
     public String describe() {
         refreshIfStale();
-        if (isForegroundWithinGrace()) return "foreground";
-        if (lastProcessAlive) return "running";
+        if (lastForegroundNow) return "foreground";
+        if (lastProcessAlive) return "background";
         return "not running";
     }
 
@@ -67,10 +79,12 @@ public class AbrpAppPresence {
         if (pkg == null || pkg.isEmpty()) pkg = "com.iternio.abrpapp";
 
         String top = readForegroundPackage();
-        if (top != null && top.contains(pkg)) {
+        boolean foregroundNow = top != null && top.contains(pkg);
+        lastForegroundNow = foregroundNow;
+        if (foregroundNow) {
             lastForegroundSeenMs = now;
         }
-        lastProcessAlive = (top != null && top.contains(pkg)) || isProcessAlive(pkg);
+        lastProcessAlive = foregroundNow || isProcessAlive(pkg);
     }
 
     /** Parse the resumed/top activity package from dumpsys. */
