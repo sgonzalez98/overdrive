@@ -16,7 +16,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -46,6 +48,16 @@ public class MqttConnectionManager {
     // Per-connection schedulers: connectionId → scheduler
     private final ConcurrentHashMap<String, ScheduledExecutorService> schedulers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ScheduledFuture<?>> scheduledTasks = new ConcurrentHashMap<>();
+
+    // Serial executor for connection lifecycle (connect/disconnect). Paho's connect blocks up to
+    // ~10s and disconnect up to 5s; running them on the caller's thread would blow the IPC socket's
+    // 3s read timeout (MqttApiHandler) and make add/update/delete look like they failed. Offloading
+    // here lets the IPC call return immediately while the broker is (re)connected in the background.
+    private final ExecutorService controlExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "MQTT-control");
+        t.setDaemon(true);
+        return t;
+    });
 
     // Data sources (set during init)
     private VehicleDataMonitor vehicleDataMonitor;
@@ -186,7 +198,7 @@ public class MqttConnectionManager {
         schedulers.put(config.id, scheduler);
 
         // Schedule publish loop at the min-interval floor.
-        scheduleNext(config.id, Math.max(1, config.minIntervalSeconds));
+        scheduleNext(config.id, scheduler, Math.max(1, config.minIntervalSeconds));
     }
 
     /**
@@ -204,21 +216,33 @@ public class MqttConnectionManager {
     }
 
     /**
-     * Schedule the next publish for a connection.
+     * Schedule the next publish for a connection on its own scheduler.
+     *
+     * The scheduler is passed in (not looked up) so a trailing cycle from a scheduler that has
+     * since been replaced by a restart can't queue work onto the new one — it simply no-ops.
      */
-    private void scheduleNext(String connectionId, long delaySeconds) {
-        ScheduledExecutorService scheduler = schedulers.get(connectionId);
+    private void scheduleNext(String connectionId, ScheduledExecutorService scheduler, long delaySeconds) {
         if (scheduler == null || scheduler.isShutdown()) return;
+        // This scheduler was swapped out by a restart — drop the reschedule.
+        if (schedulers.get(connectionId) != scheduler) return;
 
-        ScheduledFuture<?> task = scheduler.schedule(() -> runPublishCycle(connectionId),
-                delaySeconds, TimeUnit.SECONDS);
-        scheduledTasks.put(connectionId, task);
+        try {
+            ScheduledFuture<?> task = scheduler.schedule(() -> runPublishCycle(connectionId, scheduler),
+                    delaySeconds, TimeUnit.SECONDS);
+            scheduledTasks.put(connectionId, task);
+        } catch (RejectedExecutionException ignored) {
+            // Scheduler was shut down between the guard above and schedule() — connection is
+            // being torn down; nothing to do.
+        }
     }
 
     /**
      * Execute one publish cycle for a connection.
      */
-    private void runPublishCycle(String connectionId) {
+    private void runPublishCycle(String connectionId, ScheduledExecutorService scheduler) {
+        // Bail if this connection was restarted/stopped — our scheduler is no longer the live one.
+        if (schedulers.get(connectionId) != scheduler) return;
+
         MqttPublisherService publisher = publishers.get(connectionId);
         if (publisher == null || !publisher.isRunning()) return;
 
@@ -252,8 +276,8 @@ public class MqttConnectionManager {
             nextInterval = backoff;
         }
 
-        // Schedule next
-        scheduleNext(connectionId, nextInterval);
+        // Schedule next on the same scheduler this cycle ran on.
+        scheduleNext(connectionId, scheduler, nextInterval);
     }
 
     // ==================== CRUD OPERATIONS (called from IPC) ====================
@@ -270,9 +294,9 @@ public class MqttConnectionManager {
         MqttConnectionConfig added = store.add(config);
         if (added == null) return null;
 
-        // Auto-start if enabled
+        // Auto-start if enabled — off the caller's thread (connect() blocks).
         if (added.enabled && added.isConfigured()) {
-            startConnection(added);
+            controlExecutor.execute(() -> startConnection(added));
         }
 
         return added;
@@ -291,18 +315,24 @@ public class MqttConnectionManager {
         boolean updated = store.update(id, updates);
         if (!updated) return false;
 
-        // Restart the connection to apply changes
-        MqttConnectionConfig config = store.getById(id);
+        // Apply the change by tearing the live connection down and rebuilding it from the updated
+        // config (host/port/topic/auth/TLS can't be changed on a live Paho client). The store has
+        // already been written, so the IPC reply is correct the instant it returns; the actual
+        // disconnect/reconnect runs on the control executor to keep network I/O off the IPC thread.
+        final MqttConnectionConfig config = store.getById(id);
         if (config != null) {
-            // If HA discovery was just turned off, retract the device while still connected.
-            if (wasHa && !config.homeAssistantDiscovery) {
-                MqttPublisherService pub = publishers.get(id);
-                if (pub != null) pub.removeDiscovery(oldPrefix);
-            }
-            stopConnection(id);
-            if (config.enabled && config.isConfigured()) {
-                startConnection(config);
-            }
+            final boolean retractHa = wasHa && !config.homeAssistantDiscovery;
+            controlExecutor.execute(() -> {
+                // If HA discovery was just turned off, retract the device while still connected.
+                if (retractHa) {
+                    MqttPublisherService pub = publishers.get(id);
+                    if (pub != null) pub.removeDiscovery(oldPrefix);
+                }
+                stopConnection(id);
+                if (config.enabled && config.isConfigured()) {
+                    startConnection(config);
+                }
+            });
         }
 
         return true;
@@ -313,14 +343,19 @@ public class MqttConnectionManager {
      * @return true if deleted
      */
     public boolean deleteConnection(String id) {
-        // Retract HA discovery (while the client is still connected) so deleting a
-        // connection doesn't leave orphaned entities in Home Assistant.
+        // Retract HA discovery (while the client is still connected) so deleting a connection
+        // doesn't leave orphaned entities in Home Assistant, then tear the connection down —
+        // both on the control executor so disconnect() doesn't block the IPC caller.
         MqttConnectionConfig cfg = store.getById(id);
-        MqttPublisherService pub = publishers.get(id);
-        if (pub != null && cfg != null && cfg.isHomeAssistant()) {
-            pub.removeDiscovery(cfg.discoveryPrefix);
-        }
-        stopConnection(id);
+        final boolean ha = cfg != null && cfg.isHomeAssistant();
+        final String prefix = cfg != null ? cfg.discoveryPrefix : "homeassistant";
+        controlExecutor.execute(() -> {
+            MqttPublisherService pub = publishers.get(id);
+            if (pub != null && ha) {
+                pub.removeDiscovery(prefix);
+            }
+            stopConnection(id);
+        });
         return store.delete(id);
     }
 
