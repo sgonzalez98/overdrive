@@ -94,6 +94,9 @@
     <string name="logs_panel_title">Registros</string>
     <!-- activity_main_new / activity_main-land -->
     <string name="url_connecting">Conectando...</string>
+    <!-- Shown when an external link can't open (no browser on the head unit):
+         the URL is copied to the clipboard instead. %1$s = the URL. -->
+    <string name="url_copied_no_browser">Navegador no encontrado. Enlace copiado: %1$s</string>
     <!-- dialog_tailscale_settings -->
     <string name="tailscale_generate_login_url">Generar el inicio de sesión URL</string>
     <string name="tailscale_scan_to_login">Escanear para iniciar sesión</string>
@@ -135,6 +138,8 @@
     <string name="camera_oem_dashcam_auto_resolved">Auto — usando id %1$d (pano es id %2$d)</string>
     <string name="camera_oem_dashcam_auto_unavailable">Auto — el pano id es %1$d, no se puede infectar el dashcam</string>
     <string name="camera_oem_dashcam_save">Guardar</string>
+    <string name="camera_concurrent_probe_label">Prueba el soporte de doble cámara en el siguiente arranque</string>
+    <string name="camera_concurrent_probe_subtitle">Un control de una sola vez que abre ambas cámaras a la vez para confirmar que este vehículo puede correr pano + dashcam simultáneamente. Ejecuta una vez en el próximo reinicio mientras está estacionado. Dejar APAGADO a menos que las grabaciones parezcan incorrectas — no es necesario y puede interrumpir brevemente una grabación si uno está activo cuando se ejecuta.</string>
     <!-- Dashcam-side camera labels — REVERSE of the pano labels above. The
          OEM dashcam id is the opposite of the pano id, so the helpful
          "this is what your trim should pick" hint flips between the two
@@ -927,6 +932,7 @@
          RoadSense — road-hazard detection feature
          ============================================================ -->
     <string name="rail_roadsense">Sentido de carretera</string>
+    <string name="rail_hazard_map">Mapa</string>
     <string name="roadsense_title">Sentido de carretera</string>
     <string name="roadsense_pill_scanning">Escaneando</string>
     <string name="roadsense_pill_idle">Sentido de carretera</string>
@@ -972,4 +978,100 @@
     <!-- Blind Spot overlay labels (native overlay window). -->
     <string name="blindspot_overlay_left">IZQUIERDO</string>
     <string name="blindspot_overlay_right">REGISTRO</string>
+    <!-- ============================================================== -->
+    <!-- RoadSense Map (native MapLibre map view + tap-to-verify sheet). -->
+    <!-- ============================================================== -->
+    <string name="roadsense_map_title">Mapa</string>
+    <string name="roadsense_map_route_clear">Claro</string>
+    <string name="roadsense_map_route_unmapped">Aún no mapeado</string>
+    <string name="roadsense_map_back">Atrás</string>
+    <string name="roadsense_map_recenter">Recibir en mi ubicación</string>
+    <!-- Tap-to-verify bottom sheet -->
+    <string name="roadsense_map_severity_label">Gravedad</string>
+    <string name="roadsense_map_type_label">Tipo</string>
+    <string name="roadsense_map_type_unknown">Desconocido</string>
+    <string name="roadsense_map_confirm">Confirmar</string>
+    <string name="roadsense_map_delete">Eliminar</string>
+    <!-- Status chip labels: candidate / on-device / shared with fleet -->
+    <string name="roadsense_map_status_candidate">Candidar</string>
+    <string name="roadsense_map_status_local">En dispositivo</string>
+    <string name="roadsense_map_status_cloud">Compartido</string>
+    <!-- Meta line: "Moderate · 82% confidence · 3 reports" -->
+    <string name="roadsense_map_meta_format">%1$s · %2$d%% confianza · %3$s</string>
+    <!-- "3 reports" / "1 report" -->
+    <plurals name="roadsense_map_reports">
+        <item quantity="one">%1$d informe</item>
+        <item quantity="other">%1$d informes</item>
+    </plurals>
+    <!-- Snackbar / toast confirmations -->
+    <string name="roadsense_map_confirmed_toast">Riesgo confirmado</string>
+    <string name="roadsense_map_deleted_toast">Peligro eliminado</string>
+    <string name="roadsense_map_action_failed">No se pudo alcanzar RoadSense. Vuelve a intentarlo.</string>
+    <string name="roadsense_map_no_location">Esperando a la fijación de GPS…</string>
+    <!-- Navigation: search + routing + turn-by-turn -->
+    <string name="roadsense_map_search_hint">Buscar destino</string>
+    <string name="roadsense_map_search_action">Buscar</string>
+    <string name="roadsense_map_searching">Buscando…</string>
+    <string name="roadsense_map_no_results">No hay lugares</string>
+    <string name="roadsense_map_pick_destination">Elegir destino</string>
+    <string name="roadsense_map_routing">Buscando ruta…</string>
+    <string name="roadsense_map_route_failed">No se pudo encontrar una ruta. Inténtelo de nuevo.</string>
+    <string name="roadsense_map_need_key">Añade una tecla de enrutamiento en la configuración de RoadSense para navegar.</string>
+    <string name="roadsense_map_rerouting">Fuera de ruta — recalculando…</string>
+    <string name="roadsense_map_arrived">Ha llegado.</string>
+    <string name="roadsense_map_nav_started">Navegando a %1$s</string>
+    <string name="roadsense_map_nav_ended">Navegación finalizada</string>
+    <string name="roadsense_map_end_nav">Finalizar navegación</string>
+    <string name="roadsense_map_zoom_in">Acercarse en</string>
+    <string name="roadsense_map_zoom_out">Apagar</string>
+    <!-- Hazard visibility filter -->
+    <string name="roadsense_map_hazards_filter">Visibilidad del riesgo</string>
+    <string name="roadsense_map_hazards_all">Mostrar todos los peligros</string>
+    <string name="roadsense_map_hazards_moderate">Moderado y severo</string>
+    <string name="roadsense_map_hazards_severe">Solo Severe</string>
+    <string name="roadsense_map_hazards_hidden">Ocultar peligros</string>
+    <!-- POI along route (EV charging / fuel) -->
+    <string name="roadsense_map_poi_toggle">Carga y combustible</string>
+    <!-- 2D / 3D buildings toggle -->
+    <string name="roadsense_map_dimension_toggle">Edificios 2D / 3D</string>
+    <string name="roadsense_map_3d_on">Edificios 3D en</string>
+    <string name="roadsense_map_3d_off">Edificios 3D apagados</string>
+    <string name="roadsense_map_poi_loading">Encontrando carga y paradas de combustible…</string>
+    <string name="roadsense_map_poi_none">No hay estaciones cercanas</string>
+    <string name="roadsense_map_poi_need_route">Elija primero un destino</string>
+    <!-- POI tap action sheet -->
+    <string name="roadsense_map_stop_added">Parada añadida</string>
+    <string name="roadsense_map_remove_stop_action">Eliminar parada</string>
+    <string name="roadsense_map_poi_navigate">Navegar aquí</string>
+    <string name="roadsense_map_poi_kind_charging">Estación de carga</string>
+    <string name="roadsense_map_poi_kind_fuel">Estación de Petróleo</string>
+    <string name="roadsense_map_poi_charging_generic">Estación de carga</string>
+    <string name="roadsense_map_poi_fuel_generic">Estación de Petróleo</string>
+    <string name="roadsense_map_route_switched">Ruta cambiada</string>
+    <!-- Hazards-along-route pills (%1$d = count) -->
+    <string name="roadsense_map_pill_severe">%1$d severo</string>
+    <string name="roadsense_map_pill_moderate">%1$d moderado</string>
+    <string name="roadsense_map_pill_minor">%1$d menor</string>
+    <!-- Shown briefly if the basemap can\'t be reached. -->
+    <string name="roadsense_map_offline">Mapa de datos no disponible sin conexión</string>
+    <!-- Navigation: autocomplete + route options -->
+    <string name="roadsense_map_clear_search">Limpiar búsqueda</string>
+    <!-- Route-options sheet -->
+    <string name="roadsense_map_routes_title">Elija una ruta</string>
+    <string name="roadsense_map_routes_to">Rutas a %1$s</string>
+    <string name="roadsense_map_routes_cancel">Cancelar</string>
+    <!-- Per-route row label, %1$d is the 1-based route number. -->
+    <string name="roadsense_map_route_option">Ruta %1$d</string>
+    <string name="roadsense_map_fastest">Más rápido</string>
+    <string name="roadsense_map_start">Comenzar</string>
+    <!-- Stops / waypoints in the route-options sheet -->
+    <string name="roadsense_map_your_location">Su ubicación</string>
+    <string name="roadsense_map_add_stop">Añadir parada</string>
+    <string name="roadsense_map_add_stop_hint">Buscar una parada para añadir</string>
+    <string name="roadsense_map_stop_removed">Parada eliminada</string>
+    <string name="roadsense_map_remove_stop">Eliminar parada</string>
+    <string name="roadsense_map_move_stop_up">Mover alto</string>
+    <string name="roadsense_map_move_stop_down">Bajar parada</string>
+    <!-- %1$d is the maximum number of stops allowed. -->
+    <string name="roadsense_map_max_stops">Hasta %1$d paradas permitidas</string>
 </resources>
