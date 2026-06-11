@@ -553,9 +553,9 @@
          notifications into one shade entry. The summary text is intentionally
          generic so it stays accurate whether all three services are running
          or only the keepalive survived an OOM respawn. -->
-    <string name="daemon_keepalive_notif_title">Sobredrive activo</string>
+    <string name="daemon_keepalive_notif_title">Overdrive Active</string>
     <string name="daemon_keepalive_notif_text">Monitoreo de sistemas de vehículos</string>
-    <string name="overdrive_status_summary_title">Sobreunidad</string>
+    <string name="overdrive_status_summary_title">Overdrive</string>
     <string name="overdrive_status_summary_text">Servicios en segundo plano ejecutándose</string>
     <!-- ============================================================== -->
     <!-- M3 Revamp: navigation rail + settings sub-rail + theme picker  -->
@@ -931,11 +931,11 @@
     <!-- ============================================================
          RoadSense — road-hazard detection feature
          ============================================================ -->
-    <string name="rail_roadsense">Sentido de carretera</string>
+    <string name="rail_roadsense">RoadSense</string>
     <string name="rail_hazard_map">Mapa</string>
-    <string name="roadsense_title">Sentido de carretera</string>
+    <string name="roadsense_title">RoadSense</string>
     <string name="roadsense_pill_scanning">Escaneando</string>
-    <string name="roadsense_pill_idle">Sentido de carretera</string>
+    <string name="roadsense_pill_idle">RoadSense</string>
     <string name="roadsense_status_idle">Inactivo</string>
     <!-- VEHICLE calibration (suspension-learning) — the green/orange/red dot. Worded
          about the car, not the route, since that's what maturity actually measures. -->

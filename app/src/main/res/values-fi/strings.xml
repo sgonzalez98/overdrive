@@ -1049,29 +1049,29 @@
     <string name="roadsense_map_poi_fuel_generic">Polttoaineen asema</string>
     <string name="roadsense_map_route_switched">Vaihda reittiä</string>
     <!-- Hazards-along-route pills (%1$d = count) -->
-    <string name="roadsense_map_pill_severe">%1$d severe</string>
-    <string name="roadsense_map_pill_moderate">%1$d moderate</string>
-    <string name="roadsense_map_pill_minor">%1$d minor</string>
+    <string name="roadsense_map_pill_severe">%1$d vaikea</string>
+    <string name="roadsense_map_pill_moderate">%1$d kohtalainen</string>
+    <string name="roadsense_map_pill_minor">%1$d vähäinen</string>
     <!-- Shown briefly if the basemap can\'t be reached. -->
-    <string name="roadsense_map_offline">Map data unavailable offline</string>
+    <string name="roadsense_map_offline">Karttatiedot eivät ole käytettävissä offline-tilassa</string>
     <!-- Navigation: autocomplete + route options -->
-    <string name="roadsense_map_clear_search">Clear search</string>
+    <string name="roadsense_map_clear_search">Tyhjennä haku</string>
     <!-- Route-options sheet -->
-    <string name="roadsense_map_routes_title">Choose a route</string>
-    <string name="roadsense_map_routes_to">Routes to %1$s</string>
-    <string name="roadsense_map_routes_cancel">Cancel</string>
+    <string name="roadsense_map_routes_title">Valitse reitti</string>
+    <string name="roadsense_map_routes_to">Reitit kohteeseen %1$s</string>
+    <string name="roadsense_map_routes_cancel">Peruuta</string>
     <!-- Per-route row label, %1$d is the 1-based route number. -->
-    <string name="roadsense_map_route_option">Route %1$d</string>
-    <string name="roadsense_map_fastest">Fastest</string>
-    <string name="roadsense_map_start">Start</string>
+    <string name="roadsense_map_route_option">Reitti %1$d</string>
+    <string name="roadsense_map_fastest">Nopein</string>
+    <string name="roadsense_map_start">Aloita</string>
     <!-- Stops / waypoints in the route-options sheet -->
-    <string name="roadsense_map_your_location">Your location</string>
-    <string name="roadsense_map_add_stop">Add stop</string>
-    <string name="roadsense_map_add_stop_hint">Search a stop to add</string>
-    <string name="roadsense_map_stop_removed">Stop removed</string>
-    <string name="roadsense_map_remove_stop">Remove stop</string>
-    <string name="roadsense_map_move_stop_up">Move stop up</string>
-    <string name="roadsense_map_move_stop_down">Move stop down</string>
+    <string name="roadsense_map_your_location">Sinun sijaintisi</string>
+    <string name="roadsense_map_add_stop">Lisää pysähdys</string>
+    <string name="roadsense_map_add_stop_hint">Etsi lopetus lisätäksesi</string>
+    <string name="roadsense_map_stop_removed">Lopeta poistettu</string>
+    <string name="roadsense_map_remove_stop">Poista pysäytys</string>
+    <string name="roadsense_map_move_stop_up">Siirrä lopetus</string>
+    <string name="roadsense_map_move_stop_down">Siirrä pysähdys alas</string>
     <!-- %1$d is the maximum number of stops allowed. -->
-    <string name="roadsense_map_max_stops">Up to %1$d stops allowed</string>
+    <string name="roadsense_map_max_stops">Enintään %1$d pysähdystä sallittu</string>
 </resources>

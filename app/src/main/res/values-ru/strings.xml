@@ -96,7 +96,7 @@
     <string name="url_connecting">Подключение...</string>
     <!-- Shown when an external link can't open (no browser on the head unit):
          the URL is copied to the clipboard instead. %1$s = the URL. -->
-    <string name="url_copied_no_browser">No browser found. Link copied: %1$s</string>
+    <string name="url_copied_no_browser">Не найдено ни одного браузера. Ссылка скопирована: %1$s</string>
     <!-- dialog_tailscale_settings -->
     <string name="tailscale_generate_login_url">Создать логин URL</string>
     <string name="tailscale_scan_to_login">Сканирование до входа</string>
@@ -138,8 +138,8 @@
     <string name="camera_oem_dashcam_auto_resolved">Авто — с id %1$d (pano id %2$d)</string>
     <string name="camera_oem_dashcam_auto_unavailable">Авто — pano id %1$d, не может отобразить dashcam</string>
     <string name="camera_oem_dashcam_save">Сохранить</string>
-    <string name="camera_concurrent_probe_label">Test dual-camera support on next boot</string>
-    <string name="camera_concurrent_probe_subtitle">One-time check that opens both cameras at once to confirm this vehicle can run pano + dashcam concurrently. Runs once on the next restart while parked. Leave OFF unless recordings look wrong — it is not required and may briefly interrupt a recording if one is active when it runs.</string>
+    <string name="camera_concurrent_probe_label">Тест поддержки двойной камеры при следующей загрузке</string>
+    <string name="camera_concurrent_probe_subtitle">Одноразовая проверка, которая открывает обе камеры сразу для подтверждения этого транспортного средства может запустить pano + dashcam одновременно. Выполняется один раз при следующем перезапуске во время парка. Оставьте OFF, если записи не выглядят неправильно — это не требуется и может вкратце прервать запись, если она активна при запуске.</string>
     <!-- Dashcam-side camera labels — REVERSE of the pano labels above. The
          OEM dashcam id is the opposite of the pano id, so the helpful
          "this is what your trim should pick" hint flips between the two
@@ -559,9 +559,9 @@
          notifications into one shade entry. The summary text is intentionally
          generic so it stays accurate whether all three services are running
          or only the keepalive survived an OOM respawn. -->
-    <string name="daemon_keepalive_notif_title">Перегрузка активна</string>
+    <string name="daemon_keepalive_notif_title">Overdrive Active</string>
     <string name="daemon_keepalive_notif_text">Мониторинг систем транспортных средств</string>
-    <string name="overdrive_status_summary_title">Перегрузка</string>
+    <string name="overdrive_status_summary_title">Overdrive</string>
     <string name="overdrive_status_summary_text">Фоновые службы запущены</string>
     <!-- ============================================================== -->
     <!-- M3 Revamp: navigation rail + settings sub-rail + theme picker  -->
@@ -849,7 +849,7 @@
          the app lock is enabled and the session isn\'t fresh. -->
     <string name="pin_lock_title">Введите PIN-код</string>
     <string name="pin_lock_title_unlocked">Разблокирован</string>
-    <string name="pin_lock_subtitle_default">Разблокируйте передиск, чтобы продолжить.</string>
+    <string name="pin_lock_subtitle_default">Unlock OverDrive to continue.</string>
     <string name="pin_lock_subtitle_wrong">Неверный PIN-код. Попробуйте еще раз.</string>
     <string name="pin_lock_subtitle_locked_out">Слишком много попыток. Попробуйте позже.</string>
     <!-- %1$s is a formatted countdown like "30s" or "2:45". -->
@@ -949,11 +949,11 @@
     <!-- ============================================================
          RoadSense — road-hazard detection feature
          ============================================================ -->
-    <string name="rail_roadsense">РоудСенс</string>
-    <string name="rail_hazard_map">Map</string>
-    <string name="roadsense_title">РоудСенс</string>
+    <string name="rail_roadsense">RoadSense</string>
+    <string name="rail_hazard_map">Карта</string>
+    <string name="roadsense_title">RoadSense</string>
     <string name="roadsense_pill_scanning">Сканирование</string>
-    <string name="roadsense_pill_idle">РоудСенс</string>
+    <string name="roadsense_pill_idle">RoadSense</string>
     <string name="roadsense_status_idle">Простой</string>
     <!-- VEHICLE calibration (suspension-learning) — the green/orange/red dot. Worded
          about the car, not the route, since that's what maturity actually measures. -->
@@ -999,99 +999,99 @@
     <!-- ============================================================== -->
     <!-- RoadSense Map (native MapLibre map view + tap-to-verify sheet). -->
     <!-- ============================================================== -->
-    <string name="roadsense_map_title">Map</string>
-    <string name="roadsense_map_route_clear">Clear</string>
-    <string name="roadsense_map_route_unmapped">Not mapped yet</string>
-    <string name="roadsense_map_back">Back</string>
-    <string name="roadsense_map_recenter">Recenter on my location</string>
+    <string name="roadsense_map_title">Карта</string>
+    <string name="roadsense_map_route_clear">Очистить</string>
+    <string name="roadsense_map_route_unmapped">Еще не сопоставлено</string>
+    <string name="roadsense_map_back">Назад</string>
+    <string name="roadsense_map_recenter">Повторить на моем местоположении</string>
     <!-- Tap-to-verify bottom sheet -->
-    <string name="roadsense_map_severity_label">Severity</string>
-    <string name="roadsense_map_type_label">Type</string>
-    <string name="roadsense_map_type_unknown">Unknown</string>
-    <string name="roadsense_map_confirm">Confirm</string>
-    <string name="roadsense_map_delete">Delete</string>
+    <string name="roadsense_map_severity_label">Серьезность</string>
+    <string name="roadsense_map_type_label">Тип</string>
+    <string name="roadsense_map_type_unknown">Неизвестен</string>
+    <string name="roadsense_map_confirm">Подтвердить</string>
+    <string name="roadsense_map_delete">Удалить</string>
     <!-- Status chip labels: candidate / on-device / shared with fleet -->
-    <string name="roadsense_map_status_candidate">Candidate</string>
-    <string name="roadsense_map_status_local">On device</string>
-    <string name="roadsense_map_status_cloud">Shared</string>
+    <string name="roadsense_map_status_candidate">Кандидат</string>
+    <string name="roadsense_map_status_local">На устройстве</string>
+    <string name="roadsense_map_status_cloud">Общий доступ</string>
     <!-- Meta line: "Moderate · 82% confidence · 3 reports" -->
-    <string name="roadsense_map_meta_format">%1$s · %2$d%% confidence · %3$s</string>
+    <string name="roadsense_map_meta_format">%1$s · %2$d%% доверия · %3$s</string>
     <!-- "3 reports" / "1 report" -->
     <plurals name="roadsense_map_reports">
-        <item quantity="one">%1$d report</item>
-        <item quantity="few">%1$d reports</item>
-        <item quantity="many">%1$d reports</item>
-        <item quantity="other">%1$d reports</item>
+        <item quantity="one">%1$d отчет</item>
+        <item quantity="few">%1$d отчетов</item>
+        <item quantity="many">%1$d отчетов</item>
+        <item quantity="other">%1$d отчетов</item>
     </plurals>
     <!-- Snackbar / toast confirmations -->
-    <string name="roadsense_map_confirmed_toast">Hazard confirmed</string>
-    <string name="roadsense_map_deleted_toast">Hazard removed</string>
-    <string name="roadsense_map_action_failed">Could not reach RoadSense. Try again.</string>
-    <string name="roadsense_map_no_location">Waiting for GPS fix…</string>
+    <string name="roadsense_map_confirmed_toast">Опасность подтверждена</string>
+    <string name="roadsense_map_deleted_toast">Удалена опасность</string>
+    <string name="roadsense_map_action_failed">Не удалось добраться до RoadSense. Повторите попытку.</string>
+    <string name="roadsense_map_no_location">Ожидание исправления GPS…</string>
     <!-- Navigation: search + routing + turn-by-turn -->
-    <string name="roadsense_map_search_hint">Search destination</string>
-    <string name="roadsense_map_search_action">Search</string>
-    <string name="roadsense_map_searching">Searching…</string>
-    <string name="roadsense_map_no_results">No places found</string>
-    <string name="roadsense_map_pick_destination">Choose destination</string>
-    <string name="roadsense_map_routing">Finding route…</string>
-    <string name="roadsense_map_route_failed">Could not find a route. Try again.</string>
-    <string name="roadsense_map_need_key">Add a routing key in RoadSense settings to navigate.</string>
-    <string name="roadsense_map_rerouting">Off route — recalculating…</string>
-    <string name="roadsense_map_arrived">You have arrived.</string>
-    <string name="roadsense_map_nav_started">Navigating to %1$s</string>
-    <string name="roadsense_map_nav_ended">Navigation ended</string>
-    <string name="roadsense_map_end_nav">End navigation</string>
-    <string name="roadsense_map_zoom_in">Zoom in</string>
-    <string name="roadsense_map_zoom_out">Zoom out</string>
+    <string name="roadsense_map_search_hint">Поиск назначения</string>
+    <string name="roadsense_map_search_action">Искать</string>
+    <string name="roadsense_map_searching">Поиск…</string>
+    <string name="roadsense_map_no_results">Места отсутствуют</string>
+    <string name="roadsense_map_pick_destination">Выберите место назначения</string>
+    <string name="roadsense_map_routing">Поиск маршрута…</string>
+    <string name="roadsense_map_route_failed">Не удалось найти маршрут. Попробуйте еще раз.</string>
+    <string name="roadsense_map_need_key">Добавьте ключ маршрутизации в настройках RoadSense для навигации.</string>
+    <string name="roadsense_map_rerouting">Выходной маршрут — пересчет…</string>
+    <string name="roadsense_map_arrived">Вы прибыли.</string>
+    <string name="roadsense_map_nav_started">Переход к %1$s</string>
+    <string name="roadsense_map_nav_ended">Навигация завершена</string>
+    <string name="roadsense_map_end_nav">Конец навигации</string>
+    <string name="roadsense_map_zoom_in">Увеличить</string>
+    <string name="roadsense_map_zoom_out">Уменьшить</string>
     <!-- Hazard visibility filter -->
-    <string name="roadsense_map_hazards_filter">Hazard visibility</string>
-    <string name="roadsense_map_hazards_all">Show all hazards</string>
-    <string name="roadsense_map_hazards_moderate">Moderate and severe</string>
-    <string name="roadsense_map_hazards_severe">Severe only</string>
-    <string name="roadsense_map_hazards_hidden">Hide hazards</string>
+    <string name="roadsense_map_hazards_filter">Видимость с опасностью</string>
+    <string name="roadsense_map_hazards_all">Показать все опасности</string>
+    <string name="roadsense_map_hazards_moderate">Умеренный и серьезный</string>
+    <string name="roadsense_map_hazards_severe">Только тяжелые</string>
+    <string name="roadsense_map_hazards_hidden">Скрыть опасности</string>
     <!-- POI along route (EV charging / fuel) -->
-    <string name="roadsense_map_poi_toggle">Charging and fuel</string>
+    <string name="roadsense_map_poi_toggle">Зарядка и топливо</string>
     <!-- 2D / 3D buildings toggle -->
-    <string name="roadsense_map_dimension_toggle">2D / 3D buildings</string>
-    <string name="roadsense_map_3d_on">3D buildings on</string>
-    <string name="roadsense_map_3d_off">3D buildings off</string>
-    <string name="roadsense_map_poi_loading">Finding charging and fuel stops…</string>
-    <string name="roadsense_map_poi_none">No stations found nearby</string>
-    <string name="roadsense_map_poi_need_route">Choose a destination first</string>
+    <string name="roadsense_map_dimension_toggle">2D / 3D здания</string>
+    <string name="roadsense_map_3d_on">3D здания вкл</string>
+    <string name="roadsense_map_3d_off">3D здания выкл</string>
+    <string name="roadsense_map_poi_loading">Поиск остановки зарядки и топлива…</string>
+    <string name="roadsense_map_poi_none">Нет станций поблизости</string>
+    <string name="roadsense_map_poi_need_route">Сначала выберите место назначения</string>
     <!-- POI tap action sheet -->
-    <string name="roadsense_map_stop_added">Stop added</string>
-    <string name="roadsense_map_remove_stop_action">Remove stop</string>
-    <string name="roadsense_map_poi_navigate">Navigate here</string>
-    <string name="roadsense_map_poi_kind_charging">Charging station</string>
-    <string name="roadsense_map_poi_kind_fuel">Fuel station</string>
-    <string name="roadsense_map_poi_charging_generic">Charging station</string>
-    <string name="roadsense_map_poi_fuel_generic">Fuel station</string>
-    <string name="roadsense_map_route_switched">Switched route</string>
+    <string name="roadsense_map_stop_added">Стоп добавлен</string>
+    <string name="roadsense_map_remove_stop_action">Удалить остановку</string>
+    <string name="roadsense_map_poi_navigate">Перейдите здесь</string>
+    <string name="roadsense_map_poi_kind_charging">Зарядка станции</string>
+    <string name="roadsense_map_poi_kind_fuel">Заправочная станция</string>
+    <string name="roadsense_map_poi_charging_generic">Зарядка станции</string>
+    <string name="roadsense_map_poi_fuel_generic">Заправочная станция</string>
+    <string name="roadsense_map_route_switched">Сменный маршрут</string>
     <!-- Hazards-along-route pills (%1$d = count) -->
-    <string name="roadsense_map_pill_severe">%1$d severe</string>
-    <string name="roadsense_map_pill_moderate">%1$d moderate</string>
+    <string name="roadsense_map_pill_severe">Тяжелое %1$d</string>
+    <string name="roadsense_map_pill_moderate">%1$d модерируемый</string>
     <string name="roadsense_map_pill_minor">%1$d minor</string>
     <!-- Shown briefly if the basemap can\'t be reached. -->
-    <string name="roadsense_map_offline">Map data unavailable offline</string>
+    <string name="roadsense_map_offline">Данные карты недоступны в автономном режиме</string>
     <!-- Navigation: autocomplete + route options -->
-    <string name="roadsense_map_clear_search">Clear search</string>
+    <string name="roadsense_map_clear_search">Очистить поиск</string>
     <!-- Route-options sheet -->
-    <string name="roadsense_map_routes_title">Choose a route</string>
-    <string name="roadsense_map_routes_to">Routes to %1$s</string>
-    <string name="roadsense_map_routes_cancel">Cancel</string>
+    <string name="roadsense_map_routes_title">Выберите маршрут</string>
+    <string name="roadsense_map_routes_to">Маршруты к %1$s</string>
+    <string name="roadsense_map_routes_cancel">Отмена</string>
     <!-- Per-route row label, %1$d is the 1-based route number. -->
-    <string name="roadsense_map_route_option">Route %1$d</string>
-    <string name="roadsense_map_fastest">Fastest</string>
-    <string name="roadsense_map_start">Start</string>
+    <string name="roadsense_map_route_option">Маршрут %1$d</string>
+    <string name="roadsense_map_fastest">Самый быстрый</string>
+    <string name="roadsense_map_start">Начать</string>
     <!-- Stops / waypoints in the route-options sheet -->
-    <string name="roadsense_map_your_location">Your location</string>
-    <string name="roadsense_map_add_stop">Add stop</string>
-    <string name="roadsense_map_add_stop_hint">Search a stop to add</string>
-    <string name="roadsense_map_stop_removed">Stop removed</string>
-    <string name="roadsense_map_remove_stop">Remove stop</string>
-    <string name="roadsense_map_move_stop_up">Move stop up</string>
-    <string name="roadsense_map_move_stop_down">Move stop down</string>
+    <string name="roadsense_map_your_location">Ваше местоположение</string>
+    <string name="roadsense_map_add_stop">Добавить остановку</string>
+    <string name="roadsense_map_add_stop_hint">Поиск остановки для добавления</string>
+    <string name="roadsense_map_stop_removed">Остановить удалено</string>
+    <string name="roadsense_map_remove_stop">Удалить остановку</string>
+    <string name="roadsense_map_move_stop_up">Остановка вверх</string>
+    <string name="roadsense_map_move_stop_down">Остановить вниз</string>
     <!-- %1$d is the maximum number of stops allowed. -->
-    <string name="roadsense_map_max_stops">Up to %1$d stops allowed</string>
+    <string name="roadsense_map_max_stops">Допускается до %1$d остановки</string>
 </resources>

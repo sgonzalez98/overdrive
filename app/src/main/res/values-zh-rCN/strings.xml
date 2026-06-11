@@ -96,7 +96,7 @@
     <string name="url_connecting">连接...</string>
     <!-- Shown when an external link can't open (no browser on the head unit):
          the URL is copied to the clipboard instead. %1$s = the URL. -->
-    <string name="url_copied_no_browser">No browser found. Link copied: %1$s</string>
+    <string name="url_copied_no_browser">未找到浏览器。链接已复制： %1$s</string>
     <!-- dialog_tailscale_settings -->
     <string name="tailscale_generate_login_url">创建登录URL</string>
     <string name="tailscale_scan_to_login">扫描到登录</string>
@@ -138,8 +138,8 @@
     <string name="camera_oem_dashcam_auto_resolved">自动-使用 id %1$d (pano id %2$d)</string>
     <string name="camera_oem_dashcam_auto_unavailable">自动-pano id 是 %1$d，不能推断控制摄像头</string>
     <string name="camera_oem_dashcam_save">保存</string>
-    <string name="camera_concurrent_probe_label">Test dual-camera support on next boot</string>
-    <string name="camera_concurrent_probe_subtitle">One-time check that opens both cameras at once to confirm this vehicle can run pano + dashcam concurrently. Runs once on the next restart while parked. Leave OFF unless recordings look wrong — it is not required and may briefly interrupt a recording if one is active when it runs.</string>
+    <string name="camera_concurrent_probe_label">在下次启动时测试双相机支持</string>
+    <string name="camera_concurrent_probe_subtitle">一次性检查一次性打开两台摄像头以确认这辆车可以同时运行一个面包+破折号摄像头。 下次重新启动时运行一次。 除非录制看起来错误，否则请关闭 — — 它是不需要的，而且如果一个录制在运行时，它可能会被短时间打断。</string>
     <!-- Dashcam-side camera labels — REVERSE of the pano labels above. The
          OEM dashcam id is the opposite of the pano id, so the helpful
          "this is what your trim should pick" hint flips between the two
@@ -550,9 +550,9 @@
          notifications into one shade entry. The summary text is intentionally
          generic so it stays accurate whether all three services are running
          or only the keepalive survived an OOM respawn. -->
-    <string name="daemon_keepalive_notif_title">超载驱动器激活</string>
+    <string name="daemon_keepalive_notif_title">Overdrive Active</string>
     <string name="daemon_keepalive_notif_text">监测车辆系统</string>
-    <string name="overdrive_status_summary_title">超载驱动器</string>
+    <string name="overdrive_status_summary_title">Overdrive</string>
     <string name="overdrive_status_summary_text">后台服务运行</string>
     <!-- ============================================================== -->
     <!-- M3 Revamp: navigation rail + settings sub-rail + theme picker  -->
@@ -798,7 +798,7 @@
     <string name="settings_security_title">安全</string>
     <string name="settings_security_subtitle">锁定OverDrive应用，否则乘客和阀无法在没有您的 PIN 码的情况下打开它。</string>
     <string name="settings_security_stance_title">仅锁定界面</string>
-    <string name="settings_security_stance_body">监视、录制、威慑、警报和后台服务在锁定应用程序时继续运行。PIN码关卡超载驱动器接口，别无其他。</string>
+    <string name="settings_security_stance_body">Surveillance, recording, deterrent, alerts, and background services keep running while the app is locked. The PIN gates the OverDrive interface, nothing else.</string>
     <string name="settings_security_overline_lock">应用锁</string>
     <string name="settings_security_overline_recovery">如果您忘记了您的 PIN</string>
     <string name="settings_security_toggle_title">需要 PIN</string>
@@ -922,11 +922,11 @@
     <!-- ============================================================
          RoadSense — road-hazard detection feature
          ============================================================ -->
-    <string name="rail_roadsense">道路Sense</string>
-    <string name="rail_hazard_map">Map</string>
-    <string name="roadsense_title">道路Sense</string>
+    <string name="rail_roadsense">RoadSense</string>
+    <string name="rail_hazard_map">地图</string>
+    <string name="roadsense_title">RoadSense</string>
     <string name="roadsense_pill_scanning">正在扫描</string>
-    <string name="roadsense_pill_idle">道路Sense</string>
+    <string name="roadsense_pill_idle">RoadSense</string>
     <string name="roadsense_status_idle">空闲的</string>
     <!-- VEHICLE calibration (suspension-learning) — the green/orange/red dot. Worded
          about the car, not the route, since that's what maturity actually measures. -->
@@ -972,96 +972,96 @@
     <!-- ============================================================== -->
     <!-- RoadSense Map (native MapLibre map view + tap-to-verify sheet). -->
     <!-- ============================================================== -->
-    <string name="roadsense_map_title">Map</string>
-    <string name="roadsense_map_route_clear">Clear</string>
-    <string name="roadsense_map_route_unmapped">Not mapped yet</string>
-    <string name="roadsense_map_back">Back</string>
-    <string name="roadsense_map_recenter">Recenter on my location</string>
+    <string name="roadsense_map_title">地图</string>
+    <string name="roadsense_map_route_clear">清空</string>
+    <string name="roadsense_map_route_unmapped">尚未映射</string>
+    <string name="roadsense_map_back">后退</string>
+    <string name="roadsense_map_recenter">在我的位置上恢复</string>
     <!-- Tap-to-verify bottom sheet -->
-    <string name="roadsense_map_severity_label">Severity</string>
-    <string name="roadsense_map_type_label">Type</string>
-    <string name="roadsense_map_type_unknown">Unknown</string>
-    <string name="roadsense_map_confirm">Confirm</string>
-    <string name="roadsense_map_delete">Delete</string>
+    <string name="roadsense_map_severity_label">严重程度</string>
+    <string name="roadsense_map_type_label">类型</string>
+    <string name="roadsense_map_type_unknown">未知的</string>
+    <string name="roadsense_map_confirm">确认</string>
+    <string name="roadsense_map_delete">删除</string>
     <!-- Status chip labels: candidate / on-device / shared with fleet -->
-    <string name="roadsense_map_status_candidate">Candidate</string>
-    <string name="roadsense_map_status_local">On device</string>
-    <string name="roadsense_map_status_cloud">Shared</string>
+    <string name="roadsense_map_status_candidate">候选人</string>
+    <string name="roadsense_map_status_local">在设备上</string>
+    <string name="roadsense_map_status_cloud">共享的</string>
     <!-- Meta line: "Moderate · 82% confidence · 3 reports" -->
     <string name="roadsense_map_meta_format">%1$s · %2$d%% confidence · %3$s</string>
     <!-- "3 reports" / "1 report" -->
     <plurals name="roadsense_map_reports">
-        <item quantity="other">%1$d reports</item>
+        <item quantity="other">%1$d 报告</item>
     </plurals>
     <!-- Snackbar / toast confirmations -->
-    <string name="roadsense_map_confirmed_toast">Hazard confirmed</string>
-    <string name="roadsense_map_deleted_toast">Hazard removed</string>
-    <string name="roadsense_map_action_failed">Could not reach RoadSense. Try again.</string>
-    <string name="roadsense_map_no_location">Waiting for GPS fix…</string>
+    <string name="roadsense_map_confirmed_toast">危险已确认</string>
+    <string name="roadsense_map_deleted_toast">已移除危险</string>
+    <string name="roadsense_map_action_failed">无法到达RoadSense。请重试。</string>
+    <string name="roadsense_map_no_location">正在等待 GPS 修复…</string>
     <!-- Navigation: search + routing + turn-by-turn -->
-    <string name="roadsense_map_search_hint">Search destination</string>
-    <string name="roadsense_map_search_action">Search</string>
-    <string name="roadsense_map_searching">Searching…</string>
-    <string name="roadsense_map_no_results">No places found</string>
-    <string name="roadsense_map_pick_destination">Choose destination</string>
+    <string name="roadsense_map_search_hint">搜索目标</string>
+    <string name="roadsense_map_search_action">搜索</string>
+    <string name="roadsense_map_searching">正在搜索…</string>
+    <string name="roadsense_map_no_results">未找到地点</string>
+    <string name="roadsense_map_pick_destination">选择目标</string>
     <string name="roadsense_map_routing">Finding route…</string>
-    <string name="roadsense_map_route_failed">Could not find a route. Try again.</string>
-    <string name="roadsense_map_need_key">Add a routing key in RoadSense settings to navigate.</string>
-    <string name="roadsense_map_rerouting">Off route — recalculating…</string>
-    <string name="roadsense_map_arrived">You have arrived.</string>
-    <string name="roadsense_map_nav_started">Navigating to %1$s</string>
-    <string name="roadsense_map_nav_ended">Navigation ended</string>
-    <string name="roadsense_map_end_nav">End navigation</string>
-    <string name="roadsense_map_zoom_in">Zoom in</string>
-    <string name="roadsense_map_zoom_out">Zoom out</string>
+    <string name="roadsense_map_route_failed">找不到路由。再试一次。</string>
+    <string name="roadsense_map_need_key">在 RoadSense 设置中添加路由键以导航。</string>
+    <string name="roadsense_map_rerouting">关闭路由 - 重新计算…</string>
+    <string name="roadsense_map_arrived">你已经抵达。</string>
+    <string name="roadsense_map_nav_started">导航到 %1$s</string>
+    <string name="roadsense_map_nav_ended">导航已结束</string>
+    <string name="roadsense_map_end_nav">结束导航</string>
+    <string name="roadsense_map_zoom_in">缩放</string>
+    <string name="roadsense_map_zoom_out">缩放</string>
     <!-- Hazard visibility filter -->
-    <string name="roadsense_map_hazards_filter">Hazard visibility</string>
-    <string name="roadsense_map_hazards_all">Show all hazards</string>
-    <string name="roadsense_map_hazards_moderate">Moderate and severe</string>
-    <string name="roadsense_map_hazards_severe">Severe only</string>
-    <string name="roadsense_map_hazards_hidden">Hide hazards</string>
+    <string name="roadsense_map_hazards_filter">危险可见性</string>
+    <string name="roadsense_map_hazards_all">显示所有危险</string>
+    <string name="roadsense_map_hazards_moderate">中度和严重度</string>
+    <string name="roadsense_map_hazards_severe">仅严重的</string>
+    <string name="roadsense_map_hazards_hidden">隐藏危险</string>
     <!-- POI along route (EV charging / fuel) -->
-    <string name="roadsense_map_poi_toggle">Charging and fuel</string>
+    <string name="roadsense_map_poi_toggle">充电和燃料</string>
     <!-- 2D / 3D buildings toggle -->
-    <string name="roadsense_map_dimension_toggle">2D / 3D buildings</string>
-    <string name="roadsense_map_3d_on">3D buildings on</string>
-    <string name="roadsense_map_3d_off">3D buildings off</string>
-    <string name="roadsense_map_poi_loading">Finding charging and fuel stops…</string>
-    <string name="roadsense_map_poi_none">No stations found nearby</string>
-    <string name="roadsense_map_poi_need_route">Choose a destination first</string>
+    <string name="roadsense_map_dimension_toggle">2D / 3D 建筑</string>
+    <string name="roadsense_map_3d_on">3D 建筑已开启</string>
+    <string name="roadsense_map_3d_off">3D 建筑已关闭</string>
+    <string name="roadsense_map_poi_loading">寻找充电站和燃料站…</string>
+    <string name="roadsense_map_poi_none">附近未找到气象站</string>
+    <string name="roadsense_map_poi_need_route">先选择一个目标</string>
     <!-- POI tap action sheet -->
-    <string name="roadsense_map_stop_added">Stop added</string>
-    <string name="roadsense_map_remove_stop_action">Remove stop</string>
-    <string name="roadsense_map_poi_navigate">Navigate here</string>
-    <string name="roadsense_map_poi_kind_charging">Charging station</string>
-    <string name="roadsense_map_poi_kind_fuel">Fuel station</string>
-    <string name="roadsense_map_poi_charging_generic">Charging station</string>
-    <string name="roadsense_map_poi_fuel_generic">Fuel station</string>
-    <string name="roadsense_map_route_switched">Switched route</string>
+    <string name="roadsense_map_stop_added">停止添加</string>
+    <string name="roadsense_map_remove_stop_action">移除停止</string>
+    <string name="roadsense_map_poi_navigate">导航到这里</string>
+    <string name="roadsense_map_poi_kind_charging">充电站</string>
+    <string name="roadsense_map_poi_kind_fuel">燃料站</string>
+    <string name="roadsense_map_poi_charging_generic">充电站</string>
+    <string name="roadsense_map_poi_fuel_generic">燃料站</string>
+    <string name="roadsense_map_route_switched">切换路由</string>
     <!-- Hazards-along-route pills (%1$d = count) -->
-    <string name="roadsense_map_pill_severe">%1$d severe</string>
-    <string name="roadsense_map_pill_moderate">%1$d moderate</string>
-    <string name="roadsense_map_pill_minor">%1$d minor</string>
+    <string name="roadsense_map_pill_severe">%1$d 严重的</string>
+    <string name="roadsense_map_pill_moderate">%1$d 审核</string>
+    <string name="roadsense_map_pill_minor">%1$d 小的</string>
     <!-- Shown briefly if the basemap can\'t be reached. -->
-    <string name="roadsense_map_offline">Map data unavailable offline</string>
+    <string name="roadsense_map_offline">离线地图数据不可用</string>
     <!-- Navigation: autocomplete + route options -->
-    <string name="roadsense_map_clear_search">Clear search</string>
+    <string name="roadsense_map_clear_search">清除搜索</string>
     <!-- Route-options sheet -->
-    <string name="roadsense_map_routes_title">Choose a route</string>
-    <string name="roadsense_map_routes_to">Routes to %1$s</string>
-    <string name="roadsense_map_routes_cancel">Cancel</string>
+    <string name="roadsense_map_routes_title">选择路由</string>
+    <string name="roadsense_map_routes_to">到 %1$s 的路由</string>
+    <string name="roadsense_map_routes_cancel">取消</string>
     <!-- Per-route row label, %1$d is the 1-based route number. -->
-    <string name="roadsense_map_route_option">Route %1$d</string>
-    <string name="roadsense_map_fastest">Fastest</string>
-    <string name="roadsense_map_start">Start</string>
+    <string name="roadsense_map_route_option">路由 %1$d</string>
+    <string name="roadsense_map_fastest">最快的</string>
+    <string name="roadsense_map_start">开始</string>
     <!-- Stops / waypoints in the route-options sheet -->
-    <string name="roadsense_map_your_location">Your location</string>
-    <string name="roadsense_map_add_stop">Add stop</string>
-    <string name="roadsense_map_add_stop_hint">Search a stop to add</string>
-    <string name="roadsense_map_stop_removed">Stop removed</string>
-    <string name="roadsense_map_remove_stop">Remove stop</string>
-    <string name="roadsense_map_move_stop_up">Move stop up</string>
-    <string name="roadsense_map_move_stop_down">Move stop down</string>
+    <string name="roadsense_map_your_location">您的位置</string>
+    <string name="roadsense_map_add_stop">添加停止</string>
+    <string name="roadsense_map_add_stop_hint">搜索一个站点以添加</string>
+    <string name="roadsense_map_stop_removed">停止删除</string>
+    <string name="roadsense_map_remove_stop">移除停止</string>
+    <string name="roadsense_map_move_stop_up">停止上移</string>
+    <string name="roadsense_map_move_stop_down">下移停止</string>
     <!-- %1$d is the maximum number of stops allowed. -->
-    <string name="roadsense_map_max_stops">Up to %1$d stops allowed</string>
+    <string name="roadsense_map_max_stops">最多允许 %1$d 停止</string>
 </resources>
