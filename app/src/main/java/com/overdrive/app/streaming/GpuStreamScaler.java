@@ -540,7 +540,26 @@ public class GpuStreamScaler {
         // Submit to encoder
         eglCore.swapBuffers(encoderSurface);
     }
-    
+
+    /**
+     * Push ONE fully-transparent frame to the layer's surface. Used on hide so the
+     * SurfaceControl layer's last-latched buffer is BLANK, not the final live frame
+     * — otherwise the next show flashes that stale frame until {@link #drawFrame}
+     * swaps a fresh one (visible for seconds on the cluster, where re-open is slow).
+     * MUST run on the GL thread (EGL surface is GL-thread-bound), same as drawFrame.
+     */
+    public void clearFrame() {
+        try {
+            eglCore.makeCurrent(encoderSurface);
+            GLES20.glViewport(0, 0, outputWidth, outputHeight);
+            GLES20.glClearColor(0.0f, 0.0f, 0.0f, 0.0f);   // transparent
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+            eglCore.swapBuffers(encoderSurface);
+        } catch (Throwable t) {
+            // best-effort; a failed clear just leaves the prior buffer (old behavior)
+        }
+    }
+
     /**
      * Sets the view mode for streaming.
      *

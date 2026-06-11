@@ -34,6 +34,12 @@ public class AccMonitor {
     // it stays unrecorded for the rest of the drive.
     private static volatile boolean accOnAuthoritative = false;
 
+    // Last accOn value an EDGE was dispatched for, so notifyAccEdge fires the
+    // auto-project hook only on a genuine OFF→ON transition (both setAccState
+    // IPC and probeAccState refresh the value repeatedly without a real change).
+    // -1 = no edge dispatched yet (first authoritative read is treated as an edge).
+    private static volatile int lastEdgeState = -1;
+
     // Track the last sentinel state we logged (FAKE_OK=4, INVALID=255, or
     // out-of-range value), so we log only on transitions. Without this,
     // a persistently broken HAL would emit ~2880 "powerLevel=INVALID" lines
@@ -115,6 +121,49 @@ public class AccMonitor {
         // the value).
         accOnAuthoritative = true;
         CameraDaemon.log("ACC state updated via IPC: accOn=" + isAccOn + ", sentryMode=" + inSentryMode);
+        notifyAccEdge(isAccOn);
+    }
+
+    /**
+     * Dispatch side-effects on a genuine ACC state EDGE. Both the IPC path
+     * (setAccState) and the hardware probe (probeAccState) refresh accOn on every
+     * call, so this de-dupes to the actual OFF→ON / ON→OFF transition.
+     *
+     * <p>OFF→ON: if the user enabled "auto-project map to cluster"
+     * (navMap.autoProjectCluster), start the cluster map projection. ON→OFF is
+     * already handled downstream by ClusterProjectionController.forceClose (every
+     * ACC-off path restores the gauges), and ClusterMapProjector.start() itself is
+     * idempotent, so this only needs to TRIGGER the start on the on-edge. Never throws.
+     */
+    private static void notifyAccEdge(boolean isAccOn) {
+        if (lastEdgeState == (isAccOn ? 1 : 0)) return;  // no real transition
+        lastEdgeState = isAccOn ? 1 : 0;
+        if (!isAccOn) {
+            // ACC-OFF: stop the cluster map projector so its holder releases + the
+            // launched cluster Activity is torn down. The gauge RESTORE itself is
+            // still driven independently by ClusterProjectionController.forceClose
+            // (every ACC-off path) — this just ensures the projector's `active`
+            // flag + sustained hold don't linger. Safe + idempotent if not active.
+            try {
+                if (com.overdrive.app.navmap.ClusterMapProjector.isActive()) {
+                    CameraDaemon.log("ACC-off edge: stopping cluster map projection");
+                    com.overdrive.app.navmap.ClusterMapProjector.stop();
+                }
+            } catch (Throwable t) {
+                CameraDaemon.log("notifyAccEdge ACC-off stop failed: " + t.getMessage());
+            }
+            return;
+        }
+        try {
+            org.json.JSONObject nav = com.overdrive.app.config.UnifiedConfigManager.forceReload().optJSONObject("navMap");
+            boolean auto = nav != null && nav.optBoolean("autoProjectCluster", false);
+            if (auto) {
+                CameraDaemon.log("ACC-on edge: auto-projecting map to cluster");
+                com.overdrive.app.navmap.ClusterMapProjector.start();
+            }
+        } catch (Throwable t) {
+            CameraDaemon.log("notifyAccEdge auto-project check failed: " + t.getMessage());
+        }
     }
 
     /**
@@ -222,6 +271,7 @@ public class AccMonitor {
             boolean isAccOn = level >= POWER_LEVEL_ON;
             accOn = isAccOn;
             inSentryMode = !isAccOn;
+            notifyAccEdge(isAccOn);
 
             String levelStr;
             switch (level) {

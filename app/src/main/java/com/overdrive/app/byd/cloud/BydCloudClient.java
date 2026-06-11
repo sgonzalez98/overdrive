@@ -1,7 +1,8 @@
 package com.overdrive.app.byd.cloud;
 
-import com.overdrive.app.byd.cloud.crypto.BangcleCodec;
 import com.overdrive.app.byd.cloud.crypto.BydCryptoUtils;
+import com.overdrive.app.byd.cloud.crypto.EnvelopeCodec;
+import com.overdrive.app.byd.cloud.crypto.EnvelopeCodecFactory;
 import com.overdrive.app.logging.DaemonLogger;
 
 import org.json.JSONArray;
@@ -25,19 +26,20 @@ public final class BydCloudClient {
     private static final DaemonLogger logger = DaemonLogger.getInstance(TAG);
 
     private final BydCloudConfig config;
-    private final BangcleCodec codec;
+    private final EnvelopeCodec codec;
     private BydCloudTransport transport;
     private BydCloudSession session;
     private boolean commandsVerified = false;
 
     public BydCloudClient(BydCloudConfig config) {
         this.config = config;
-        this.codec = new BangcleCodec();
+        // Region selects the transport codec: WBSK for China, Bangcle otherwise.
+        this.codec = EnvelopeCodecFactory.createCodec(config.isChinaRegion());
     }
 
     /**
-     * Initialize the codec by loading Bangcle tables.
-     * Must be called before any API operations.
+     * Initialize the codec by loading its white-box tables (Bangcle or WBSK,
+     * per region). Must be called before any API operations.
      */
     public void init(InputStream tablesStream) throws IOException {
         codec.loadTables(tablesStream);
@@ -63,8 +65,10 @@ public final class BydCloudClient {
         if (!isReady()) throw new IllegalStateException("Client not initialized");
 
         long nowMs = System.currentTimeMillis();
-        JSONObject outer = buildLoginRequest(nowMs);
-        JSONObject response = transport.postSecure("/app/account/login", outer);
+        boolean cn = config.isChinaRegion();
+        JSONObject outer = cn ? buildCnLoginRequest(nowMs) : buildLoginRequest(nowMs);
+        JSONObject response = transport.postSecure(
+                cn ? "/app/auth/login" : "/app/account/login", outer);
 
         String code = response.optString("code", "");
         if (!"0".equals(code)) {
@@ -85,18 +89,40 @@ public final class BydCloudClient {
             throw new IOException("Login response missing token");
         }
 
-        String userId = token.optString("userId", "");
         String signToken = token.optString("signToken", "");
         String encryToken = token.optString("encryToken", "");
         if (encryToken.isEmpty()) {
             encryToken = token.optString("encryptToken", "");
         }
 
+        String userId;
+        String superId = "";
+        if (cn) {
+            // CN: token carries superId + a per-brand relation map. The
+            // effective userId is the brand-specific one (targetBrand), falling
+            // back to superId. superId is also used for MQTT / outer identifier.
+            superId = token.optString("superId", "");
+            String brandUserId = "";
+            JSONObject rel = token.optJSONObject("superBindRelationDtoMap");
+            if (rel != null) {
+                JSONObject entry = rel.optJSONObject(BydCloudConfig.CN_TARGET_BRAND);
+                if (entry != null) {
+                    String uid = entry.optString("userId", "");
+                    if (!uid.isEmpty() && !"null".equals(uid)) {
+                        brandUserId = uid;
+                    }
+                }
+            }
+            userId = !brandUserId.isEmpty() ? brandUserId : superId;
+        } else {
+            userId = token.optString("userId", "");
+        }
+
         if (userId.isEmpty() || signToken.isEmpty() || encryToken.isEmpty()) {
             throw new IOException("Login response missing token fields");
         }
 
-        session = new BydCloudSession(userId, signToken, encryToken);
+        session = new BydCloudSession(userId, signToken, encryToken, superId);
         logger.info("Login succeeded: userId=***" + userId.substring(Math.max(0, userId.length() - 4)));
     }
 
@@ -141,9 +167,15 @@ public final class BydCloudClient {
         BydCloudSession s = ensureSession();
         long nowMs = System.currentTimeMillis();
 
+        boolean cn = config.isChinaRegion();
         JSONObject inner = buildInner(nowMs);
+        if (cn) {
+            // CN vehicle-list inner adds appUiName (cn_envelope.build_cn_vehicle_list_inner)
+            try { inner.put("appUiName", ""); } catch (Exception ignored) {}
+        }
         TokenEnvelope env = buildTokenOuterEnvelope(nowMs, s, inner);
-        JSONObject response = transport.postSecure("/app/account/getAllListByUserId", env.outer);
+        JSONObject response = transport.postSecure(
+                cn ? "/app/auth/getAllListByUserId" : "/app/account/getAllListByUserId", env.outer);
 
         String code = response.optString("code", "");
         if (!"0".equals(code)) {
@@ -958,9 +990,16 @@ public final class BydCloudClient {
         }
 
         JSONObject decoded = BydCloudTransport.decryptRespondData(respondData, env.contentKey);
-        // BYD API has a typo: "emqBorker" (sic) — check both spellings
-        String broker = decoded.optString("emqBorker", "");
-        if (broker.isEmpty()) broker = decoded.optString("emqBroker", "");
+        String broker;
+        if (config.isChinaRegion()) {
+            // CN: broker field is brand-specific (targetBrand 1..5 → dynasty/ocean/
+            // denza/yangwang/fangchengbao). We ship targetBrand=1 (dynasty).
+            broker = decoded.optString(cnBrokerField(), "");
+        } else {
+            // BYD API has a typo: "emqBorker" (sic) — check both spellings
+            broker = decoded.optString("emqBorker", "");
+            if (broker.isEmpty()) broker = decoded.optString("emqBroker", "");
+        }
         if (broker.isEmpty()) {
             throw new IOException("Broker lookup response missing broker hostname");
         }
@@ -969,18 +1008,36 @@ public final class BydCloudClient {
         return broker;
     }
 
+    /** CN EMQ broker response field for the configured targetBrand. */
+    private static String cnBrokerField() {
+        switch (BydCloudConfig.CN_TARGET_BRAND) {
+            case "2": return "oceanEmqBroker";
+            case "3": return "denzaEmqBroker";
+            case "4": return "yangwangEmqBroker";
+            case "5": return "fangchengbaoEmqBroker";
+            case "1":
+            default:  return "dynastyEmqBroker";
+        }
+    }
+
     /**
      * Build MQTT credentials for connecting to BYD's EMQ broker.
      * Returns [clientId, username, password].
+     *
+     * CN uses the "dynasty" client-id prefix + topic root and the effective API
+     * identifier (superId preferred); overseas keeps "oversea" + userId. The
+     * password derivation (ts + MD5(signToken+clientId+uid+ts)) is identical.
      */
     public String[] buildMqttCredentials() throws IOException {
         BydCloudSession s = ensureSession();
-        String clientId = "oversea_" + config.imeiMd5.toUpperCase();
-        String username = s.userId;
+        boolean cn = config.isChinaRegion();
+        String prefix = cn ? "dynasty" : "oversea";
+        String uid = cn ? s.effectiveApiIdentifier() : s.userId;
+        String clientId = prefix + "_" + config.imeiMd5.toUpperCase();
         long tsSeconds = System.currentTimeMillis() / 1000;
-        String passwordBase = s.signToken + clientId + s.userId + tsSeconds;
+        String passwordBase = s.signToken + clientId + uid + tsSeconds;
         String password = tsSeconds + com.overdrive.app.byd.cloud.crypto.BydCryptoUtils.md5Hex(passwordBase);
-        return new String[]{clientId, username, password};
+        return new String[]{clientId, uid, password};
     }
 
     /**
@@ -988,6 +1045,9 @@ public final class BydCloudClient {
      */
     public String getMqttTopic() throws IOException {
         BydCloudSession s = ensureSession();
+        if (config.isChinaRegion()) {
+            return "dynasty/res/" + s.effectiveApiIdentifier();
+        }
         return "oversea/res/" + s.userId;
     }
 
@@ -1074,7 +1134,93 @@ public final class BydCloudClient {
         }
     }
 
+    /**
+     * Build the CN login outer payload (/app/auth/login).
+     *
+     * Differences from overseas {@link #buildLoginRequest}:
+     *   - inner carries CN device fields (networkOperator 无, configVersion, etc.)
+     *   - sign fields use appChannel/targetBrand/loginType instead of
+     *     countryCode/language/functionType
+     *   - checkcode is SHA-256 (computeCnCheckcode), not MD5+reorder
+     *   - no signKey/rawPassword field on the wire
+     *
+     * Inner AES key and sign password are the SAME derivations as overseas
+     * (loginKey = MD5(MD5(pw)), signPassword = MD5(pw)) — so stored credentials
+     * need no CN-specific handling.
+     *
+     * Port of: pyBYD _api/login_cn.build_cn_login_request.
+     */
+    private JSONObject buildCnLoginRequest(long nowMs) {
+        try {
+            String random = BydCryptoUtils.randomHex16();
+            String reqTimestamp = String.valueOf(nowMs);
+
+            JSONObject inner = new JSONObject();
+            inner.put("appInnerVersion", config.appInnerVersion);
+            inner.put("appVersion", config.appVersion);
+            inner.put("bluetoothMac", "");
+            inner.put("city", "");
+            inner.put("configVersion", "10000");
+            inner.put("deviceType", "0");
+            inner.put("devicename", "XIAOMIPOCO F1");
+            inner.put("imeiMD5", config.imeiMd5);
+            inner.put("isAuto", "0");
+            inner.put("latitude", "");
+            inner.put("longitude", "");
+            inner.put("mobileBrand", "XIAOMI");
+            inner.put("mobileModel", "POCO F1");
+            inner.put("networkOperator", BydCloudConfig.CN_NETWORK_OPERATOR);
+            inner.put("networkType", "wifi");
+            inner.put("osType", "Android");
+            inner.put("osVersion", "35");
+            inner.put("random", random);
+            inner.put("softType", "0");
+            inner.put("timeStamp", reqTimestamp);
+
+            String encryData = BydCryptoUtils.aesEncryptHex(inner.toString(), config.loginKey);
+
+            // Sign fields = inner + CN outer context. loginType is an int (0).
+            JSONObject signFields = new JSONObject(inner.toString());
+            signFields.put("appChannel", BydCloudConfig.CN_APP_CHANNEL);
+            signFields.put("identifier", config.username);
+            signFields.put("loginType", 0);
+            signFields.put("reqTimestamp", reqTimestamp);
+            signFields.put("targetBrand", BydCloudConfig.CN_TARGET_BRAND);
+
+            String sign = BydCryptoUtils.sha1Mixed(
+                    BydCryptoUtils.buildCnSignString(signFields, config.signPassword));
+
+            JSONObject outer = new JSONObject();
+            outer.put("appChannel", BydCloudConfig.CN_APP_CHANNEL);
+            outer.put("encryData", encryData);
+            outer.put("identifier", config.username);
+            outer.put("imeiMD5", config.imeiMd5);
+            outer.put("isAuto", "0");
+            outer.put("loginType", 0);
+            outer.put("reqTimestamp", reqTimestamp);
+            outer.put("sign", sign);
+            outer.put("targetBrand", BydCloudConfig.CN_TARGET_BRAND);
+            // Common device fields
+            outer.put("ostype", "and");
+            outer.put("imei", "BANGCLE01234");
+            outer.put("mac", "00:00:00:00:00:00");
+            outer.put("model", "POCO F1");
+            outer.put("sdk", "35");
+            outer.put("mod", "Xiaomi");
+            outer.put("serviceTime", String.valueOf(System.currentTimeMillis()));
+
+            outer.put("checkcode", BydCryptoUtils.computeCnCheckcode(outer));
+
+            return outer;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to build CN login request", e);
+        }
+    }
+
     private JSONObject buildInner(long nowMs) {
+        if (config.isChinaRegion()) {
+            return buildCnInnerBase(nowMs);
+        }
         try {
             JSONObject inner = new JSONObject();
             inner.put("deviceType", "0");
@@ -1089,6 +1235,33 @@ public final class BydCloudClient {
         }
     }
 
+    /**
+     * CN common inner fields for post-login requests
+     * (cn_envelope.build_cn_inner_base). Richer than the overseas inner: it
+     * carries device identity + networkOperator + version=cn_app_inner_version.
+     */
+    private JSONObject buildCnInnerBase(long nowMs) {
+        try {
+            JSONObject inner = new JSONObject();
+            inner.put("deviceName", "XIAOMIPOCO F1");
+            inner.put("deviceType", "0");
+            inner.put("imeiMD5", config.imeiMd5);
+            inner.put("mobileBrand", "XIAOMI");
+            inner.put("mobileModel", "POCO F1");
+            inner.put("networkOperator", BydCloudConfig.CN_NETWORK_OPERATOR);
+            inner.put("networkType", "wifi");
+            inner.put("osType", "Android");
+            inner.put("osVersion", "35");
+            inner.put("random", BydCryptoUtils.randomHex16());
+            inner.put("softType", "0");
+            inner.put("timeStamp", String.valueOf(nowMs));
+            inner.put("version", config.appInnerVersion);
+            return inner;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to build CN inner payload", e);
+        }
+    }
+
     /** Envelope result: outer payload + content key for decrypting respondData. */
     private static final class TokenEnvelope {
         final JSONObject outer;
@@ -1100,6 +1273,9 @@ public final class BydCloudClient {
     }
 
     private TokenEnvelope buildTokenOuterEnvelope(long nowMs, BydCloudSession s, JSONObject inner) {
+        if (config.isChinaRegion()) {
+            return buildCnTokenOuterEnvelope(nowMs, s, inner);
+        }
         try {
             String reqTimestamp = String.valueOf(nowMs);
             String contentKey = s.contentKey();
@@ -1140,6 +1316,82 @@ public final class BydCloudClient {
             return new TokenEnvelope(outer, contentKey);
         } catch (Exception e) {
             throw new RuntimeException("Failed to build token envelope", e);
+        }
+    }
+
+    /**
+     * Build the CN signed outer envelope for post-login token requests.
+     *
+     * Differences from overseas {@link #buildTokenOuterEnvelope}:
+     *   - identifier = effective API id (superId preferred, else userId)
+     *   - adds identifierType (0 with vin, else 2), appChannel, targetBrand,
+     *     vehicleBrand, objective (=vin or null), and explicit null fields
+     *     (outModelTypes/softType/version) that the CN server expects present
+     *   - sign uses the CN field set + CN sign string (null -> "null")
+     *   - checkcode is SHA-256
+     *
+     * contentKey/signKey derivation is identical to overseas
+     * (MD5(encryToken)/MD5(signToken)).
+     *
+     * Port of: pyBYD _api/cn_envelope.build_cn_token_outer_envelope.
+     */
+    private TokenEnvelope buildCnTokenOuterEnvelope(long nowMs, BydCloudSession s, JSONObject inner) {
+        try {
+            String reqTimestamp = String.valueOf(nowMs);
+            String contentKey = s.contentKey();
+            String signKey = s.signKey();
+            String apiId = s.effectiveApiIdentifier();
+
+            String encryData = BydCryptoUtils.aesEncryptHex(inner.toString(), contentKey);
+
+            String vin = inner.optString("vin", "");
+            boolean hasVin = !vin.isEmpty();
+            int idType = hasVin ? 0 : 2;
+
+            // Sign fields: inner + CN outer context.
+            JSONObject signFields = new JSONObject(inner.toString());
+            signFields.put("appChannel", BydCloudConfig.CN_APP_CHANNEL);
+            signFields.put("identifier", apiId);
+            signFields.put("identifierType", idType);
+            signFields.put("imeiMD5", config.imeiMd5);
+            signFields.put("reqTimestamp", reqTimestamp);
+            signFields.put("targetBrand", BydCloudConfig.CN_TARGET_BRAND);
+            signFields.put("vehicleBrand", BydCloudConfig.CN_VEHICLE_BRAND);
+            if (hasVin) {
+                signFields.put("objective", vin);
+            }
+
+            String sign = BydCryptoUtils.sha1Mixed(
+                    BydCryptoUtils.buildCnSignString(signFields, signKey));
+
+            JSONObject outer = new JSONObject();
+            outer.put("appChannel", BydCloudConfig.CN_APP_CHANNEL);
+            outer.put("encryData", encryData);
+            outer.put("identifier", apiId);
+            outer.put("identifierType", idType);
+            outer.put("imeiMD5", config.imeiMd5);
+            outer.put("objective", hasVin ? vin : JSONObject.NULL);
+            outer.put("outModelTypes", JSONObject.NULL);
+            outer.put("reqTimestamp", reqTimestamp);
+            outer.put("sign", sign);
+            outer.put("softType", JSONObject.NULL);
+            outer.put("targetBrand", BydCloudConfig.CN_TARGET_BRAND);
+            outer.put("vehicleBrand", BydCloudConfig.CN_VEHICLE_BRAND);
+            outer.put("version", JSONObject.NULL);
+            // Common device fields
+            outer.put("ostype", "and");
+            outer.put("imei", "BANGCLE01234");
+            outer.put("mac", "00:00:00:00:00:00");
+            outer.put("model", "POCO F1");
+            outer.put("sdk", "35");
+            outer.put("mod", "Xiaomi");
+            outer.put("serviceTime", String.valueOf(System.currentTimeMillis()));
+
+            outer.put("checkcode", BydCryptoUtils.computeCnCheckcode(outer));
+
+            return new TokenEnvelope(outer, contentKey);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to build CN token envelope", e);
         }
     }
 }

@@ -59,6 +59,17 @@ class RoadSenseOverlayService : Service() {
     @Volatile private var expanded = false
     private var pollRunnable: Runnable? = null
 
+    // Render change-gate (perf): the poll loop posts a main-thread render() every
+    // POLL_MS. render() mutates the visible pill (setColorFilter/setText/setRotation
+    // → invalidate → a traversal) EVERY tick even when nothing changed, which showed
+    // up as a continuous ~2.5Hz redraw of the overlay window competing with the
+    // foreground map's frames. We skip the post when the render-relevant signature is
+    // unchanged. The signature excludes updatedMs (it changes every daemon write even
+    // when nothing visible changed) but FOLDS IN the time-derived `stale` flag (so a
+    // quiet daemon still transitions Scanning→Idle past STALE_MS) and the pending
+    // hazardId (so the rising-edge force-expand still fires). Read off the IO thread.
+    private var lastRenderSig: String? = null
+
     // Bound views (re-bound on each (re)inflate).
     private var pillRoot: View? = null
     private var cardRoot: View? = null
@@ -150,6 +161,9 @@ class RoadSenseOverlayService : Service() {
         overlayView = LayoutInflater.from(themedCtx)
             .inflate(R.layout.overlay_roadsense, null)
         bindViews()
+        // Fresh view tree → force the next poll to actually render (its bound views
+        // are all default until the first render paints real state).
+        lastRenderSig = null
 
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -323,7 +337,6 @@ class RoadSenseOverlayService : Service() {
     // A single reused ValueAnimator pulses the arrow's scale+alpha. We retarget
     // its duration by distance so the throb speeds up as the hazard nears.
     private var arrowPulse: android.animation.ValueAnimator? = null
-    private var arrowPulseMeters = -1
     private var arrowPulseSeverity = -1
     private var arrowPulsePeriod = -1L
 
@@ -346,10 +359,8 @@ class RoadSenseOverlayService : Service() {
         if (running && severity == arrowPulseSeverity) {
             // Same beacon — just retarget the throb rate smoothly; no restart.
             if (periodChangedALot) { arrowPulse?.duration = period; arrowPulsePeriod = period }
-            arrowPulseMeters = meters
             return
         }
-        arrowPulseMeters = meters
         arrowPulseSeverity = severity
         arrowPulsePeriod = period
 
@@ -382,7 +393,6 @@ class RoadSenseOverlayService : Service() {
     private fun stopArrowPulse() {
         arrowPulse?.cancel()
         arrowPulse = null
-        arrowPulseMeters = -1
         arrowPulseSeverity = -1
         arrowPulsePeriod = -1L
         // Restore the FULL idle visual in one place (audit UI #6) so glow alpha +
@@ -404,12 +414,48 @@ class RoadSenseOverlayService : Service() {
             override fun run() {
                 val state = readState()
                 val warnMode = currentWarnMode()
-                handler.post { if (overlayView != null) render(state, warnMode) }
+                // Skip the main-thread render when nothing render-relevant changed —
+                // avoids a continuous ~2.5Hz pill redraw fighting the map's frames.
+                val sig = renderSignature(state, warnMode)
+                if (sig != lastRenderSig) {
+                    lastRenderSig = sig
+                    handler.post { if (overlayView != null) render(state, warnMode) }
+                }
                 ioHandler?.postDelayed(this, POLL_MS)
             }
         }
         pollRunnable = r
         ioHandler?.post(r)
+    }
+
+    /**
+     * Render-relevant signature for the change-gate. Two ticks with the same
+     * signature produce a byte-identical pill, so we can skip the redraw. We fold
+     * in the time-derived `stale` flag (Scanning→Idle must still flip when the
+     * daemon goes quiet) and the pending hazardId (rising-edge force-expand), but
+     * DROP updatedMs (it advances on every daemon write even with no visible
+     * change) and the `expanded` user-toggle (that mutates views via its own path,
+     * applyExpanded(), not render()). Also keyed on warnMode (chip state) + theme.
+     */
+    private fun renderSignature(state: OverlayState?, warnMode: String): String {
+        if (state == null) return "null"
+        val stale = System.currentTimeMillis() - state.updatedMs > STALE_MS
+        // Recompute on a config/theme change too (themedCtx swap re-tints chips).
+        return buildString {
+            append(warnMode); append('|')
+            append(stale); append('|')
+            append(state.calLevel()); append('|')
+            append(state.coverage); append('|')
+            append(state.hazardAhead); append('|')
+            append(state.nextHazardMeters); append('|')
+            append(state.nextHazardRelBearingDeg); append('|')
+            append(state.nextHazardSeverity); append('|')
+            append(state.nextHazardType); append('|')
+            append(state.zoneCount); append('|')
+            append(state.zoneLengthM); append('|')
+            append(state.zoneRough); append('|')
+            append(state.pendingConfirm?.hazardId ?: "")
+        }
     }
 
     /** Apply state to the views. MUST run on the main thread (view mutations).

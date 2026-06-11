@@ -234,6 +234,25 @@ public class OemDashcamPipeline {
     // Lifecycle / state
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean recording = new AtomicBoolean(false);
+    // True when the in-flight clip was opened by the surveillance EVENT path
+    // (tryStartIfIdle), as opposed to the continuous / resolver path
+    // (startRecording). The trigger-lifecycle resolver must NOT finalize a
+    // surveillance-owned clip on its "recordingDesired flipped false" stop
+    // path — surveillance owns that clip's lifecycle via stopRecordingIfOwned.
+    // Without this, the periodic self-heal recalc (every 30s) would truncate
+    // every surv=smart motion clip the moment a tick observed
+    // recordingDesired=false while surveillance had a clip open.
+    //
+    // The (recording, recordingEventOwned) PAIR is mutated and read under
+    // recordingStateLock so they're always coherent: tryStartIfIdle (off the
+    // surveillance thread, without LIFECYCLE_LOCK) and the resolver's
+    // ownership-gated stop (under LIFECYCLE_LOCK) can run concurrently, and
+    // without the pair-lock there'd be a tiny window between "recording flips
+    // true" and "owner flips true" where the resolver could see
+    // (recording=true, owned=false) and finalize a just-starting event clip.
+    private final AtomicBoolean recordingEventOwned = new AtomicBoolean(false);
+    // Guards atomic read/write of the (recording, recordingEventOwned) pair.
+    private final Object recordingStateLock = new Object();
     // Reentrant lock guarding start() ↔ stopInternal(): three call paths
     // reach stopInternal (user disable via stop(), watchdog timeout,
     // render-loop max-errors) and any of them can race a freshly-launched
@@ -476,6 +495,16 @@ public class OemDashcamPipeline {
      *        the engine's configured post-window for parity with pano.
      */
     public boolean startRecording(long postRecordMs) {
+        return startRecordingInternal(postRecordMs, false);
+    }
+
+    /**
+     * Shared start path. {@code eventOwned} marks the clip as surveillance-
+     * owned so the trigger-lifecycle resolver's stop path leaves it alone
+     * (only {@link #stopRecordingIfOwned} may finalize it). Continuous /
+     * resolver-driven recording passes false.
+     */
+    private boolean startRecordingInternal(long postRecordMs, boolean eventOwned) {
         if (!running.get()) return false;
         if (!DRAW_PASSTHROUGH_IS_REAL) {
             logger.warn("startRecording refused: passthrough shader not yet plumbed (Phase-9)");
@@ -488,16 +517,35 @@ public class OemDashcamPipeline {
         // already running, allowing surveillance's tryStartIfIdle to
         // claim ownership of a user-initiated continuous clip and
         // finalize it prematurely on event-end (R7-A #1).
-        if (!recording.compareAndSet(false, true)) return false;
+        // Flip (recording, owner) together under the pair-lock so a concurrent
+        // ownership-gated resolver stop never sees a half-published state.
+        synchronized (recordingStateLock) {
+            if (!recording.compareAndSet(false, true)) return false;
+            recordingEventOwned.set(eventOwned);
+        }
         String path = generateOutputPath();
         long clampedPost = Math.max(0L, postRecordMs);
         boolean ok = encoder != null && encoder.triggerEventRecording(path, clampedPost);
-        if (!ok) recording.set(false);
+        if (!ok) {
+            synchronized (recordingStateLock) {
+                recording.set(false);
+                recordingEventOwned.set(false);
+            }
+        }
         // Telemetry polling is gated on (overlayEnabled && running && recording)
         // — reconcile after the recording-flag transitions to grab the
         // refcount on start and release on stop.
         reconcileTelemetryHold();
         return ok;
+    }
+
+    /** True iff the in-flight clip (if any) is surveillance-event-owned.
+     *  The trigger-lifecycle resolver consults this before its stop path so
+     *  it never finalizes a clip surveillance opened. */
+    public boolean isRecordingEventOwned() {
+        synchronized (recordingStateLock) {
+            return recording.get() && recordingEventOwned.get();
+        }
     }
 
     /** Back-compat overload — defaults to no post-roll. New callers should
@@ -512,7 +560,10 @@ public class OemDashcamPipeline {
      * by deferring muxer finalization until the tail elapses.
      */
     public void stopRecording(long postRecordMs) {
-        if (!recording.getAndSet(false)) return;
+        synchronized (recordingStateLock) {
+            if (!recording.getAndSet(false)) return;
+            recordingEventOwned.set(false);
+        }
         if (encoder != null) encoder.stopEventRecording(true, Math.max(0L, postRecordMs));
         reconcileTelemetryHold();
     }
@@ -520,6 +571,38 @@ public class OemDashcamPipeline {
     /** Back-compat overload — no post-roll. */
     public void stopRecording() {
         stopRecording(0L);
+    }
+
+    /**
+     * Resolver-only stop: finalize the in-flight clip ONLY if it is NOT
+     * surveillance-event-owned. The ownership check and the recording-flag
+     * clear happen inside a SINGLE {@link #recordingStateLock} critical
+     * section so a concurrent {@link #tryStartIfIdle} cannot flip the
+     * (recording, recordingEventOwned) pair into the event-owned state in
+     * the gap between a separate check and stop. Returns {@code true} iff
+     * this call actually stopped a (resolver-owned) clip.
+     *
+     * <p>Replaces the resolver's previous
+     * {@code isRecording() && !isRecordingEventOwned() then stopRecording()}
+     * sequence, which was a check-then-act race: an independent
+     * {@code handleWriterAbort} clearing {@code recording} followed by a
+     * surveillance {@code tryStartIfIdle} could open an event-owned clip
+     * between the gate and the ownership-blind stop, truncating it.
+     */
+    public boolean stopRecordingIfNotEventOwned(long postRecordMs) {
+        synchronized (recordingStateLock) {
+            if (!recording.get() || recordingEventOwned.get()) return false;
+            recording.set(false);
+            recordingEventOwned.set(false);
+        }
+        if (encoder != null) encoder.stopEventRecording(true, Math.max(0L, postRecordMs));
+        reconcileTelemetryHold();
+        return true;
+    }
+
+    /** Back-compat overload — no post-roll. */
+    public boolean stopRecordingIfNotEventOwned() {
+        return stopRecordingIfNotEventOwned(0L);
     }
 
     /**
@@ -537,7 +620,7 @@ public class OemDashcamPipeline {
      * the user's clip prematurely.
      */
     public boolean tryStartIfIdle(long postRecordMs) {
-        return startRecording(postRecordMs);
+        return startRecordingInternal(postRecordMs, true);
     }
 
     /** Back-compat overload — no post-roll. */

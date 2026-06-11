@@ -138,18 +138,7 @@ object RoadSenseConfig {
         )
     }
 
-    /** Merge-write one or more keys. Caller passes only the keys it's changing;
-     *  updateSection merges into the existing section (preserves the rest). */
-    fun update(values: Map<String, Any?>): Boolean {
-        val o = JSONObject()
-        for ((k, v) in values) o.put(k, v)
-        return UnifiedConfigManager.updateSection(SECTION, o)
-    }
-
-    // Convenience single-key writers for the common toggles (web page / settings).
-    fun setEnabled(v: Boolean) = update(mapOf(K_ENABLED to v))
-    fun setCalibrationMode(v: Boolean) = update(mapOf(K_CALIBRATION_MODE to v))
-    fun setCrowdUpload(v: Boolean) = update(mapOf(K_UPLOAD to v))
-    fun setCrowdDownload(v: Boolean) = update(mapOf(K_DOWNLOAD to v))
-    fun setDeviceId(id: String) = update(mapOf(K_DEVICE_ID to id))
+    // NOTE: writes to the roadSense section go through UnifiedConfigManager.updateSection
+    // directly (web settings page via RoadSenseApiHandler, daemon via RoadSenseController).
+    // The old typed update()/setX() writers here had no callers and were removed.
 }

@@ -54,6 +54,9 @@ public final class BydCloudRegionCatalog {
         addCountries(countryToRegion, "sa", "SA");
         addCountries(countryToRegion, "om", "OM");
         addCountries(countryToRegion, "kz", "KZ");
+        // China (mainland) — uses the separate CN DiLink stack (WBSK transport,
+        // /app/auth/* endpoints, dilinksuperappserver-cn host). See BydCloudConfig.
+        addCountries(countryToRegion, "cn", "CN");
         COUNTRY_TO_REGION = Collections.unmodifiableMap(countryToRegion);
 
         HashMap<String, String> countryToLanguage = new HashMap<>();
@@ -81,6 +84,7 @@ public final class BydCloudRegionCatalog {
         addLanguages(countryToLanguage, "th", "TH");
         addLanguages(countryToLanguage, "tr", "TR");
         addLanguages(countryToLanguage, "vi", "VN");
+        addLanguages(countryToLanguage, "zh", "CN");
         COUNTRY_TO_LANGUAGE = Collections.unmodifiableMap(countryToLanguage);
 
         HashMap<String, String> regionDefaults = new HashMap<>();
@@ -100,10 +104,19 @@ public final class BydCloudRegionCatalog {
         regionDefaults.put("sa", "SA");
         regionDefaults.put("om", "OM");
         regionDefaults.put("kz", "KZ");
+        regionDefaults.put("cn", "CN");
         REGION_TO_DEFAULT_COUNTRY = Collections.unmodifiableMap(regionDefaults);
     }
 
     private BydCloudRegionCatalog() {}
+
+    /** BYD region key for mainland China (separate CN DiLink stack). */
+    public static final String CHINA_REGION = "cn";
+
+    /** Whether the given (already-normalized) region is the China stack. */
+    public static boolean isChinaRegion(String region) {
+        return CHINA_REGION.equals(region);
+    }
 
     public static String normalizeCountryCode(String countryCode) {
         if (countryCode == null) return "";

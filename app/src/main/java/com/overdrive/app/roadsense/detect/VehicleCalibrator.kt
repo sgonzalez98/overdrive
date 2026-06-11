@@ -99,10 +99,6 @@ class VehicleCalibrator(
         return frac.toFloat().coerceIn(0f, 1f)
     }
 
-    /** Learned quiet-road residual RMS so far (diagnostics). */
-    val learnedRms: Float
-        get() = state.let { if (it.seeded) sqrt(it.meanSq) else 0f }
-
     /**
      * The per-vehicle scale the SeverityClassifier consumes. Blended from the
      * reference (1.0) toward the learned ratio by [maturity], so an immature

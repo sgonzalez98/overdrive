@@ -18,6 +18,19 @@ public final class BydCloudConfig {
     private static final String BASE_URL_SUFFIX = ".byd.auto";
     private static final String USER_AGENT = "okhttp/4.12.0";
 
+    // ── China (CN) stack ────────────────────────────────────────────────
+    // The CN DiLink app talks to a different host and uses the WBSK transport
+    // codec + /app/auth/* endpoints. Region detection mirrors BYD-re client.js:
+    // host contains "cn.byd.auto". Defaults match common CN app builds (BYD-re).
+    private static final String CN_BASE_URL = "https://dilinksuperappserver-cn.byd.auto";
+    public static final String CN_APP_CHANNEL = "99";
+    public static final String CN_APP_VERSION = "9.10.2";
+    public static final String CN_APP_INNER_VERSION = "502";
+    public static final String CN_TARGET_BRAND = "1";   // 1 = dynasty
+    public static final String CN_VEHICLE_BRAND = "1";
+    public static final String CN_NETWORK_OPERATOR = "无"; // 无
+    public static final String CN_BRAND_FLAG = "dynasty";
+
     public final boolean enabled;
     public final String username;
     public final String loginKey;
@@ -65,8 +78,15 @@ public final class BydCloudConfig {
         this.imeiMd5 = (username != null && !username.isEmpty())
                 ? com.overdrive.app.byd.cloud.crypto.BydCryptoUtils.md5Hex(username)
                 : "00000000000000000000000000000000";
-        this.appInnerVersion = "323";
-        this.appVersion = "3.2.3";
+        // CN app reports a different version lineage than overseas. These feed
+        // the inner "version"/"appInnerVersion"/"appVersion" payload fields.
+        if (BydCloudRegionCatalog.isChinaRegion(this.region)) {
+            this.appInnerVersion = CN_APP_INNER_VERSION;
+            this.appVersion = CN_APP_VERSION;
+        } else {
+            this.appInnerVersion = "323";
+            this.appVersion = "3.2.3";
+        }
     }
 
     /**
@@ -138,9 +158,18 @@ public final class BydCloudConfig {
         return isConfigured() && !vin.isEmpty();
     }
 
+    /** Whether this config uses the China (CN) DiLink stack. */
+    public boolean isChinaRegion() {
+        return BydCloudRegionCatalog.isChinaRegion(region);
+    }
+
     public String getBaseUrl() {
         // `region` is already normalized at construction time, so no extra
-        // normalize() needed here.
+        // normalize() needed here. China uses a distinct host; every other
+        // region keeps the unchanged dilinkappoversea-<region> pattern.
+        if (isChinaRegion()) {
+            return CN_BASE_URL;
+        }
         return BASE_URL_PREFIX + region + BASE_URL_SUFFIX;
     }
 

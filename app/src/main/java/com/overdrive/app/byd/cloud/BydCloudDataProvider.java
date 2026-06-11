@@ -231,9 +231,9 @@ public final class BydCloudDataProvider {
         if (sharedClient != null && sharedClient.isReady()) return sharedClient;
         try {
             BydCloudClient client = new BydCloudClient(config);
-            java.io.InputStream tables = loadBangcleTables();
+            java.io.InputStream tables = loadTables(config);
             if (tables == null) {
-                logger.warn("Cannot create cloud client: Bangcle tables not available");
+                logger.warn("Cannot create cloud client: transport tables not available");
                 return null;
             }
             try {
@@ -383,8 +383,9 @@ public final class BydCloudDataProvider {
         }
     }
 
-    private java.io.InputStream loadBangcleTables() {
-        return com.overdrive.app.byd.cloud.crypto.BangcleTablesFile.openStream(
+    private java.io.InputStream loadTables(BydCloudConfig config) {
+        return com.overdrive.app.byd.cloud.crypto.EnvelopeCodecFactory.openTablesStream(
+                config.isChinaRegion(),
                 com.overdrive.app.daemon.DaemonBootstrap.getContext());
     }
 

@@ -219,9 +219,9 @@ public class BydCloudApiHandler {
             BydCloudConfig config = BydCloudConfig.fromUnifiedConfig();
             BydCloudClient client = new BydCloudClient(config);
 
-            InputStream tablesStream = getTablesStream();
+            InputStream tablesStream = getTablesStream(config);
             if (tablesStream == null) {
-                logger.error("  FAILED: Bangcle tables not found at /data/local/tmp/ or in assets");
+                logger.error("  FAILED: transport tables not found at /data/local/tmp/ or in assets");
                 response.put("success", false);
                 response.put("error", Messages.get("errors.bydcloud_bangcle_tables_missing_reinstall"));
                 HttpResponse.sendJson(out, response.toString());
@@ -330,7 +330,7 @@ public class BydCloudApiHandler {
             BydCloudClient client = BydCloudDataProvider.getInstance().getSharedClient();
             if (client == null) {
                 client = new BydCloudClient(config);
-                InputStream tablesStream = getTablesStream();
+                InputStream tablesStream = getTablesStream(config);
                 if (tablesStream == null) {
                     response.put("success", false);
                     response.put("error", Messages.get("errors.bydcloud_bangcle_tables_missing"));
@@ -384,8 +384,9 @@ public class BydCloudApiHandler {
         HttpResponse.sendJson(out, response.toString());
     }
 
-    private static InputStream getTablesStream() {
-        return com.overdrive.app.byd.cloud.crypto.BangcleTablesFile.openStream(
+    private static InputStream getTablesStream(BydCloudConfig config) {
+        return com.overdrive.app.byd.cloud.crypto.EnvelopeCodecFactory.openTablesStream(
+                config.isChinaRegion(),
                 com.overdrive.app.daemon.DaemonBootstrap.getContext());
     }
 }

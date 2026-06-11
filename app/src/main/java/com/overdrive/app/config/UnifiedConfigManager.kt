@@ -2,8 +2,13 @@ package com.overdrive.app.config
 
 import android.util.Log
 import org.json.JSONObject
+import java.io.BufferedReader
 import java.io.File
 import java.io.FileWriter
+import java.io.InputStreamReader
+import java.io.PrintWriter
+import java.net.InetAddress
+import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
 
@@ -31,6 +36,32 @@ object UnifiedConfigManager {
     
     // Single source of truth - world-readable location
     private const val CONFIG_PATH = "/data/local/tmp/overdrive_config.json"
+
+    // Daemon IPC: the app process (UID >= 10000) cannot create the .tmp sibling
+    // needed for an atomic write in sticky /data/local/tmp/, so its direct
+    // writes fall back to a NON-atomic truncate-then-rewrite that corrupts the
+    // file if the process is killed mid-write (the v23.x→v24.1 wipe trigger:
+    // `pm install -r` kills the app). To avoid that, app-process writes are
+    // forwarded to the daemon (UID 2000, which CAN atomic-rename) over the
+    // existing SurveillanceIpcServer localhost socket; the daemon applies them
+    // in-process via the atomic path. Falls back to the local (guarded) write
+    // only when the daemon is unreachable. See routeWriteIfApp().
+    private const val DAEMON_IPC_HOST = "127.0.0.1"
+    private const val DAEMON_IPC_PORT = 19877
+    // The daemons (CameraDaemon, AccSentryDaemon, TelegramBotDaemon) are all
+    // spawned via app_process and run as shell UID 2000 — they own the sticky
+    // /data/local/tmp/ files and CAN atomic-rename, so they write locally.
+    // ANY other UID (app 10xxx, or a future system-1000 writer) cannot reliably
+    // create the .tmp sibling and so reroutes to the daemon. Gating on "== 2000"
+    // (can-atomic-write) rather than "< 10000" deliberately routes a non-shell
+    // privileged writer to the safe path instead of letting it truncate.
+    private const val SHELL_DAEMON_UID = 2000
+    // Localhost round-trip budget. Connect must fail fast when the daemon is
+    // down (the update window) so the caller falls through to the guarded local
+    // write without a long stall; read timeout covers the daemon's full-JSON
+    // rewrite under CONFIG_LOCK contention.
+    private const val IPC_CONNECT_TIMEOUT_MS = 1500
+    private const val IPC_READ_TIMEOUT_MS = 5000
     
     // Legacy paths for migration
     private const val LEGACY_SENTRY_CONFIG = "/data/local/tmp/sentry_config.json"
@@ -41,6 +72,17 @@ object UnifiedConfigManager {
     @Volatile
     private var cachedConfig: JSONObject? = null
     private val lastModified = AtomicLong(0)
+
+    // Raised when loadConfig() finds a NON-EMPTY but unparseable file on disk
+    // (corruption — e.g. the non-atomic fallback write in saveConfigInternal
+    // truncated by a process kill during `pm install`). While set, saveConfig()
+    // refuses to overwrite the live file with defaults, so a transient
+    // corruption can't cascade into a PERMANENT total settings wipe: the next
+    // updateSection() would otherwise merge into a defaults-only in-memory
+    // config and persist it over the user's real (recoverable) settings.
+    // Cleared by a successful load or forceReload().
+    @Volatile
+    private var corruptionDetected = false
     
     // Change listeners
     private val listeners = CopyOnWriteArrayList<ConfigChangeListener>()
@@ -177,9 +219,21 @@ object UnifiedConfigManager {
     }
     
     private fun applyDefaults(config: JSONObject) {
-        val surveillance = config.getJSONObject("surveillance")
-        val recording = config.getJSONObject("recording")
-        val streaming = config.getJSONObject("streaming")
+        // optJSONObject (not getJSONObject) for these three: a partially-formed
+        // config missing any of them must NOT throw here. applyDefaults runs
+        // inside loadConfig()'s try, whose catch falls back to
+        // createDefaultConfig() — so a throw on one absent section would
+        // silently reset EVERY section to defaults. Seed an empty object
+        // instead and let the per-key fills below populate it.
+        val surveillance = config.optJSONObject("surveillance") ?: JSONObject().also {
+            config.put("surveillance", it)
+        }
+        val recording = config.optJSONObject("recording") ?: JSONObject().also {
+            config.put("recording", it)
+        }
+        val streaming = config.optJSONObject("streaming") ?: JSONObject().also {
+            config.put("streaming", it)
+        }
         val camera = config.optJSONObject("camera") ?: JSONObject().also {
             config.put("camera", it)
         }
@@ -258,6 +312,15 @@ object UnifiedConfigManager {
         // the daemon defaults to single-pipeline operation (yield protocol
         // between pano and OEM dashcam).
         if (!camera.has("concurrentAvmSupported"))   camera.put("concurrentAvmSupported", -1)
+        // OPT-IN gate for ConcurrentAvmProbe. The probe opens BOTH AVMCamera
+        // ids (raw HAL open()+startPreview()) to test dual-client support —
+        // a DESTRUCTIVE operation that truncates any in-flight recording on a
+        // shared id. Its only real consumer is a minor OEM bitrate-budget
+        // refinement (applyBitrateBudgetCap), and the unprobed default (-1)
+        // already yields a safe sole-encoder full budget. So the probe is
+        // OFF by default and only runs when the user explicitly opts in via
+        // the camera-mapping dialog. Default false = never auto-probe.
+        if (!camera.has("concurrentAvmProbeEnabled")) camera.put("concurrentAvmProbeEnabled", false)
 
         // Proximity Guard defaults
         if (!proximityGuard.has("enabled")) proximityGuard.put("enabled", false)
@@ -269,6 +332,9 @@ object UnifiedConfigManager {
         // native overlay; the 6 numerics are the dialed-in stitch calibration
         // for this car (rear+side panorama). See BlindSpotOverlayService.
         if (!blindspot.has("enabled")) blindspot.put("enabled", false)
+        // Display target: "head_unit" (default — 15.6" center screen, layerStack 0,
+        // shipping behaviour) or "cluster" (driver gauge screen via OEM projection).
+        if (!blindspot.has("target")) blindspot.put("target", "head_unit")
         if (!blindspot.has("rearFov")) blindspot.put("rearFov", 1.66)
         if (!blindspot.has("sideFov")) blindspot.put("sideFov", 1.98)
         if (!blindspot.has("yaw")) blindspot.put("yaw", 1.23)
@@ -362,6 +428,17 @@ object UnifiedConfigManager {
             config.put("bydCloud", it)
         }
         if (!bydCloud.has("enabled")) bydCloud.put("enabled", false)
+
+        // RoadSense Map (navMap) — routing BYOK credential section. Basemap (OpenFreeMap)
+        // needs no key; only the routing provider is bring-your-own-key, stored encrypted
+        // via CredentialCipher (see NavMapConfig). Default disabled until the user adds a key.
+        val navMap = config.optJSONObject("navMap") ?: JSONObject().also {
+            config.put("navMap", it)
+        }
+        if (!navMap.has("enabled")) navMap.put("enabled", false)
+        // Auto-project the map onto the driver cluster on ACC-on. Off by default;
+        // the daemon reads this on power-up, the Map tab toggles it.
+        if (!navMap.has("autoProjectCluster")) navMap.put("autoProjectCluster", false)
 
         // Vehicle appearance defaults — selected 3D model and body paint color.
         // Stored unified so AVN and remote (phone-over-tunnel) clients show the
@@ -476,7 +553,16 @@ object UnifiedConfigManager {
                     }
                     cachedConfig = config
                     lastModified.set(configFile.lastModified())
-                    Log.d(TAG, "Config loaded from $CONFIG_PATH")
+                    // Parsed cleanly — any earlier corruption is resolved
+                    // (e.g. the daemon rewrote a valid config). Re-arm saving.
+                    corruptionDetected = false
+                    // DEBUG-only: this fires on every genuine reparse (the mtime
+                    // early-return above gates unchanged loads), so a 2-3Hz writer
+                    // makes it the dominant logcat line. Each Log.d is a synchronous
+                    // write; gate it out of release builds.
+                    if (com.overdrive.app.BuildConfig.DEBUG) {
+                        Log.d(TAG, "Config loaded from $CONFIG_PATH")
+                    }
                     config
                 } else {
                     Log.w(TAG, "Config file not found, initializing...")
@@ -485,8 +571,117 @@ object UnifiedConfigManager {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to load config: ${e.message}")
-                cachedConfig ?: createDefaultConfig()
+                // The file exists and is non-empty but didn't parse — this is
+                // corruption, not a fresh install. Most likely the non-atomic
+                // fallback write in saveConfigInternal() was truncated by a
+                // process kill (e.g. `pm install -r` during an upgrade).
+                //
+                // Recovery, in order of preference:
+                //   1. Restore from the last-known-good .bak that saveConfig()
+                //      mirrors after every successful write — returns the
+                //      user's real settings.
+                //   2. Second-chance re-read: a concurrent NON-atomic write by
+                //      another process (app-UID fallback path) can leave the
+                //      file momentarily unparseable. Re-read once before
+                //      declaring it dead so a transient race doesn't latch.
+                //   3. Genuinely unparseable AND no usable .bak. The on-disk
+                //      bytes are unrecoverable, so the corruption latch would
+                //      only PERMANENTLY brick saving: saveConfig() refuses
+                //      while latched, but the ONLY thing that clears the latch
+                //      is a clean load, which needs a clean write the latch
+                //      blocks — a deadlock (the "saves don't stick, reverts to
+                //      original" report). Preserve the corrupt bytes to .bad,
+                //      then — IF we can atomic-write (daemon UID 2000) — reset
+                //      the live file to defaults so saving works again. The app
+                //      UID leaves the repair to the daemon (its writes route
+                //      there anyway) to avoid a non-atomic re-truncation race,
+                //      and latches meanwhile to block a defaults-clobber.
+                recoverFromBackup(configFile)?.let { return@synchronized it }
+
+                // (2) Transient-corruption second read.
+                try {
+                    if (configFile.exists() && configFile.length() > 0L) {
+                        val retry = JSONObject(configFile.readText())
+                        applyDefaults(retry)
+                        cachedConfig = retry
+                        lastModified.set(configFile.lastModified())
+                        corruptionDetected = false
+                        Log.w(TAG, "Config parsed on second read; treated as " +
+                            "transient corruption (no latch)")
+                        return@synchronized retry
+                    }
+                } catch (_: Exception) {
+                    // Still unparseable — genuinely dead. Fall through to (3).
+                }
+
+                // (3) Preserve corrupt bytes for forensics / manual recovery.
+                try {
+                    if (configFile.exists() && configFile.length() > 0L) {
+                        val badFile = File(configFile.parentFile, configFile.name + ".bad")
+                        if (configFile.copyTo(badFile, overwrite = true).exists()) {
+                            badFile.setReadable(true, false)
+                            Log.e(TAG, "Corrupt config preserved to ${badFile.path}")
+                        }
+                    }
+                } catch (backupErr: Exception) {
+                    Log.w(TAG, "Failed to back up corrupt config: ${backupErr.message}")
+                }
+
+                val defaults = createDefaultConfig()
+                if (android.os.Process.myUid() == SHELL_DAEMON_UID) {
+                    // We own the sticky-dir file and can atomic-rename: repair
+                    // it so the feature isn't permanently bricked. The user's
+                    // settings were already unrecoverable (corrupt + no .bak),
+                    // so this loses nothing recoverable — it only restores the
+                    // ability to save. Clear the latch since the file is now
+                    // clean.
+                    if (saveConfigInternal(defaults)) {
+                        cachedConfig = defaults
+                        lastModified.set(configFile.lastModified())
+                        corruptionDetected = false
+                        Log.e(TAG, "Unrecoverable config (corrupt, no .bak); " +
+                            "reset to defaults so saving works again. Corrupt " +
+                            "bytes preserved at .bad")
+                        return@synchronized defaults
+                    }
+                    Log.e(TAG, "Daemon repair-write of defaults failed; latching")
+                }
+                // App UID (or daemon repair failed): latch to block a
+                // defaults-clobber and return defaults transiently. The daemon
+                // repairs the live file on its next load (the very next
+                // app-forwarded write triggers a daemon forceReload), after
+                // which a clean load clears the latch everywhere. Don't cache
+                // the defaults — a stale mtime check could otherwise keep
+                // returning them after the daemon repairs the file.
+                corruptionDetected = true
+                cachedConfig ?: defaults
             }
+        }
+    }
+
+    /**
+     * Best-effort recovery of a corrupt live config from the last-known-good
+     * sibling .bak written by saveConfig(). Returns the recovered config (and
+     * promotes it back to the live path + clears corruptionDetected) on
+     * success, or null if there's no usable backup. Caller holds the monitor.
+     */
+    private fun recoverFromBackup(configFile: File): JSONObject? {
+        val bakFile = File(configFile.parentFile, configFile.name + ".bak")
+        if (!bakFile.exists() || bakFile.length() == 0L) return null
+        return try {
+            val recovered = JSONObject(bakFile.readText())
+            // Promote the good bytes back to the live path so peer processes
+            // (and the cross-UID daemon) stop reading corruption too. Reuse
+            // saveConfigInternal's atomic-then-fallback write.
+            saveConfigInternal(recovered)
+            cachedConfig = recovered
+            lastModified.set(configFile.lastModified())
+            corruptionDetected = false
+            Log.w(TAG, "Recovered config from ${bakFile.path} after corruption")
+            recovered
+        } catch (e: Exception) {
+            Log.w(TAG, "Backup at ${bakFile.path} also unusable: ${e.message}")
+            null
         }
     }
     
@@ -495,6 +690,19 @@ object UnifiedConfigManager {
      */
     @JvmStatic
     fun saveConfig(config: JSONObject): Boolean {
+        // Corruption guard: if the last load found a non-empty-but-unparseable
+        // file on disk and we couldn't recover from .bak, `config` here was
+        // built from createDefaultConfig() (loadConfig returned defaults, then
+        // updateSection merged into them). Persisting it would clobber the
+        // user's real — and still on-disk, still recoverable — settings with
+        // factory defaults. Refuse, and let a later clean load (e.g. once the
+        // daemon rewrites a valid file) clear the latch. This is the fix for
+        // the v23.x→v24.1 "all settings lost after upgrade" report.
+        if (corruptionDetected) {
+            Log.e(TAG, "saveConfig blocked: corruption latch set; refusing to " +
+                "overwrite live config with defaults until a clean load clears it")
+            return false
+        }
         config.put("lastModified", System.currentTimeMillis())
         val success = saveConfigInternal(config)
         if (success) {
@@ -507,9 +715,43 @@ object UnifiedConfigManager {
             // fileModified <= lastModified check would never trip and
             // a cross-UID write would never invalidate the cache.
             lastModified.set(File(CONFIG_PATH).lastModified())
+            // Mirror a last-known-good copy. loadConfig() restores from this
+            // when the live file is found corrupt, so a truncated write (e.g.
+            // process killed mid non-atomic fallback during `pm install`)
+            // self-heals instead of degrading to defaults. Best-effort: a
+            // failure here doesn't fail the save.
+            writeBackupCopy(config)
             notifyListeners("all", config)
         }
         return success
+    }
+
+    /**
+     * Mirror the current good config to a sibling .bak (best-effort). Written
+     * after every successful saveConfig so loadConfig() can self-heal a corrupt
+     * live file. Failures are swallowed — the .bak is a safety net, never a
+     * gate on the primary save succeeding.
+     */
+    private fun writeBackupCopy(config: JSONObject) {
+        try {
+            val configFile = File(CONFIG_PATH)
+            val bakFile = File(configFile.parentFile, configFile.name + ".bak")
+            val bakTmp = File(configFile.parentFile, configFile.name + ".bak.tmp")
+            FileWriter(bakTmp).use { it.write(config.toString(2)) }
+            bakTmp.setReadable(true, false)
+            bakTmp.setWritable(true, false)
+            if (!bakTmp.renameTo(bakFile)) {
+                // tmp-create/rename can fail for the app UID on sticky
+                // /data/local/tmp; fall back to a direct write if the .bak
+                // already exists and is writable.
+                if (bakFile.exists()) {
+                    FileWriter(bakFile).use { it.write(config.toString(2)) }
+                }
+                try { bakTmp.delete() } catch (_: Exception) {}
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Backup copy skipped: ${e.message}")
+        }
     }
     
     private fun saveConfigInternal(config: JSONObject): Boolean {
@@ -613,6 +855,21 @@ object UnifiedConfigManager {
     fun getBlindSpot(): JSONObject {
         return loadConfig().optJSONObject("blindspot") ?: JSONObject()
     }
+
+    /** Blind-spot display target: "head_unit" (default) or "cluster". */
+    @JvmStatic
+    fun getBlindSpotTarget(): String =
+        getBlindSpot().optString("target", "head_unit")
+
+    @JvmStatic
+    fun isBlindSpotCluster(): Boolean = "cluster" == getBlindSpotTarget()
+
+    /** Persist the blind-spot display target. Single-key merge — never clobbers
+     *  the per-target geometry/geometryCluster siblings. */
+    @JvmStatic
+    fun setBlindSpotTarget(target: String): Boolean =
+        updateValues("blindspot", mapOf(
+            "target" to (if (target == "cluster") "cluster" else "head_unit")))
 
     /**
      * Recording-side dewarp strength (Fitzgibbon division model).
@@ -1163,10 +1420,88 @@ object UnifiedConfigManager {
 
 
     /**
+     * If we're NOT the shell daemon, forward this write to the daemon over the
+     * localhost IPC socket so it lands via the daemon's atomic tmp+rename path
+     * instead of the app process's truncation-prone in-place fallback.
+     *
+     * Returns:
+     *   - true/false  — the daemon applied (or rejected) the write; this is the
+     *                   authoritative result and the caller should NOT also
+     *                   write locally. On true we forceReload() so the next
+     *                   app-side read re-parses the daemon-written bytes.
+     *   - null        — routing did not apply (we ARE the daemon, or the daemon
+     *                   is unreachable). The caller falls through to the local
+     *                   write (guarded by corruptionDetected + .bak self-heal).
+     *
+     * The socket I/O runs OUTSIDE the updateSection/updateValues monitor (the
+     * caller invokes this before entering synchronized(this)) so a slow or
+     * stalled localhost round-trip never blocks app-process readers, all of
+     * which funnel through loadConfig()'s synchronized(this).
+     *
+     * `command` is "UPDATE_SECTION" or "UPDATE_VALUES"; `payloadKey` is "data"
+     * or "values" respectively. Callers MUST already be off the UI looper
+     * (updateSection/updateValues are documented off-looper-only), so the
+     * blocking socket call inherits that contract.
+     */
+    private fun routeWriteIfApp(
+        command: String,
+        section: String,
+        payloadKey: String,
+        payload: JSONObject
+    ): Boolean? {
+        // Shell daemon (UID 2000) writes locally — it can atomic-rename.
+        if (android.os.Process.myUid() == SHELL_DAEMON_UID) return null
+
+        var socket: Socket? = null
+        return try {
+            socket = Socket()
+            socket.connect(
+                java.net.InetSocketAddress(InetAddress.getByName(DAEMON_IPC_HOST), DAEMON_IPC_PORT),
+                IPC_CONNECT_TIMEOUT_MS
+            )
+            socket.soTimeout = IPC_READ_TIMEOUT_MS
+            val writer = PrintWriter(socket.getOutputStream(), true)
+            val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+            val req = JSONObject()
+                .put("command", command)
+                .put("section", section)
+                .put(payloadKey, payload)
+            writer.println(req.toString())
+            val line = reader.readLine()
+                ?: run {
+                    Log.w(TAG, "IPC $command got no response; falling back to local write")
+                    return null
+                }
+            val ok = JSONObject(line).optBoolean("success", false)
+            if (ok) {
+                // The daemon rewrote the file atomically in its own process.
+                // Drop our stale cache so the next read re-parses its bytes
+                // (honors the cross-UID forceReload-before-read invariant).
+                forceReload()
+            } else {
+                Log.w(TAG, "IPC $command for '$section' returned success=false")
+            }
+            ok
+        } catch (e: Exception) {
+            // Daemon unreachable (down during the pm-install update window,
+            // mid-restart, or not yet started). Fall through to the local
+            // write. Logged at WARN so a chronically-down daemon — which
+            // reopens the truncation window — is observable, not silent.
+            Log.w(TAG, "IPC $command unreachable (${e.message}); using local write fallback")
+            null
+        } finally {
+            try { socket?.close() } catch (_: Exception) {}
+        }
+    }
+
+    /**
      * Update a specific section of the config.
      */
     @JvmStatic
     fun updateSection(section: String, data: JSONObject): Boolean {
+        // App-process writes reroute to the daemon for atomic durability; a
+        // non-null result is authoritative (no local write). See routeWriteIfApp.
+        routeWriteIfApp("UPDATE_SECTION", section, "data", data)?.let { return it }
         synchronized(this) {
             val config = loadConfig()
             // Merge into existing section to preserve keys not present in data
@@ -1185,20 +1520,25 @@ object UnifiedConfigManager {
             return success
         }
     }
-    
+
     /**
      * Update individual values within a section.
      */
     @JvmStatic
     fun updateValues(section: String, values: Map<String, Any>): Boolean {
+        // Reroute to the daemon when not shell UID. Serialize the values map
+        // into a JSONObject for the wire; the daemon applies it via updateValues.
+        val valuesJson = JSONObject()
+        values.forEach { (key, value) -> valuesJson.put(key, value) }
+        routeWriteIfApp("UPDATE_VALUES", section, "values", valuesJson)?.let { return it }
         synchronized(this) {
             val config = loadConfig()
             val sectionObj = config.optJSONObject(section) ?: JSONObject()
-            
+
             values.forEach { (key, value) ->
                 sectionObj.put(key, value)
             }
-            
+
             config.put(section, sectionObj)
             val success = saveConfig(config)
             if (success) {

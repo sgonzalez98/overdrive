@@ -53,8 +53,6 @@ class GpsRingBuffer(
     /** Most recent fix, or null if empty. */
     fun latest(): Pose? = if (count == 0) null else buf[(head - 1 + capacity) % capacity]
 
-    fun isEmpty(): Boolean = count == 0
-
     /**
      * Back-project: where was the car at `tEventMs − fixLatencyMs`?
      *

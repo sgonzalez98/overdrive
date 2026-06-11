@@ -956,6 +956,10 @@ public class HardwareEventRecorderGpu {
     private int recordedFrames = 0;
     private long firstFramePtsUs = -1;   // PTS of first frame written to muxer
     private long lastFramePtsUs = -1;    // PTS of last frame written to muxer
+    // Duration (seconds) of the most recently finalized clip, captured at
+    // rename time before the PTS bookkeeping is reset for the next segment.
+    // Read by SurveillanceEngineGpu to caption its gated Telegram video send.
+    private volatile int lastFinalizedDurationSec = 0;
     // PTS rebase origin: subtracted from every packet's PTS before
     // muxer.writeSampleData. Captured from the FIRST packet written to a
     // given muxer instance — so the muxer always sees a timeline starting
@@ -1089,6 +1093,16 @@ public class HardwareEventRecorderGpu {
      */
     public int getFps() {
         return fps;
+    }
+
+    /**
+     * Duration (seconds, rounded) of the most recently finalized clip. Captured
+     * at rename time before per-segment PTS state resets. Used by
+     * SurveillanceEngineGpu to caption its tier-gated Telegram video send.
+     * Returns 0 if nothing has finalized yet.
+     */
+    public int getLastFinalizedDurationSec() {
+        return lastFinalizedDurationSec;
     }
 
     /**
@@ -2662,6 +2676,7 @@ public class HardwareEventRecorderGpu {
                     float durationSec = (firstFramePtsUs >= 0 && lastFramePtsUs > firstFramePtsUs)
                             ? (lastFramePtsUs - firstFramePtsUs) / 1_000_000.0f
                             : recordedFrames / (float) fps;
+                    lastFinalizedDurationSec = Math.max(0, Math.round(durationSec));
                     logger.info(String.format("Event saved: %s (segment %d, %d frames, %.1f sec, %d KB, codec=%s, bitrate=%d Mbps)",
                             finalFile.getName(), segmentNumber, recordedFrames, durationSec, finalFile.length() / 1024,
                             codecMimeType.equals(MediaFormat.MIMETYPE_VIDEO_HEVC) ? "H.265" : "H.264",
@@ -2686,11 +2701,23 @@ public class HardwareEventRecorderGpu {
                         logger.warn("Index upsert failed for " + finalFile.getName() + ": " + e.getMessage());
                     }
 
-                    try {
-                        TelegramNotifier.notifyVideoRecorded(
-                                finalFile.getAbsolutePath(), null, (int) durationSec);
-                    } catch (Exception e) {
-                        logger.warn("Failed to emit video notification: " + e.getMessage());
+                    // Telegram auto video-upload. Surveillance (event_*.mp4) is
+                    // DELIBERATELY excluded here: those clips are sent from
+                    // SurveillanceEngineGpu.sendFinalTelegramNotification, which
+                    // is the only place that knows the event's peak severity and
+                    // therefore the only place that can honour the per-tier
+                    // Telegram toggles (NOTICE/ALERT/CRITICAL). Sending from here
+                    // too would bypass that gate — the "NOTICE muted but video
+                    // still arrives" bug — and double-send. Dashcam (cam_*) and
+                    // proximity (proximity_*) clips have no severity concept, so
+                    // they keep the simple videoUploads-only auto-send.
+                    if (!"surveillance".equals(inferGeocodingFlow(finalFile.getName()))) {
+                        try {
+                            TelegramNotifier.notifyVideoRecorded(
+                                    finalFile.getAbsolutePath(), null, (int) durationSec);
+                        } catch (Exception e) {
+                            logger.warn("Failed to emit video notification: " + e.getMessage());
+                        }
                     }
 
                     // Geo sidecar for non-sentry flows (cam_*, proximity_*).

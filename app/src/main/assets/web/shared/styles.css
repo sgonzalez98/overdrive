@@ -748,12 +748,32 @@ input, select { font-family: inherit; }
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
     padding: 10px 20px;
     font-size: 14px;
     font-weight: 500;
     border-radius: var(--radius-md);
     transition: all 0.2s;
+}
+
+/* Icon/label spacing inside buttons. The BYD head-unit WebView (Chrome 58 /
+   Android 7.1 floor) does NOT support flex `gap` — it shipped in Chrome 84 —
+   so a `gap` on .btn is silently ignored on-car and the icon butts straight
+   against the text. Use the same sibling-margin idiom .btn-group already uses
+   for exactly this reason; it works on Chrome 58 AND modern engines, and adds
+   no leading margin (so icon-only / text-only buttons are unaffected). */
+.btn > * + * {
+    margin-left: 8px;
+}
+
+/* Normalize button icon glyphs to one box so different viewBox densities
+   (e.g. the trash glyph fills its 24-unit box while the cloud-with-X glyph
+   sits smaller within the same box) render at a consistent visual size.
+   flex-shrink:0 keeps the icon from being squeezed when the label wraps in
+   a narrow control column or a long-locale translation. */
+.btn svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
 }
 
 .btn-primary {

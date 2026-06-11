@@ -387,8 +387,6 @@
             this.camera.position.set(0, 3, 0);
             this.camera.lookAt(0, 0, 0);
         } else if (this.view === 'three-quarter') {
-            // 3/4 profile for larger hero canvases. Use centered X so
-            // the model appears visually centered in the canvas.
             this.camera.position.set(0, 0.45, 3.2);
             this.camera.lookAt(0, 0.05, 0);
         } else {
@@ -543,8 +541,6 @@
         var center = box.getCenter(new T.Vector3());
         this.carModel.position.sub(center);
         if (this.view === 'three-quarter') {
-            // Nudge the model slightly up and to the left so it is
-            // visually centered in this hero canvas (user feedback).
             this.carModel.position.y += this._naturalSize.y * s * 0.2;
             this.carModel.position.x -= this._naturalSize.x * s * 0.1;
         }
@@ -727,8 +723,7 @@
             if (self.view === 'top') {
                 self.carModel.rotation.y = Math.PI;
             } else if (self.view === 'three-quarter') {
-                // Slightly rotated for a pleasing 3/4 perspective. Tuned incrementally.
-                    self.carModel.rotation.y = 0.95;
+                self.carModel.rotation.y = 0.95;
             } else {
                 self.carModel.rotation.y = Math.PI / 2;
             }

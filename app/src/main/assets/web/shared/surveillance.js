@@ -3377,12 +3377,13 @@ window.BydCloud = {
         vn:   { i18n: 'surveillance.byd_region_vn',   en: 'Vietnam' },
         sa:   { i18n: 'surveillance.byd_region_sa',   en: 'Saudi Arabia' },
         om:   { i18n: 'surveillance.byd_region_om',   en: 'Oman' },
-        kz:   { i18n: 'surveillance.byd_region_kz',   en: 'Kazakhstan' }
+        kz:   { i18n: 'surveillance.byd_region_kz',   en: 'Kazakhstan' },
+        cn:   { i18n: 'surveillance.byd_region_cn',   en: 'China (mainland)' }
     },
     defaultCountriesByRegion: {
         eu: 'GB', sg: 'SG', au: 'AU', br: 'BR', jp: 'JP', uz: 'UZ',
         no: 'AE', mx: 'MX', id: 'ID', tr: 'TR', kr: 'KR', in: 'IN',
-        vn: 'VN', sa: 'SA', om: 'OM', kz: 'KZ'
+        vn: 'VN', sa: 'SA', om: 'OM', kz: 'KZ', cn: 'CN'
     },
     countries: [
         { name: 'Albania', code: 'AL', language: 'en', region: 'eu' },
@@ -3400,6 +3401,7 @@ window.BydCloud = {
         { name: 'Bulgaria', code: 'BG', language: 'en', region: 'eu' },
         { name: 'Cambodia', code: 'KH', language: 'en', region: 'sg' },
         { name: 'Chile', code: 'CL', language: 'es', region: 'mx' },
+        { name: 'China', code: 'CN', language: 'zh', region: 'cn' },
         { name: 'Colombia', code: 'CO', language: 'es', region: 'mx' },
         { name: 'Costa Rica', code: 'CR', language: 'es', region: 'mx' },
         { name: 'Croatia', code: 'HR', language: 'en', region: 'eu' },

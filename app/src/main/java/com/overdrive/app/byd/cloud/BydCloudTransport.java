@@ -1,7 +1,7 @@
 package com.overdrive.app.byd.cloud;
 
-import com.overdrive.app.byd.cloud.crypto.BangcleCodec;
 import com.overdrive.app.byd.cloud.crypto.BydCryptoUtils;
+import com.overdrive.app.byd.cloud.crypto.EnvelopeCodec;
 import com.overdrive.app.logging.DaemonLogger;
 
 import org.json.JSONObject;
@@ -37,10 +37,10 @@ public final class BydCloudTransport {
     private static final MediaType JSON_TYPE = MediaType.parse("application/json; charset=UTF-8");
 
     private final BydCloudConfig config;
-    private final BangcleCodec codec;
+    private final EnvelopeCodec codec;
     private final OkHttpClient httpClient;
 
-    public BydCloudTransport(BydCloudConfig config, BangcleCodec codec) {
+    public BydCloudTransport(BydCloudConfig config, EnvelopeCodec codec) {
         this.config = config;
         this.codec = codec;
 
@@ -95,13 +95,20 @@ public final class BydCloudTransport {
         String url = config.getBaseUrl() + endpoint;
         logger.debug("POST " + endpoint);
 
-        Request request = new Request.Builder()
+        Request.Builder requestBuilder = new Request.Builder()
                 .url(url)
                 .post(RequestBody.create(requestBody.toString(), JSON_TYPE))
                 .addHeader("accept-encoding", "identity")
                 .addHeader("content-type", "application/json; charset=UTF-8")
-                .addHeader("user-agent", config.getUserAgent())
-                .build();
+                .addHeader("user-agent", config.getUserAgent());
+        // China stack carries three extra headers (BYD-re client.js / pyBYD transport).
+        if (config.isChinaRegion()) {
+            requestBuilder
+                    .addHeader("version", BydCloudConfig.CN_APP_INNER_VERSION)
+                    .addHeader("platform", "ANDROID")
+                    .addHeader("BrandFlag", BydCloudConfig.CN_BRAND_FLAG);
+        }
+        Request request = requestBuilder.build();
 
         try (Response response = httpClient.newCall(request).execute()) {
             logger.debug("  HTTP " + response.code() + " " + endpoint);

@@ -208,6 +208,52 @@ public class SurveillanceIpcServer implements Runnable {
                     response.put("success", true);
                     response.put("message", "Config updated");
                     break;
+
+                // Generic config write forwarded by the APP process (UID 10xxx)
+                // via UnifiedConfigManager.routeWriteIfApp. The app cannot do an
+                // atomic tmp+rename in sticky /data/local/tmp/, so it hands the
+                // write to us (shell UID 2000) and we apply it in-process, where
+                // saveConfigInternal takes the atomic path. This is the fix for
+                // the truncation-on-kill total-settings-wipe.
+                case "UPDATE_SECTION": {
+                    String s = request.optString("section", "");
+                    JSONObject data = request.optJSONObject("data");
+                    boolean ok = false;
+                    if (!s.isEmpty() && data != null) {
+                        synchronized (CONFIG_LOCK) {
+                            // forceReload BEFORE merge so an app-forwarded delta
+                            // merges against fresh on-disk state, preserving the
+                            // forceReload-before-merge invariant the cross-UID
+                            // writers (RoadSenseOverlayService, UcmVisualSink)
+                            // rely on — ext4 mtime has 1s granularity and our
+                            // cache could otherwise hide a peer daemon's write.
+                            com.overdrive.app.config.UnifiedConfigManager.forceReload();
+                            ok = com.overdrive.app.config.UnifiedConfigManager.updateSection(s, data);
+                        }
+                    }
+                    response.put("success", ok);
+                    break;
+                }
+
+                case "UPDATE_VALUES": {
+                    String s = request.optString("section", "");
+                    JSONObject values = request.optJSONObject("values");
+                    boolean ok = false;
+                    if (!s.isEmpty() && values != null) {
+                        java.util.Map<String, Object> map = new java.util.HashMap<>();
+                        java.util.Iterator<String> it = values.keys();
+                        while (it.hasNext()) {
+                            String k = it.next();
+                            map.put(k, values.get(k));
+                        }
+                        synchronized (CONFIG_LOCK) {
+                            com.overdrive.app.config.UnifiedConfigManager.forceReload();
+                            ok = com.overdrive.app.config.UnifiedConfigManager.updateValues(s, map);
+                        }
+                    }
+                    response.put("success", ok);
+                    break;
+                }
                     
                 case "GET_STATUS":
                     response.put("success", true);

@@ -126,22 +126,33 @@ data class DetectionCandidate(
      *  (single-wheel pothole). Derived from horizontal accel components. */
     val lateralAsymmetry: Float = 0f,
     /** Peak |pitch rate| (rad/s) over the event window — the body's nose-up/down
-     *  rotation about the lateral axis (GravityFrame.pitchRate). A transverse speed
-     *  breaker taken head-on pitches the car hard; a one-sided pothole rolls it (low
-     *  pitch). This is the gyro "up-down" signature, somewhat speed-robust where the
-     *  vertical-accel peak is weak (slow crossings). Consumers MUST gate on
-     *  [pitchValid] — when false this is 0 ("not measured"), never a real zero. */
+     *  rotation about the lateral axis (GravityFrame.pitchRate). RECORDED FEATURE: the
+     *  live type call uses the SIGNED couplet extrema ([peakPitchUp]/[peakPitchDown]),
+     *  not this unsigned peak; this magnitude is persisted to the ground-truth label
+     *  store (peak_pitch_rate column) as a training feature for the offline weight fit.
+     *  Gate on [pitchValid] — when false this is 0 ("not measured"), never a real zero. */
     val peakPitchRate: Float = 0f,
     /** Peak |roll rate| (rad/s) over the event window — body roll about the fore-aft
-     *  axis (GravityFrame.rollRate). High roll + low pitch ⇒ one-sided (pothole);
-     *  high pitch + low roll ⇒ full-width (breaker). Gate on [pitchValid]. */
+     *  axis (GravityFrame.rollRate). RECORDED FEATURE (peak_roll_rate label column),
+     *  paired with [peakPitchRate]: high roll + low pitch ⇒ one-sided (pothole); high
+     *  pitch + low roll ⇒ full-width (breaker). Gate on [pitchValid]. */
     val peakRollRate: Float = 0f,
     /** Whether the pitch/roll split was actually established for this event (the slow
      *  longitudinal-axis estimate had enough magnitude — GravityFrame.pitchAxisReady —
      *  for at least one gyro sample in the window). When false, [peakPitchRate] /
-     *  [peakRollRate] are 0 and the classifier ignores the pitch vote (same posture as
-     *  [asymmetryValid]). Default false so tests/callers without gyro stay inert. */
+     *  [peakRollRate] are 0 (and the persisted features read as "not measured"), same
+     *  posture as [asymmetryValid]. Default false so tests/callers without gyro stay inert. */
     val pitchValid: Boolean = false,
+    /** SIGNED pitch-couplet extrema (rad/s, +nose-up convention once the sign is anchored),
+     *  peak-held at FULL 100 Hz over the event window — the strongest nose-UP lobe
+     *  [peakPitchUp] (≥0) and strongest nose-DOWN lobe [peakPitchDown] (≥0, magnitude) and
+     *  their sensor times. The HazardClassifier couplet uses these true extrema instead of the
+     *  16 Hz context ring (which aliases a fast breaker's ~150 ms lobes). Order of the two times
+     *  gives breaker (up-first) vs pothole (down-first). Gate on [pitchValid]. Default 0. */
+    val peakPitchUp: Float = 0f,
+    val peakPitchUpTMs: Long = 0L,
+    val peakPitchDown: Float = 0f,
+    val peakPitchDownTMs: Long = 0L,
     /** Whether [lateralAsymmetry] is actually MEASURED for this event. The
      *  horizontal-accel stage IS built (GravityFrame splits the gravity-free
      *  horizontal residual into lateral/longitudinal; EventDetector pairs the

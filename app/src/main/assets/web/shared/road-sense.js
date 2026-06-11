@@ -53,8 +53,22 @@ BYD.roadSense = {
         bsRearPitch: 0.0,
         // On-screen card size (% of panel width) + corner. Persisted as a preset
         // (not absolute px) so it stays correct across portrait/landscape rotation.
+        // PER-TARGET: the head-unit set (bsSizePct/bsCorner) and the cluster set
+        // (bsSizePctCluster/bsCornerCluster) are tracked separately because a card
+        // sized for the 15.6" head-unit overflows the short 1920x720 cluster.
         bsSizePct: 40,
-        bsCorner: 'tr'
+        bsCorner: 'tr',
+        // Blind-spot display target: 'head_unit' (default) or 'cluster'.
+        bsTarget: 'head_unit',
+        bsSizePctCluster: 80,
+        bsCornerCluster: 'tr',
+        // Cluster projection layout = OEM size profile (29=8.8", 30=12.3", 31=10.25").
+        // 31 is the confirmed-correct default for this cluster.
+        bsClusterLayout: 31,
+        // Map → cluster projection. autoProjectCluster lives in the UCM `navMap`
+        // section (read by the daemon on ACC-on); the live projecting state is NOT
+        // a config value — it comes from GET /api/navmap/cluster/status.
+        autoProjectCluster: false
     },
 
     async init() {
@@ -134,11 +148,27 @@ BYD.roadSense = {
                 if (typeof bs.projExp === 'number') c.bsProjExp = this._clamp(bs.projExp, 0.4, 1.6);
                 if (typeof bs.rearRoll === 'number') c.bsRearRoll = this._clamp(bs.rearRoll, -0.4, 0.4);
                 if (typeof bs.rearPitch === 'number') c.bsRearPitch = this._clamp(bs.rearPitch, -0.4, 0.4);
+                // Display target ('head_unit' default | 'cluster').
+                if (bs.target === 'cluster' || bs.target === 'head_unit') c.bsTarget = bs.target;
+                // Cluster layout (size profile opcode 29/30/31).
+                if (bs.clusterSizeProfile === 29 || bs.clusterSizeProfile === 30 || bs.clusterSizeProfile === 31) {
+                    c.bsClusterLayout = bs.clusterSizeProfile;
+                }
                 // On-screen size/position preset (orientation-safe — daemon
-                // recomputes px from the live panel). geometry.sizePct + .corner.
+                // recomputes px from the live panel). PER-TARGET: head-unit reads
+                // geometry.{sizePct,corner}; cluster reads geometryCluster.{...}.
                 var geo = bs.geometry || {};
                 if (typeof geo.sizePct === 'number') c.bsSizePct = this._clamp(geo.sizePct, 15, 90);
                 if (typeof geo.corner === 'string') c.bsCorner = geo.corner;
+                var geoC = bs.geometryCluster || {};
+                if (typeof geoC.sizePct === 'number') c.bsSizePctCluster = this._clamp(geoC.sizePct, 15, 90);
+                if (typeof geoC.corner === 'string') c.bsCornerCluster = geoC.corner;
+            }
+            // Map → cluster preference. autoProjectCluster lives in the navMap
+            // section (the daemon reads it on ACC-on); default false when absent.
+            if (data && data.success && data.config && data.config.navMap) {
+                const nm = data.config.navMap;
+                if (typeof nm.autoProjectCluster === 'boolean') this.config.autoProjectCluster = nm.autoProjectCluster;
             }
         } catch (e) {
             console.warn('RoadSense: failed to load config:', e);
@@ -179,6 +209,38 @@ BYD.roadSense = {
         this._setBadge('rsStatusBadge', c.enabled);
 
         this._setChecked('rsCalibrationMode', c.calibrationMode);
+
+        var inAppMap = (typeof window.AndroidBridge !== 'undefined'
+            && typeof AndroidBridge.openHazardMap === 'function');
+
+        // Hazard map = a NATIVE Activity launched only via the AndroidBridge, so
+        // the "Open Map" card is meaningful ONLY in the in-app WebView. Show it in
+        // app, HIDE it in a browser/tunnel (where it can't launch anything). The
+        // routing + cluster cards below stay visible everywhere (pure daemon HTTP).
+        var hazardMapCard = document.getElementById('rsHazardMapCard');
+        if (hazardMapCard) {
+            hazardMapCard.style.display = inAppMap ? '' : 'none';
+        }
+
+        // Routing (BYOK) config is pure daemon HTTP (/api/navmap/routing/*), which
+        // works over a tunnel/browser too — so show it ALWAYS and load its status.
+        // (Previously in-app-gated, which left it blank when developing locally.)
+        var routingCard = document.getElementById('rsRoutingCard');
+        if (routingCard) {
+            routingCard.style.display = '';
+            this.loadRoutingStatus();
+        }
+
+        // Cluster projection drives an on-car native projection via daemon HTTP.
+        // The toggle/status only DO something on-car, but showing the card off-car
+        // is harmless + keeps the Map tab populated when developing. Status load is
+        // best-effort (no-op if the daemon endpoint isn't reachable).
+        var clusterCard = document.getElementById('rsClusterProjectCard');
+        if (clusterCard) {
+            clusterCard.style.display = '';
+            this._setChecked('rsClusterAuto', c.autoProjectCluster);
+            this.loadClusterStatus();
+        }
 
         this._setChecked('rsWarnEnabled', c.warnEnabled);
         this._setBadge('rsWarnBadge', c.enabled && c.warnEnabled);
@@ -235,12 +297,27 @@ BYD.roadSense = {
         this._bsSetSlider('bsProjExp', 'bsProjExpVal', c.bsProjExp);
         this._bsSetSlider('bsRearRoll', 'bsRearRollVal', c.bsRearRoll);
         this._bsSetSlider('bsRearPitch', 'bsRearPitchVal', c.bsRearPitch);
-        // Reflect saved size%/corner into the size+position control.
-        var szEl = document.getElementById('bsSize');
-        var szVal = document.getElementById('bsSizeVal');
-        if (szEl) szEl.value = String(c.bsSizePct);
-        if (szVal) szVal.textContent = c.bsSizePct + '%';
-        this._bsHighlightCorner(c.bsCorner || 'tr');
+        // Reflect the ACTIVE target's saved size%/corner + layout dropdown, and
+        // highlight the selected display target. Normalise first so a missing/empty
+        // value still shows a definite selection (defaults head_unit).
+        if (c.bsTarget !== 'cluster' && c.bsTarget !== 'head_unit') c.bsTarget = 'head_unit';
+        this._bsHighlightTarget(c.bsTarget);
+        this._bsReflectTargetControls(c.bsTarget);
+        // Baseline the display/placement group as "saved" so Apply starts disabled
+        // and only lights up on a real edit.
+        this._bsDisplaySaved = this._bsSnapshotDisplay();
+        this._bsDisplayDirty = false;
+        this._bsMarkDirty();
+    },
+
+    /** Highlight the selected display target (M3 tonal selection, same pattern as
+     *  the corner buttons). */
+    _bsHighlightTarget(target) {
+        var map = { head_unit: 'bsTargetHeadunit', cluster: 'bsTargetCluster' };
+        for (var k in map) {
+            var el = document.getElementById(map[k]);
+            if (el) { if (k === target) el.classList.add('active'); else el.classList.remove('active'); }
+        }
     },
 
     _bsSetSlider(sliderId, labelId, value) {
@@ -262,11 +339,18 @@ BYD.roadSense = {
      * so a first-run user doesn't see live-looking toggles next to an OFF badge.
      * Their checked STATE is preserved (so flipping master back on reveals the
      * saved selection) — we only block interaction, we don't change values.
+     *
+     * Blind Spot is a SEPARATE feature (its own `bsEnabled` flag + `blindspot`
+     * UCM section, not RoadSense hazard detection), so its cards (data-tab=
+     * "blindspot") are NOT gated by the RoadSense master — they can be enabled,
+     * disabled, and tuned independently while RoadSense is off.
      */
     _applyMasterGate(masterOn) {
         document.querySelectorAll('.card').forEach(card => {
             // Leave the master switch's own card always interactive.
             if (card.querySelector('#rsEnabled')) return;
+            // Blind Spot is independent of the RoadSense master gate.
+            if (card.getAttribute('data-tab') === 'blindspot') return;
             card.classList.toggle('rs-gated', !masterOn);
             // Block pointer + keyboard interaction on the controls when gated,
             // without touching their checked/value (so state survives a toggle).
@@ -329,6 +413,17 @@ BYD.roadSense = {
         const ok = await this._save({ calibrationMode: on });
         if (ok) { this.config.calibrationMode = on; this._toastSaved(); }
         else { el.checked = !on; this._toastFailed(); }
+    },
+
+    // Launch the native MapLibre hazard map via the AndroidBridge. In-app only
+    // (the card is hidden otherwise), but guard defensively in case it's called
+    // on a client without the bridge.
+    openHazardMap() {
+        if (typeof window.AndroidBridge !== 'undefined'
+                && typeof AndroidBridge.openHazardMap === 'function') {
+            try { AndroidBridge.openHazardMap(); }
+            catch (e) { this._toastFailed(); }
+        }
     },
 
     async toggleWarnEnabled() {
@@ -435,6 +530,260 @@ BYD.roadSense = {
         else { this._toastFailed(); }
     },
 
+    // ==================== Routing (BYOK) ====================
+    //
+    // The basemap + hazards are free; only turn-by-turn routing needs a personal
+    // Valhalla key. The key is the SECRET — NavMapConfig stores it encrypted
+    // on-device (same CredentialCipher scheme as BYD Cloud's password) and the
+    // daemon NEVER returns it (status reports only `hasKey`). Backed by:
+    //   GET  /api/navmap/routing/status  — { configured, enabled, endpoint, hasKey }
+    //   POST /api/navmap/routing/setup   — { endpoint, apiKey }
+    //   POST /api/navmap/routing/clear
+    // All POSTs use fetch() (never XHR — the WebView drops XHR POST bodies).
+
+    async loadRoutingStatus() {
+        try {
+            const resp = await fetch('/api/navmap/routing/status');
+            const data = await resp.json();
+            if (!data || !data.success) { this._setRoutingBadge(false); return; }
+            const endpointInput = document.getElementById('rsRoutingEndpoint');
+            if (endpointInput && !endpointInput.value) {
+                endpointInput.value = data.endpoint || '';
+            }
+            // The key is write-only — never echoed back. When one is set, hint that
+            // in the (empty) password placeholder instead of exposing the secret.
+            const keyInput = document.getElementById('rsRoutingKey');
+            if (keyInput) {
+                keyInput.value = '';
+                if (data.hasKey) {
+                    const set = BYD.i18n.t('road_sense.routing_key_set_ph');
+                    keyInput.placeholder = (set && set !== 'road_sense.routing_key_set_ph')
+                        ? set : 'A key is saved — paste a new one to replace it';
+                }
+            }
+            this._setRoutingBadge(!!data.hasKey);
+        } catch (e) {
+            console.warn('RoadSense: routing status failed:', e);
+            this._setRoutingBadge(false);
+        }
+    },
+
+    /** Routing badge swaps between "configured" / "not configured" copy + tone. */
+    // Open an external signup/docs URL in the DEVICE'S DEFAULT BROWSER.
+    //  - In-app WebView (no real popup support): navigate the WebView to the URL;
+    //    WebViewFragment.shouldOverrideUrlLoading intercepts the non-loopback URL
+    //    and hands it to ACTION_VIEW → the default browser opens it (the WebView
+    //    itself does not leave the settings page).
+    //  - Tunnel/desktop browser: open a new tab (window.open _blank).
+    openExternal(url) {
+        try {
+            var inApp = (typeof window.AndroidBridge !== 'undefined');
+            if (inApp) {
+                // The override fires on a top-level navigation to an external URL.
+                window.location.href = url;
+            } else {
+                window.open(url, '_blank', 'noopener');
+            }
+        } catch (e) {
+            try { window.open(url, '_blank'); } catch (_) {}
+        }
+    },
+
+    // Stadia Maps free signup (the default Valhalla routing provider). Opens in the
+    // default browser per openExternal().
+    openRoutingSignup() {
+        this.openExternal('https://client.stadiamaps.com/signup/');
+    },
+
+    _setRoutingBadge(hasKey) {
+        const badge = document.getElementById('rsRoutingBadge');
+        if (!badge) return;
+        const key = hasKey ? 'road_sense.routing_status_set' : 'road_sense.routing_status_unset';
+        const fallback = hasKey ? 'Routing key configured' : 'No routing key';
+        const t = BYD.i18n.t(key);
+        badge.textContent = (t && t !== key) ? t : fallback;
+        badge.className = 'status-badge ' + (hasKey ? 'active' : 'inactive');
+    },
+
+    async saveRouting() {
+        const endpointInput = document.getElementById('rsRoutingEndpoint');
+        const keyInput = document.getElementById('rsRoutingKey');
+        const endpoint = endpointInput ? (endpointInput.value || '').trim() : '';
+        const apiKey = keyInput ? (keyInput.value || '').trim() : '';
+        if (!apiKey) {
+            this._toast('road_sense.routing_key_required', 'Enter a routing API key', 'error');
+            return;
+        }
+        const btn = document.getElementById('rsRoutingSaveBtn');
+        if (btn) btn.disabled = true;
+        try {
+            const resp = await fetch('/api/navmap/routing/setup', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ endpoint: endpoint, apiKey: apiKey })
+            });
+            const data = await resp.json();
+            if (data && data.success) {
+                // Don't keep the secret in the DOM after a successful save.
+                if (keyInput) keyInput.value = '';
+                this._toastSaved();
+                this.loadRoutingStatus();
+            } else {
+                this._toastFailed();
+            }
+        } catch (e) {
+            console.warn('RoadSense: routing save failed:', e);
+            this._toastFailed();
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    },
+
+    async clearRouting() {
+        const btn = document.getElementById('rsRoutingClearBtn');
+        if (btn) btn.disabled = true;
+        try {
+            const resp = await fetch('/api/navmap/routing/clear', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            const data = await resp.json();
+            if (data && data.success) {
+                const keyInput = document.getElementById('rsRoutingKey');
+                if (keyInput) {
+                    keyInput.value = '';
+                    const ph = BYD.i18n.t('road_sense.routing_key_ph');
+                    keyInput.placeholder = (ph && ph !== 'road_sense.routing_key_ph')
+                        ? ph : 'Paste your routing API key';
+                }
+                this._toast('road_sense.routing_cleared', 'Routing key cleared', 'success');
+                this.loadRoutingStatus();
+            } else {
+                this._toastFailed();
+            }
+        } catch (e) {
+            console.warn('RoadSense: routing clear failed:', e);
+            this._toastFailed();
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    },
+
+    // ==================== Cluster projection ====================
+    //
+    // Projecting the map onto the driver cluster is a native on-car action — the
+    // daemon's ClusterMapProjector holds the OEM projection surface. The live
+    // projecting state is NOT a config value; it comes from the status endpoint.
+    // The "auto-project on ACC-on" toggle IS a preference, persisted in the UCM
+    // `navMap` section for the daemon to read on power-up.
+    //   GET  /api/navmap/cluster/status → { success, projecting }
+    //   POST /api/navmap/cluster/start  → { success, projecting }
+    //   POST /api/navmap/cluster/stop   → { success, projecting }
+    // All POSTs use fetch() (the in-app WebView drops XHR POST bodies).
+
+    async loadClusterStatus() {
+        // Reflect the SHARED cluster size profile (blindspot.clusterSizeProfile,
+        // mirrored into config.bsClusterLayout on load) into the map-tab selector.
+        var layoutSel = document.getElementById('rsClusterLayout');
+        if (layoutSel) layoutSel.value = String(this.config.bsClusterLayout || 31);
+        try {
+            const resp = await fetch('/api/navmap/cluster/status');
+            const data = await resp.json();
+            const projecting = !!(data && data.success && data.projecting);
+            this._setChecked('rsClusterProject', projecting);
+            this._setClusterBadge(projecting);
+        } catch (e) {
+            console.warn('RoadSense: cluster status failed:', e);
+            this._setChecked('rsClusterProject', false);
+            this._setClusterBadge(false);
+        }
+    },
+
+    // Set the SHARED cluster size profile from the Map tab. Writes
+    // blindspot.clusterSizeProfile (the single key the OEM projection reads,
+    // shared by map + blind-spot) so changing it here updates the blind-spot tab
+    // too. The daemon dispatches relayoutCluster() on this key, so a live cluster
+    // projection re-lays-out immediately. Saved immediately (no staged Apply here).
+    async mapSetClusterLayout(v) {
+        var n = parseInt(v, 10);
+        if (n !== 29 && n !== 30 && n !== 31) return;
+        this.config.bsClusterLayout = n;
+        // Keep the blind-spot tab's dropdown in sync if it's in the DOM.
+        var bsSel = document.getElementById('bsClusterLayout');
+        if (bsSel) bsSel.value = String(n);
+        try {
+            const resp = await fetch('/api/settings/unified', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ section: 'blindspot', data: { clusterSizeProfile: n } })
+            });
+            const data = await resp.json();
+            if (data && data.success) this._toastSaved(); else this._toastFailed();
+        } catch (e) {
+            this._toastFailed();
+        }
+    },
+
+    /** Cluster badge swaps between "Projecting" / "Off" copy + tone. */
+    _setClusterBadge(projecting) {
+        const badge = document.getElementById('rsClusterBadge');
+        if (!badge) return;
+        const key = projecting ? 'road_sense.map_cluster_projecting' : 'road_sense.map_cluster_off';
+        const fallback = projecting ? 'Projecting' : 'Off';
+        const t = BYD.i18n.t(key);
+        badge.textContent = (t && t !== key) ? t : fallback;
+        badge.className = 'status-badge ' + (projecting ? 'active' : 'inactive');
+    },
+
+    async toggleClusterProject() {
+        const el = document.getElementById('rsClusterProject');
+        if (!el) return;
+        const on = el.checked;
+        try {
+            const resp = await fetch(on ? '/api/navmap/cluster/start' : '/api/navmap/cluster/stop', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            const data = await resp.json();
+            if (data && data.success) {
+                // Reflect the actual reported state (the endpoint returns it).
+                const projecting = !!data.projecting;
+                el.checked = projecting;
+                this._setClusterBadge(projecting);
+                this._toastSaved();
+            } else {
+                el.checked = !on;
+                this._toastFailed();
+            }
+        } catch (e) {
+            console.warn('RoadSense: cluster project toggle failed:', e);
+            el.checked = !on;
+            this._toastFailed();
+        }
+    },
+
+    async toggleClusterAuto() {
+        const el = document.getElementById('rsClusterAuto');
+        if (!el) return;
+        const on = el.checked;
+        try {
+            const resp = await fetch('/api/settings/unified', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ section: 'navMap', data: { autoProjectCluster: on } })
+            });
+            const data = await resp.json();
+            if (data && data.success) { this.config.autoProjectCluster = on; this._toastSaved(); }
+            else { el.checked = !on; this._toastFailed(); }
+        } catch (e) {
+            console.warn('RoadSense: cluster auto toggle failed:', e);
+            el.checked = !on;
+            this._toastFailed();
+        }
+    },
+
     // ==================== Destructive actions ====================
     //
     // Two SEPARATE deletes with distinct confirms, both backed by live handlers
@@ -449,7 +798,24 @@ BYD.roadSense = {
         const prompt = (msg && msg !== 'road_sense.confirm_delete_local')
             ? msg
             : 'Delete all RoadSense calibrations stored on this device? This cannot be undone.';
-        if (!confirm(prompt)) return;
+        // Themed confirm (matches the rest of the app). The native confirm()
+        // renders a white system popup that clashes with the dark Material
+        // surface and leaks the loopback origin into the title bar; route
+        // through BYD.utils.confirmDialog like surveillance.js does. Keep the
+        // native confirm() as a fallback for very-early-init / older bundles.
+        const t = (BYD.i18n && BYD.i18n.t) ? BYD.i18n.t.bind(BYD.i18n) : null;
+        if (BYD.utils && BYD.utils.confirmDialog) {
+            const ok = await BYD.utils.confirmDialog({
+                title: (t && t('road_sense.delete_local_title')) || 'Delete local calibrations',
+                body: prompt,
+                confirmLabel: (t && t('road_sense.delete_local_btn')) || 'Delete local',
+                cancelLabel: (t && t('common.cancel')) || 'Cancel',
+                danger: true
+            });
+            if (!ok) return;
+        } else if (typeof confirm === 'function') {
+            if (!confirm(prompt)) return;
+        }
         const btn = document.getElementById('rsDeleteLocalBtn');
         if (btn) btn.disabled = true;
         try {
@@ -477,7 +843,20 @@ BYD.roadSense = {
         const prompt = (msg && msg !== 'road_sense.confirm_delete_cloud')
             ? msg
             : 'Delete the RoadSense detections you uploaded from the shared cloud map? This cannot be undone.';
-        if (!confirm(prompt)) return;
+        // Themed confirm — see deleteLocal() for rationale.
+        const t = (BYD.i18n && BYD.i18n.t) ? BYD.i18n.t.bind(BYD.i18n) : null;
+        if (BYD.utils && BYD.utils.confirmDialog) {
+            const ok = await BYD.utils.confirmDialog({
+                title: (t && t('road_sense.delete_cloud_title')) || 'Delete cloud calibrations',
+                body: prompt,
+                confirmLabel: (t && t('road_sense.delete_cloud_btn')) || 'Delete cloud',
+                cancelLabel: (t && t('common.cancel')) || 'Cancel',
+                danger: true
+            });
+            if (!ok) return;
+        } else if (typeof confirm === 'function') {
+            if (!confirm(prompt)) return;
+        }
         const btn = document.getElementById('rsDeleteCloudBtn');
         if (btn) btn.disabled = true;
         try {
@@ -608,44 +987,129 @@ BYD.roadSense = {
         }, 120);
     },
 
-    /** On-screen size of the blind-spot card (% of panel width). The daemon
-     *  computes the px rect from size%+corner (it knows the panel size) and
-     *  rescales the SurfaceControl layer live — works in debug + playback. */
-    bsSetSize(pct) {
-        this.config.bsSizePct = parseInt(pct, 10);
-        var el = document.getElementById('bsSizeVal');
-        if (el) el.textContent = this.config.bsSizePct + '%';
-        this._bsPushGeometry();
+    /** Select the display target: 'head_unit' (infotainment) or 'cluster' (driver
+     *  gauge screen). Exactly one. Persists blindspot.target and re-reflects the
+     *  per-target size/corner into the controls. */
+    /** Reflect a target's stored size%/corner into the size+position controls, and
+     *  show/hide + populate the cluster-layout dropdown (cluster target only). */
+    _bsReflectTargetControls(t) {
+        var cluster = (t === 'cluster');
+        var pct = cluster ? this.config.bsSizePctCluster : this.config.bsSizePct;
+        var corner = cluster ? this.config.bsCornerCluster : this.config.bsCorner;
+        var szEl = document.getElementById('bsSize');
+        var szVal = document.getElementById('bsSizeVal');
+        if (szEl) szEl.value = String(pct);
+        if (szVal) szVal.textContent = pct + '%';
+        this._bsHighlightCorner(corner || 'tr');
+        // Cluster layout dropdown: visible only for the cluster target.
+        var row = document.getElementById('bsClusterLayoutRow');
+        if (row) row.style.display = cluster ? '' : 'none';
+        var sel = document.getElementById('bsClusterLayout');
+        if (sel) sel.value = String(this.config.bsClusterLayout || 31);
     },
 
-    /** Pin the card to a screen corner (tl/tr/bl/br). */
+    // ── Display & placement group: STAGED edits + Apply (mirrors recording/
+    //    surveillance). target / layout / size / corner only update the in-memory
+    //    config + UI and mark the group dirty; nothing persists until bsApplyDisplay().
+    //    This fixes the ordering bug where selecting 'cluster' saved immediately,
+    //    before the layout dropdown was even visible. ──────────────────────────────
+
+    /** STAGE the cluster projection layout (size profile 29/30/31). */
+    bsSetClusterLayout(v) {
+        var n = parseInt(v, 10);
+        if (n !== 29 && n !== 30 && n !== 31) return;
+        this.config.bsClusterLayout = n;
+        this._bsMarkDirty();
+    },
+
+    /** STAGE the display target (head_unit | cluster) + reflect its controls. */
+    bsSetTarget(target) {
+        if (target !== 'head_unit' && target !== 'cluster') return;
+        this.config.bsTarget = target;
+        this._bsHighlightTarget(target);
+        this._bsReflectTargetControls(target);
+        this._bsMarkDirty();
+    },
+
+    /** STAGE the on-screen card size (% panel width) for the ACTIVE target. */
+    bsSetSize(pct) {
+        var p = parseInt(pct, 10);
+        if (this.config.bsTarget === 'cluster') this.config.bsSizePctCluster = p;
+        else this.config.bsSizePct = p;
+        var el = document.getElementById('bsSizeVal');
+        if (el) el.textContent = p + '%';
+        this._bsMarkDirty();
+    },
+
+    /** STAGE the card corner (tl/tr/bl/br) for the ACTIVE target. */
     bsSetCorner(corner) {
-        this.config.bsCorner = corner;
+        if (this.config.bsTarget === 'cluster') this.config.bsCornerCluster = corner;
+        else this.config.bsCorner = corner;
         this._bsHighlightCorner(corner);
-        this._bsPushGeometry();
+        this._bsMarkDirty();
+    },
+
+    /** Snapshot of the persisted display/placement values, for dirty-compare +
+     *  revert. Taken on load and after a successful Apply. */
+    _bsSnapshotDisplay() {
+        var c = this.config;
+        return {
+            bsTarget: c.bsTarget, bsClusterLayout: c.bsClusterLayout,
+            bsSizePct: c.bsSizePct, bsCorner: c.bsCorner,
+            bsSizePctCluster: c.bsSizePctCluster, bsCornerCluster: c.bsCornerCluster
+        };
+    },
+
+    /** Enable/disable the Apply button based on whether the display/placement group
+     *  differs from the last-saved snapshot. */
+    _bsMarkDirty() {
+        var s = this._bsDisplaySaved || {};
+        var c = this.config;
+        var dirty = (c.bsTarget !== s.bsTarget) || (c.bsClusterLayout !== s.bsClusterLayout)
+            || (c.bsSizePct !== s.bsSizePct) || (c.bsCorner !== s.bsCorner)
+            || (c.bsSizePctCluster !== s.bsSizePctCluster) || (c.bsCornerCluster !== s.bsCornerCluster);
+        this._bsDisplayDirty = dirty;
+        var btn = document.getElementById('bsApplyBtn');
+        if (btn) { btn.disabled = !dirty; btn.classList.toggle('has-changes', dirty); }
+    },
+
+    /** Commit the staged display/placement group in ONE save, then push to the
+     *  daemon (target retarget + layout relayout happen daemon-side off the unified
+     *  POST). Persists per-target geometry presets too. */
+    async bsApplyDisplay() {
+        if (!this._bsDisplayDirty) return;
+        var c = this.config;
+        var btn = document.getElementById('bsApplyBtn');
+        if (btn) { btn.disabled = true; }
+        // Build per-target geometry presets so the daemon recomputes px from the
+        // live panel; include target + cluster layout in the same delta.
+        var delta = {
+            target: c.bsTarget,
+            clusterSizeProfile: c.bsClusterLayout,
+            geometry: { sizePct: c.bsSizePct, corner: c.bsCorner },
+            geometryCluster: { sizePct: c.bsSizePctCluster, corner: c.bsCornerCluster }
+        };
+        var ok = await this._bsSave(delta);
+        if (ok) {
+            this._bsSyncNative();
+            this._bsDisplaySaved = this._bsSnapshotDisplay();
+            this._bsDisplayDirty = false;
+            if (btn) btn.classList.remove('has-changes');
+            this._toastSaved();
+        } else {
+            if (btn) { btn.disabled = false; }   // leave dirty so the user can retry
+            this._toastFailed();
+        }
     },
 
     /** Highlight the currently-selected corner button so the saved position is
      *  visible at a glance (M3 tonal-selection). */
     _bsHighlightCorner(corner) {
-        var map = { tl: 'bsCornerTl', tr: 'bsCornerTr', bl: 'bsCornerBl', br: 'bsCornerBr' };
+        var map = { tl: 'bsCornerTl', tr: 'bsCornerTr', bl: 'bsCornerBl', br: 'bsCornerBr', center: 'bsCornerCenter' };
         for (var k in map) {
             var el = document.getElementById(map[k]);
             if (el) { if (k === corner) el.classList.add('active'); else el.classList.remove('active'); }
         }
-    },
-
-    /** POST size%+corner to the daemon (debounced); daemon does the panel math
-     *  and rescales the layer. Persists daemon-side to UCM blindspot.geometry. */
-    _bsPushGeometry() {
-        var c = this.config;
-        var pct = c.bsSizePct || 40;
-        var corner = c.bsCorner || 'tr';
-        if (this._bsGeomTimer) clearTimeout(this._bsGeomTimer);
-        this._bsGeomTimer = setTimeout(function () {
-            fetch('/api/bs/geometry/preset/' + pct + '/' + corner, { method: 'POST' })
-                .catch(function () {});
-        }, 120);
     },
 
     /** Start the live debug preview on the car screen: set debugPreview flag +

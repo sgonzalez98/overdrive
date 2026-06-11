@@ -110,6 +110,22 @@ public class HttpServer {
             } catch (Exception e) {
                 CameraDaemon.log("Could not extract BYD Bangcle tables: " + e.getMessage());
             }
+
+            // Same for the China (CN) WBSK tables — only relevant when a CN
+            // account is configured, but pre-extracting is harmless and primes
+            // the cache so the first CN login doesn't pay the extract cost.
+            try {
+                File wbskTablesFile = new File(com.overdrive.app.byd.cloud.crypto.WbskTablesFile.CACHE_PATH);
+                if (!com.overdrive.app.byd.cloud.crypto.WbskTablesFile.isValid(wbskTablesFile)) {
+                    if (com.overdrive.app.byd.cloud.crypto.WbskTablesFile.extractFromAssets(assetManager, wbskTablesFile)) {
+                        CameraDaemon.log("Extracted BYD WBSK tables to " + wbskTablesFile.getAbsolutePath() + " (" + wbskTablesFile.length() + " bytes)");
+                    } else {
+                        CameraDaemon.log("WARN: failed to extract BYD WBSK tables; cache=" + com.overdrive.app.byd.cloud.crypto.WbskTablesFile.describeCache());
+                    }
+                }
+            } catch (Exception e) {
+                CameraDaemon.log("Could not extract BYD WBSK tables: " + e.getMessage());
+            }
             
             CameraDaemon.log("Web assets extracted to " + WEB_ROOT);
         } catch (Exception e) {
@@ -685,6 +701,11 @@ public class HttpServer {
         // RoadSense API (delete-local / delete-cloud data actions)
         if (path.startsWith("/api/roadsense/")) {
             return RoadSenseApiHandler.handle(method, path, body, out);
+        }
+
+        // RoadSense Map routing (BYOK) config API
+        if (path.startsWith("/api/navmap/")) {
+            return NavMapApiHandler.handle(method, path, body, out);
         }
 
         // Telegram bot config API (token / pairing PIN / owner / preferences).

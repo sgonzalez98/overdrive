@@ -7,6 +7,7 @@ import com.overdrive.app.roadsense.config.RoadSenseConfig
 import com.overdrive.app.roadsense.detect.Pose
 import com.overdrive.app.roadsense.detect.Severity
 import com.overdrive.app.roadsense.store.ApproachEngine
+import com.overdrive.app.roadsense.store.GeoMath
 import com.overdrive.app.roadsense.store.RoadSenseStore
 
 /**
@@ -80,6 +81,33 @@ class WarningCoordinator(
     // Set ONLY when a chime actually fires, independent of the per-zone dedupe above.
     private var lastAudioChimeMs = 0L
 
+    // STICKY-VISUAL CONTINUATION latch (Session-35 fix). The card was vanishing
+    // mid-approach because braking for the hazard drops speed below the heading-reliable
+    // floor (RoadSenseController HEADING_RELIABLE_MPS=2.5 m/s ≈ 9 km/h), which makes
+    // ApproachEngine.rank() return emptyList() → visualTarget null → clearApproach —
+    // exactly the "shows 40m then disappears before I reach it" symptom (drivers crawl a
+    // breaker at <9 km/h while still several m out). Issue-A's earlier fix only removed
+    // the speed-shrinking alertDist gate; this upstream suppression still nuked the card.
+    //
+    // Fix: once a hazard's card has been SHOWN while heading WAS reliable (it already
+    // passed the full R-EXT-4 cone + road-match gates at speed), cache it; on a later
+    // tick where the approach list is empty ONLY because heading went unreliable (crawl),
+    // RE-SHOW that same card with the distance recomputed from the live pose, until the
+    // hazard is passed (range < minRangeM) or the latch ages out. This can only PROLONG
+    // an already-direction-validated card — it can NEVER acquire a new one while heading
+    // is unreliable, so the R-EXT-4 invariant (no wrong-road/omnidirectional warnings) is
+    // intact. VISUAL ONLY — audio stays gated on real rank() so no chime fires on a stale
+    // heading. Cleared when passed / aged out / a fresh reliable target supersedes it.
+    private var stickyLead: ApproachEngine.Approach? = null
+    private var stickyShownMs = 0L
+    // Smallest live range seen while latched (RS-1). A hazard still AHEAD gets closer each tick
+    // (range shrinks); once PASSED, range grows monotonically as we drive away. So we only keep
+    // re-showing while the live range stays within a small epsilon of this running minimum —
+    // the first tick range climbs clearly above it, the hazard is behind us → clear. This is the
+    // direction check the range-only recompute lacked (can't otherwise tell 5 m ahead from 5 m
+    // behind without a reliable bearing).
+    private var stickyMinRangeM = Double.MAX_VALUE
+
     /**
      * Evaluate one tick. [pose] is the live (or back-projected current) vehicle
      * pose; [cfg] the current config snapshot; [headingReliable] false at crawl /
@@ -113,9 +141,20 @@ class WarningCoordinator(
         }
 
         if (visualTarget == null) {
-            // Nothing ahead in the visual band → clear. A hazard now under the car was
-            // already dropped by ApproachEngine (range < minRangeM), so a passed hazard
-            // lands here and the cue clears.
+            // No qualifying zone this tick. Before clearing, try the STICKY-VISUAL latch:
+            // if the only reason there's nothing is that heading went unreliable (the
+            // brake-induced crawl, ApproachEngine.rank → emptyList), keep showing the
+            // already-acquired card so it doesn't vanish before the hazard is reached.
+            if (!headingReliable &&
+                cfg.warnMode != RoadSenseConfig.WarnMode.AUDIO &&
+                tryShowStickyVisual(pose, nearby, now = clock())
+            ) {
+                return
+            }
+            // Genuinely nothing ahead (or latch expired / passed / audio-only) → clear.
+            // A hazard now under the car was already dropped by ApproachEngine
+            // (range < minRangeM), so a passed hazard lands here and the cue clears.
+            stickyLead = null
             visualSink?.clearApproach()
             if (lastWarnedId != null && zones.none { it.lead.stored.id == lastWarnedId }) {
                 lastWarnedId = null
@@ -137,6 +176,16 @@ class WarningCoordinator(
                 lead.stored.hazard.type.ordinal,
                 visualTarget.count, visualTarget.lengthM.toInt(), visualTarget.isRoughSection,
             )
+            // Cache for the sticky-visual latch ONLY when heading is reliable — that's
+            // when the cone + road-match gates actually validated this hazard's direction.
+            // We never cache (or re-show) a target acquired without a reliable bearing, so
+            // the latch can only ever PROLONG a properly direction-validated card. Track the
+            // running min range (RS-1) so the latch can detect "passed" (range climbing).
+            if (headingReliable) {
+                if (stickyLead?.stored?.id != lead.stored.id) stickyMinRangeM = Double.MAX_VALUE
+                stickyLead = lead; stickyShownMs = now
+                if (lead.rangeM < stickyMinRangeM) stickyMinRangeM = lead.rangeM
+            }
         } else {
             // AUDIO-only: the user wants no hazard CARD, but the overlay still needs a
             // heartbeat or the app-side card goes stale ("Idle"/disconnected) after its
@@ -159,7 +208,29 @@ class WarningCoordinator(
         val newZone = lead.stored.id != lastWarnedId || (now - lastWarnedMs) >= REWARN_COOLDOWN_MS
         val cooledOff = (now - lastAudioChimeMs) >= AUDIO_COOLOFF_MS
 
-        if (withinAlert && newZone && cfg.warnMode != RoadSenseConfig.WarnMode.VISUAL && cooledOff) {
+        // (D) MINOR-consensus chime gate (Session-34 fit, D-037). On a real drive, 40% of
+        // detections were explicit user-rejected false positives — and 50/55 were MINOR.
+        // The verified analysis proved NO single-event signal (peak, shape, duration,
+        // confidence) separates these one-off FP thuds from genuine MINOR hazards: only
+        // REPETITION does (a real road feature recurs every pass / earns cross-device
+        // consensus; a lane-seam/manhole/driver jolt does not). So for a MINOR zone we
+        // defer the CHIME until the lead hazard is corroborated — seen on ≥2 passes
+        // (observations≥2 → locally-confirmed, D-012), human-verified, or cloud-shared.
+        // CRITICAL — this only gates AUDIO: the hazard is still detected, stored, mapped,
+        // shown VISUALLY (above), and uploaded; we just don't beep on a first-ever unconfirmed
+        // MINOR. MODERATE/SEVERE always chime on first encounter (a deep pothole can't wait
+        // for pass 2). This is the one precision lever that touches NEITHER the detection
+        // threshold NOR speed, so it cannot drop the slow/gentle hazards the recall fix
+        // recovered — it only delays a low-severity beep by one pass. Severe-biased + speed-
+        // agnostic by construction.
+        val zoneSev = visualTarget.maxSeverityLevel
+        val leadCorroborated = lead.stored.observations >= MIN_OBS_FOR_MINOR_CHIME ||
+            lead.stored.humanVerified ||
+            lead.stored.status >= com.overdrive.app.roadsense.detect.StoredHazard.STATUS_LOCALLY_CONFIRMED
+        val chimeSeverityOk = zoneSev > Severity.MINOR.level || leadCorroborated
+
+        if (withinAlert && newZone && chimeSeverityOk &&
+            cfg.warnMode != RoadSenseConfig.WarnMode.VISUAL && cooledOff) {
             // Chime exactly once per zone, AND only when the global burst cool-off has
             // elapsed. We mark the zone announced (lastWarnedId/Ms) ONLY here — when a
             // chime actually fires — NOT unconditionally on withinAlert&&newZone. The
@@ -180,6 +251,57 @@ class WarningCoordinator(
                 "@${"%.0f".format(lead.rangeM)}m (alertDist=${"%.0f".format(alertDist)}m " +
                 "mode=${cfg.warnMode})")
         }
+    }
+
+    /**
+     * STICKY-VISUAL continuation (Session-35). Re-show the already-acquired card through a
+     * brake-induced crawl, so it doesn't vanish before the hazard is reached. Returns true
+     * if it re-showed (caller then returns without clearing). Conditions (ALL must hold):
+     *  - we have a cached lead from a reliable-heading tick ([stickyLead]);
+     *  - that exact hazard id is STILL in the nearby set (not deleted / passed out of the
+     *    tile query) — so we never show a hazard the store no longer has;
+     *  - the latch hasn't aged out ([STICKY_LATCH_MS]);
+     *  - the car is STILL ROLLING (speed > 0) — a full stop/park drops it;
+     *  - the LIVE-recomputed range is in [minRangeM, VISUAL_MAX_RANGE_M] — once range
+     *    falls under minRangeM the hazard is passed and we let the normal clear happen.
+     * Distance is recomputed from the live pose so it keeps counting down truthfully; the
+     * cached relative bearing/severity/type are reused (we can't re-derive bearing without
+     * a reliable heading, but the arrow on a sub-9km/h crawl is cosmetic). AUDIO is never
+     * triggered here. Cannot create a new warning — only prolong a validated one (R-EXT-4).
+     */
+    private fun tryShowStickyVisual(
+        pose: Pose,
+        nearby: List<com.overdrive.app.roadsense.detect.StoredHazard>,
+        now: Long,
+    ): Boolean {
+        val lead = stickyLead ?: return false
+        if (now - stickyShownMs > STICKY_LATCH_MS) { stickyLead = null; return false }
+        if (pose.speedMps <= 0f) return false   // genuinely stopped → let it clear
+        // The cached hazard must still exist in the current query (not passed/deleted).
+        if (nearby.none { it.id == lead.stored.id }) { stickyLead = null; return false }
+        val h = lead.stored.hazard
+        val rangeM = GeoMath.haversineMeters(pose.lat, pose.lng, h.lat, h.lng)
+        if (rangeM < approach.minRangeMeters || rangeM > VISUAL_MAX_RANGE_M) {
+            // < minRange ⇒ passed (let normal clear run); > visual band ⇒ not approaching.
+            stickyLead = null
+            return false
+        }
+        // RS-1 DIRECTION CHECK: a still-AHEAD hazard gets closer (range shrinks toward the
+        // running min); a PASSED hazard's range grows as we drive away. Without a reliable
+        // bearing at crawl the recompute is range-only, so use this monotonicity: if the live
+        // range has climbed clearly above the smallest range we ever saw for this hazard, it's
+        // behind us → stop re-showing (don't present a passed hazard as "ahead, distance up").
+        if (rangeM < stickyMinRangeM) stickyMinRangeM = rangeM
+        else if (rangeM > stickyMinRangeM + STICKY_PASSED_EPSILON_M) {
+            stickyLead = null   // range climbing past the approach minimum ⇒ passed
+            return false
+        }
+        visualSink?.showApproach(
+            lead.stored.id, rangeM, lead.relativeBearingDeg,
+            severityFromLevel(h.severity.level), h.type.ordinal,
+            1, 0, false,   // singleton presentation while latched (no fresh zone grouping)
+        )
+        return true
     }
 
     /** Map a stored severity level (1..3) back to [Severity], clamped. */
@@ -207,6 +329,23 @@ class WarningCoordinator(
          *  ApproachEngine.DEFAULT_MAX_RANGE_M (300m) so the cue clears with margin
          *  before the candidate even leaves the store query. PROVISIONAL. */
         private const val VISUAL_MAX_RANGE_M = 200.0
+        /** Observations a MINOR hazard needs before its CHIME is allowed (D-037). 2 =
+         *  seen on a second pass (the K=2 locally-confirmed bar, D-012), i.e. it's a real
+         *  recurring road feature, not a one-off transient. MODERATE/SEVERE bypass this
+         *  (chime on first encounter). Only gates audio — visual/map/upload are immediate. */
+        private const val MIN_OBS_FOR_MINOR_CHIME = 2
+        /** Sticky-visual continuation window (Session-35). After the last reliable-heading
+         *  tick that showed a card, keep re-showing it through a brake-induced crawl for at
+         *  most this long, so the card doesn't vanish before the hazard is reached. 8 s
+         *  comfortably covers a slow-down → crawl → cross of a typical breaker; bounded so a
+         *  genuine stop/park/turn doesn't keep a stale card alive. Also clears the instant
+         *  the hazard is passed (range < minRange) or the car fully stops. PROVISIONAL —
+         *  tune on a real crawl-over drive. */
+        private const val STICKY_LATCH_MS = 8_000L
+        /** How far (m) the live range may climb above the latched approach-minimum before we
+         *  treat the hazard as PASSED and stop re-showing (RS-1). A few metres absorbs GPS
+         *  jitter on the latched range without letting a behind-the-car hazard linger. */
+        private const val STICKY_PASSED_EPSILON_M = 4.0
     }
 }
 

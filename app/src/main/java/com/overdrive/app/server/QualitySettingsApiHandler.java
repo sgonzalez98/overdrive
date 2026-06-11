@@ -578,6 +578,37 @@ public class QualitySettingsApiHandler {
                 }
             }
 
+            // Blind-spot display-target flip arrives here via the web UI's unified
+            // POST (section "blindspot", {target}). Without a live retarget the new
+            // target only takes effect on the next enable — and a cluster→head_unit
+            // flip would leave the OEM projection (gauges blanked) up until then.
+            // retargetBlindSpot() forceReloads, re-reads target, and force-closes any
+            // open cluster projection when leaving the cluster (restoring gauges
+            // immediately). This covers browser/tunnel clients that have no
+            // AndroidBridge and never hit /api/bs/target. No-op when target absent.
+            if ("blindspot".equals(section) && data.has("target")) {
+                try {
+                    com.overdrive.app.surveillance.GpuSurveillancePipeline p = CameraDaemon.getGpuPipeline();
+                    if (p != null && p.isBlindSpotEnabled()) {
+                        p.retargetBlindSpot();
+                    }
+                } catch (Exception e) {
+                    CameraDaemon.log("blindspot target retarget dispatch failed: " + e.getMessage());
+                }
+            }
+            // A cluster-layout (size-profile) change must take effect live: force the
+            // open projection closed so the next turn signal reopens with the new
+            // profile (the daemon re-reads it on open; onClusterProjectionReady then
+            // re-resolves the layerStack + geometry for the new layout).
+            if ("blindspot".equals(section) && data.has("clusterSizeProfile")) {
+                try {
+                    com.overdrive.app.surveillance.GpuSurveillancePipeline p = CameraDaemon.getGpuPipeline();
+                    if (p != null) p.relayoutCluster();
+                } catch (Exception e) {
+                    CameraDaemon.log("blindspot relayout dispatch failed: " + e.getMessage());
+                }
+            }
+
             CameraDaemon.log("Unified config section '" + section + "' updated");
 
             JSONObject response = new JSONObject();

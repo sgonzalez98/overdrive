@@ -79,21 +79,34 @@ class AdbShellExecutor(private val context: Context) {
     )
     
     fun execute(command: String, callback: ShellCallback) {
-        executor.execute {
-            try {
-                logger.debug(TAG, "Executing async: $command")
-                val dadb = getOrCreateConnection()
-                val result = dadb.shell(command)
-                
-                if (result.exitCode == 0) {
-                    callback.onSuccess(result.allOutput)
-                } else {
-                    callback.onError("Exit code ${result.exitCode}: ${result.allOutput}")
+        // Guard against RejectedExecutionException: if the executor is already
+        // shutting down (the owning launcher / app is tearing down), execute()
+        // throws synchronously on the CALLER's thread. ServiceLauncher chains
+        // commands by calling execute() from inside the onError/onSuccess callback,
+        // so an unguarded rejection there is uncaught on the worker thread and
+        // KILLS THE PROCESS (observed: app crash on startup when the Activity
+        // finished mid-sequence). Swallow it — a dead executor means we're shutting
+        // down and the remaining commands are moot.
+        try {
+            executor.execute {
+                try {
+                    logger.debug(TAG, "Executing async: $command")
+                    val dadb = getOrCreateConnection()
+                    val result = dadb.shell(command)
+
+                    if (result.exitCode == 0) {
+                        callback.onSuccess(result.allOutput)
+                    } else {
+                        callback.onError("Exit code ${result.exitCode}: ${result.allOutput}")
+                    }
+                } catch (e: Exception) {
+                    logger.error(TAG, "Command execution failed: $command", e)
+                    callback.onError("Execution failed: ${e.message}")
                 }
-            } catch (e: Exception) {
-                logger.error(TAG, "Command execution failed: $command", e)
-                callback.onError("Execution failed: ${e.message}")
             }
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // Executor shut down — drop the command silently (app is tearing down).
+            logger.warn(TAG, "execute() rejected (executor shutting down): $command")
         }
     }
     

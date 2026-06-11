@@ -75,6 +75,13 @@ public class StatusOverlayService extends Service {
 
     private WindowManager windowManager;
     private View overlayView;
+    // Last rendered state signature — the poll re-runs updateUI every 3s (ACC-on)
+    // and used to re-set the pill icon/label/color + emit a 12-field Log.d EVERY
+    // tick even when nothing changed. We skip the per-tick verbose log when the
+    // signature is unchanged (the view writes are idempotent + cheap, but the log
+    // concat fired at the poll cadence and mirrored the pillContainer redraw the
+    // user saw in logcat). Reset to null on (re)create so a fresh pill still logs.
+    private String lastUiLogSig = null;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -1242,13 +1249,22 @@ public class StatusOverlayService extends Service {
                 || (tripEnabled && tripOverlayEnabled)
                 || keepAliveForActionBar;
 
-        Log.d(TAG, "updateUI: mode=" + configuredMode + " isRec=" + isRecording
-                + " modeActive=" + modeActive + " pipelineRunning=" + pipelineRunning
-                + " wedged=" + recordingWedged
-                + " gear=" + currentGear + " acc=" + accOn
-                + " tripEnabled=" + tripEnabled + " tripActive=" + tripActive
-                + " recConfigured=" + recConfigured + " shouldRec=" + (recConfigured && shouldRecordingBeActive())
-                + " pollFails=" + consecutivePollFailures);
+        // Only emit the verbose state line when something actually changed — it
+        // previously fired every poll tick (mirroring the pill redraw in logcat).
+        String uiLogSig = configuredMode + "|" + isRecording + "|" + modeActive
+                + "|" + pipelineRunning + "|" + recordingWedged + "|" + currentGear
+                + "|" + accOn + "|" + tripEnabled + "|" + tripActive + "|"
+                + recConfigured + "|" + consecutivePollFailures;
+        if (!uiLogSig.equals(lastUiLogSig)) {
+            lastUiLogSig = uiLogSig;
+            Log.d(TAG, "updateUI: mode=" + configuredMode + " isRec=" + isRecording
+                    + " modeActive=" + modeActive + " pipelineRunning=" + pipelineRunning
+                    + " wedged=" + recordingWedged
+                    + " gear=" + currentGear + " acc=" + accOn
+                    + " tripEnabled=" + tripEnabled + " tripActive=" + tripActive
+                    + " recConfigured=" + recConfigured + " shouldRec=" + (recConfigured && shouldRecordingBeActive())
+                    + " pollFails=" + consecutivePollFailures);
+        }
 
         // During the grace period (daemon briefly unreachable), keep the overlay
         // visible with last-known state. This prevents the pill from flickering

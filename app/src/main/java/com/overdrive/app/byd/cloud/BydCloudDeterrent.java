@@ -177,9 +177,9 @@ public final class BydCloudDeterrent {
             // fired before subscriber init). Use a one-shot client. This is the only
             // path that should ever spawn a new client outside the provider.
             BydCloudClient c = new BydCloudClient(config);
-            InputStream tablesStream = getTablesStream();
+            InputStream tablesStream = getTablesStream(config);
             if (tablesStream == null) {
-                logger.warn("Bangcle tables not available");
+                logger.warn("Transport tables not available");
                 return null;
             }
             try {
@@ -248,8 +248,9 @@ public final class BydCloudDeterrent {
         commandInFlight.set(false);
     }
 
-    private InputStream getTablesStream() {
-        return com.overdrive.app.byd.cloud.crypto.BangcleTablesFile.openStream(
+    private InputStream getTablesStream(BydCloudConfig config) {
+        return com.overdrive.app.byd.cloud.crypto.EnvelopeCodecFactory.openTablesStream(
+                config.isChinaRegion(),
                 com.overdrive.app.daemon.DaemonBootstrap.getContext());
     }
 }

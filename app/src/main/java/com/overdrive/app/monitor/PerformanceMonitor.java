@@ -41,8 +41,15 @@ public class PerformanceMonitor {
     private static final Object lock = new Object();
     
     // Configuration
-    private static final int HISTORY_SIZE = 60;  // 60 samples = 1 minute at 1s interval
-    private static final long SAMPLE_INTERVAL_MS = 1000;  // 1 second
+    // HISTORY_SIZE × SAMPLE_INTERVAL_MS = retained window. At 2s × 60 that's a
+    // 2-minute chart, plenty for a live perf page.
+    private static final int HISTORY_SIZE = 60;
+    // 2s, not 1s. A full collectMetrics() does blocking sysfs/proc I/O — the
+    // thermal sweep alone reads dozens of /sys/class/thermal zones. On the BYD
+    // head-unit (48 thermal zones, slow sysfs) a 1s sampler couldn't keep up and
+    // pegged its own thread; 2s halves that load and is still real-time enough
+    // for a human-watched dashboard.
+    private static final long SAMPLE_INTERVAL_MS = 2000;
     private static final long CLIENT_TIMEOUT_MS = 10_000;  // 10 seconds heartbeat timeout
     private static final long CLEANUP_INTERVAL_MS = 5_000;  // Check for stale clients every 5s
     
@@ -72,6 +79,17 @@ public class PerformanceMonitor {
     // so we don't pay 4× File.exists() every second forever.
     private java.io.File resolvedGpuBusyFile = null;
     private boolean gpuBusyResolutionLogged = false;
+
+    // Cache the resolved CPU/GPU thermal-zone /temp paths. The original code
+    // re-scanned up to 30 thermal_zone* dirs — opening + reading the /type file
+    // of each — on EVERY sample to rediscover which zone is the CPU/GPU. On the
+    // BYD head-unit (48 zones, slow sysfs) that sweep dominated the sampler's
+    // CPU. The zone topology never changes at runtime, so resolve the matching
+    // /temp file once and just read that single file thereafter. Sentinels:
+    // null = not yet resolved; NOT_FOUND = resolved-but-absent (don't re-scan).
+    private static final java.io.File TEMP_PATH_NOT_FOUND = new java.io.File("");
+    private java.io.File resolvedCpuTempFile = null;
+    private java.io.File resolvedGpuTempFile = null;
     
     // Scheduler
     private ScheduledExecutorService scheduler;
@@ -681,64 +699,86 @@ public class PerformanceMonitor {
     }
     
     private double readCpuTemperature() {
-        // Try CPU-specific thermal zones first
+        // Fast path: read the already-resolved zone. Resolved once, then reused
+        // for the life of the process — the thermal topology is static.
+        if (resolvedCpuTempFile != null) {
+            if (resolvedCpuTempFile == TEMP_PATH_NOT_FOUND) return 0;
+            Double t = readTempFile(resolvedCpuTempFile, true);
+            return t != null ? t : 0;
+        }
+
+        // Slow path: resolve the CPU thermal zone ONCE.
         String[] cpuThermalKeywords = {
             "cpu", "soc", "core", "cluster", "little", "big", "prime",
             "cpu-thermal", "cpu_thermal", "cpuss", "cpuss-0", "cpuss-1",
             "cpu-0-0", "cpu-0-1", "cpu-1-0", "cpu-1-1", "tsens_tz_sensor"
         };
-        
+
         for (int i = 0; i < 30; i++) {
             try {
                 String typePath = "/sys/class/thermal/thermal_zone" + i + "/type";
                 BufferedReader typeReader = new BufferedReader(new FileReader(typePath));
                 String type = typeReader.readLine();
                 typeReader.close();
-                
+
                 if (type != null) {
                     String typeLower = type.toLowerCase().trim();
                     for (String keyword : cpuThermalKeywords) {
                         if (typeLower.contains(keyword)) {
-                            String tempPath = "/sys/class/thermal/thermal_zone" + i + "/temp";
-                            BufferedReader tempReader = new BufferedReader(new FileReader(tempPath));
-                            String tempLine = tempReader.readLine();
-                            tempReader.close();
-                            
-                            if (tempLine != null && !tempLine.trim().isEmpty()) {
-                                double temp = Double.parseDouble(tempLine.trim());
-                                double result = temp > 1000 ? temp / 1000.0 : temp;
-                                // Only return if it's a reasonable temperature (10-120°C)
-                                if (result >= 10 && result <= 120) {
-                                    return result;
-                                }
+                            java.io.File tempFile = new java.io.File(
+                                "/sys/class/thermal/thermal_zone" + i + "/temp");
+                            Double result = readTempFile(tempFile, true);
+                            // Only accept a zone that yields a sane temperature,
+                            // then cache it so subsequent samples skip the scan.
+                            if (result != null) {
+                                resolvedCpuTempFile = tempFile;
+                                return result;
                             }
                         }
                     }
                 }
             } catch (Exception ignored) {}
         }
-        
-        // Fallback to direct paths
+
+        // Fallback to direct paths.
         String[] paths = {
             "/sys/class/thermal/thermal_zone0/temp",
             "/sys/devices/virtual/thermal/thermal_zone0/temp",
             "/sys/devices/system/cpu/cpu0/cpufreq/cpu_temp",
             "/sys/kernel/cpu/temp"
         };
-        
         for (String path : paths) {
-            try {
-                BufferedReader reader = new BufferedReader(new FileReader(path));
-                String line = reader.readLine();
-                reader.close();
-                if (line != null && !line.trim().isEmpty()) {
-                    double temp = Double.parseDouble(line.trim());
-                    // Usually in millidegrees
-                    return temp > 1000 ? temp / 1000.0 : temp;
-                }
-            } catch (Exception ignored) {}
+            java.io.File f = new java.io.File(path);
+            Double t = readTempFile(f, false);
+            if (t != null) {
+                resolvedCpuTempFile = f;
+                return t;
+            }
         }
+
+        // Nothing usable on this device — remember that so we never re-scan.
+        resolvedCpuTempFile = TEMP_PATH_NOT_FOUND;
         return 0;
+    }
+
+    /**
+     * Read one thermal /temp file and normalize to °C (handles millidegrees).
+     * Returns null if the file is unreadable/empty, or — when {@code sanityCheck}
+     * is set — if the value is outside a plausible 10–120 °C band (used while
+     * resolving which zone is the right one). Once a zone is cached, reads are a
+     * single open+parse with no directory scan.
+     */
+    private Double readTempFile(java.io.File f, boolean sanityCheck) {
+        try (BufferedReader reader = new BufferedReader(new FileReader(f))) {
+            String line = reader.readLine();
+            if (line == null || line.trim().isEmpty()) return null;
+            double temp = Double.parseDouble(line.trim());
+            double result = temp > 1000 ? temp / 1000.0 : temp;
+            if (sanityCheck && (result < 10 || result > 120)) return null;
+            return result;
+        } catch (Exception e) {
+            return null;
+        }
     }
     
     /**
@@ -835,33 +875,36 @@ public class PerformanceMonitor {
     }
     
     private double readGpuTemperature() {
-        // Try various thermal zones for GPU - expanded for different chipsets
+        // Fast path: read the already-resolved zone (topology is static).
+        if (resolvedGpuTempFile != null) {
+            if (resolvedGpuTempFile == TEMP_PATH_NOT_FOUND) return 0;
+            Double t = readTempFile(resolvedGpuTempFile, false);
+            return t != null ? t : 0;
+        }
+
+        // Slow path: resolve the GPU thermal zone ONCE.
         String[] gpuThermalKeywords = {
             "gpu", "adreno", "mali", "g3d", "graphics", "pvr", "vivante",
             "gpu-thermal", "gpu_thermal", "gpu-usr", "gpuss", "gpuss-0",
             "gpuss-1", "gpuss-max", "gpu-step"
         };
-        
-        for (int i = 0; i < 30; i++) {  // Increased range for more thermal zones
+
+        for (int i = 0; i < 30; i++) {
             try {
                 String typePath = "/sys/class/thermal/thermal_zone" + i + "/type";
                 BufferedReader typeReader = new BufferedReader(new FileReader(typePath));
                 String type = typeReader.readLine();
                 typeReader.close();
-                
+
                 if (type != null) {
                     String typeLower = type.toLowerCase().trim();
                     for (String keyword : gpuThermalKeywords) {
                         if (typeLower.contains(keyword)) {
-                            String tempPath = "/sys/class/thermal/thermal_zone" + i + "/temp";
-                            BufferedReader tempReader = new BufferedReader(new FileReader(tempPath));
-                            String tempLine = tempReader.readLine();
-                            tempReader.close();
-                            
-                            if (tempLine != null && !tempLine.trim().isEmpty()) {
-                                double temp = Double.parseDouble(tempLine.trim());
-                                double result = temp > 1000 ? temp / 1000.0 : temp;
-                                // logger.debug("GPU temp from zone " + i + " (" + type + "): " + result + "°C");
+                            java.io.File tempFile = new java.io.File(
+                                "/sys/class/thermal/thermal_zone" + i + "/temp");
+                            Double result = readTempFile(tempFile, false);
+                            if (result != null) {
+                                resolvedGpuTempFile = tempFile;
                                 return result;
                             }
                         }
@@ -869,27 +912,25 @@ public class PerformanceMonitor {
                 }
             } catch (Exception ignored) {}
         }
-        
-        // Fallback: try direct GPU thermal paths
+
+        // Fallback: try direct GPU thermal paths.
         String[] directGpuTempPaths = {
             "/sys/class/kgsl/kgsl-3d0/temp",
             "/sys/devices/platform/mali.0/temp",
             "/sys/kernel/gpu/gpu_temp",
             "/sys/devices/virtual/thermal/gpu/temp"
         };
-        
         for (String path : directGpuTempPaths) {
-            try {
-                BufferedReader reader = new BufferedReader(new FileReader(path));
-                String line = reader.readLine();
-                reader.close();
-                if (line != null && !line.trim().isEmpty()) {
-                    double temp = Double.parseDouble(line.trim());
-                    return temp > 1000 ? temp / 1000.0 : temp;
-                }
-            } catch (Exception ignored) {}
+            java.io.File f = new java.io.File(path);
+            Double t = readTempFile(f, false);
+            if (t != null) {
+                resolvedGpuTempFile = f;
+                return t;
+            }
         }
-        
+
+        // Nothing usable — remember it so we never re-scan.
+        resolvedGpuTempFile = TEMP_PATH_NOT_FOUND;
         return 0;
     }
 

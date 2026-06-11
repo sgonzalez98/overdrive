@@ -68,6 +68,90 @@ public final class ConcurrentAvmProbe {
                 return existing;
             }
 
+            // OPT-IN gate. The probe is a DESTRUCTIVE dual-camera open whose
+            // only real consumer is a minor OEM bitrate-budget refinement; the
+            // unprobed default (-1) already produces correct sole-encoder
+            // behaviour. Camera-id resolution is entirely separate
+            // (resolveOemDashcamId / probedCameraId — saved ids honored
+            // verbatim, sane pano=1/OEM=0 defaults otherwise) and does NOT
+            // depend on this probe. So we only run when the user explicitly
+            // opts in via the camera-mapping dialog. Default false = never
+            // auto-probe — this is what prevents the +15s boot probe from
+            // truncating a live dvr_*.mp4 in the DashCam+Pano layout.
+            if (!camera.optBoolean("concurrentAvmProbeEnabled", false)) {
+                logger.info("Probe skipped: concurrentAvmProbeEnabled=false "
+                    + "(opt-in only; -1 unprobed default is safe — OEM uses "
+                    + "sole-encoder full bitrate budget)");
+                return -1;
+            }
+
+            // CRITICAL: never open AVMCamera while a live pipeline holds the
+            // handle. probe() opens BOTH the pano id AND the OEM id via raw
+            // HAL open()+startPreview(). If the pano or OEM recording pipeline
+            // is already running on either id, the probe's second open steals
+            // / disrupts the handle and TRUNCATES the in-flight clip — the
+            // observed "15-second dvr_*.mp4 then recording resumes later"
+            // symptom in the DashCam+Pano layout (the only layout where this
+            // probe is even scheduled, since it needs a distinct OEM id).
+            //
+            // Two reasons this guard is also semantically correct, not just a
+            // workaround:
+            //   1. If BOTH pipelines are already running concurrently, that IS
+            //      the answer — the HAL demonstrably supports dual clients, so
+            //      we record concurrentAvmSupported=1 observationally (below)
+            //      instead of running a destructive probe to "find out."
+            //   2. The sticky result is consumed lazily and the only real
+            //      consumer (applyBitrateBudgetCap) treats any non-1 value —
+            //      including the unprobed -1 — as sole-encoder full budget, so
+            //      leaving it at -1 for one more ACC cycle is benign.
+            //
+            // Defer: a subsequent daemon boot / ACC cycle with no live
+            // pipeline at the +15s mark runs the probe cleanly.
+            try {
+                com.overdrive.app.surveillance.GpuSurveillancePipeline pano =
+                    com.overdrive.app.daemon.CameraDaemon.getGpuPipeline();
+                com.overdrive.app.camera.OemDashcamPipeline oem =
+                    com.overdrive.app.daemon.CameraDaemon.getOemDashcamPipeline();
+                boolean panoLive = pano != null && pano.isRunning();
+                boolean oemLive = oem != null && oem.isRunning();
+                if (panoLive && oemLive) {
+                    // Both pipelines are running RIGHT NOW on their distinct
+                    // AVMCamera ids — that is direct, non-destructive proof the
+                    // HAL supports concurrent clients. Record it positively
+                    // (sticky=1) instead of deferring forever; in the
+                    // DashCam+Pano layout pipelines are essentially always live
+                    // at the +15s mark, so a blind defer would leave the value
+                    // unprobed (-1) permanently. No AVMCamera is opened here.
+                    logger.info("Probe satisfied observationally: pano AND OEM "
+                        + "both live on distinct ids → concurrentAvmSupported=1 "
+                        + "(no destructive open performed)");
+                    JSONObject patch = new JSONObject();
+                    patch.put("concurrentAvmSupported", 1);
+                    UnifiedConfigManager.updateSection("camera", patch);
+                    return 1;
+                }
+                if (panoLive || oemLive) {
+                    // Exactly one pipeline is up. We can't conclude concurrency
+                    // (the other id is untested) and we must NOT open the idle
+                    // id's HAL while its sibling holds a handle — on a
+                    // single-client HAL that open would still disrupt the live
+                    // one. Defer to a quiescent boot. -1 is tolerated downstream
+                    // (applyBitrateBudgetCap treats !=1 as sole-encoder budget).
+                    logger.info("Probe deferred: one pipeline is live (pano="
+                        + panoLive + ", oem=" + oemLive + ") — opening the idle "
+                        + "AVMCamera id now could disrupt the live clip. Will "
+                        + "retry on a quiescent boot.");
+                    return -1;
+                }
+            } catch (Throwable t) {
+                // If we can't even determine liveness, do NOT probe — the
+                // safe default is to leave concurrentAvmSupported unprobed
+                // rather than risk stealing a live handle.
+                logger.warn("Probe liveness check failed (" + t.getMessage()
+                    + ") — deferring probe to avoid handle contention");
+                return -1;
+            }
+
             int panoId = camera.optInt("probedCameraId", -1);
             if (panoId < 0 && camera.optBoolean("manualOverride", false)) {
                 panoId = camera.optInt("manualCameraId", -1);

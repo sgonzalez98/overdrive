@@ -3875,6 +3875,45 @@ public class SurveillanceEngineGpu {
         } catch (Throwable t) {
             logger.debug("Telegram finalized notify failed: " + t.getMessage());
         }
+
+        // Surveillance video upload. We're past the shouldTelegram() tier gate
+        // above, so the video honours the same per-severity toggle as the text
+        // + photo — fixing "NOTICE muted but the clip still arrives". The
+        // generic recorder (HardwareEventRecorderGpu) deliberately does NOT
+        // auto-send event_*.mp4 for exactly this reason; this is the single
+        // gated send for surveillance clips. notifyVideoRecorded applies its
+        // own videoUploads gate, so the net rule is "tier enabled AND video
+        // uploads on" — the user's expected behaviour. heroPhotoPath is the
+        // absolute hero path, so its parent is the event directory; derive the
+        // clip's absolute path from there (videoFilename is bare).
+        try {
+            String videoPath = null;
+            if (heroPhotoPath != null && !heroPhotoPath.isEmpty()) {
+                java.io.File heroFile = new java.io.File(heroPhotoPath);
+                java.io.File parent = heroFile.getParentFile();
+                if (parent != null) {
+                    videoPath = new java.io.File(parent, videoFilename).getAbsolutePath();
+                }
+            }
+            if (videoPath == null && currentEventFile != null) {
+                // Fallback when no hero was written (text-only short clips):
+                // currentEventFile is the just-closed event's absolute path.
+                videoPath = currentEventFile.getAbsolutePath();
+            }
+            if (videoPath != null && new java.io.File(videoPath).exists()) {
+                int durationSec = 0;
+                try {
+                    HardwareEventRecorderGpu enc = (recorder != null) ? recorder.getEncoder() : null;
+                    if (enc != null) durationSec = enc.getLastFinalizedDurationSec();
+                } catch (Throwable ignored) {}
+                String label = threat != null ? Actor.groupLabel(threat.classGroup) : null;
+                TelegramNotifier.notifyVideoRecorded(videoPath, label, durationSec);
+            } else {
+                logger.debug("Surveillance video upload skipped — clip path unresolved/missing");
+            }
+        } catch (Throwable t) {
+            logger.debug("Telegram surveillance video send failed: " + t.getMessage());
+        }
     }
 
     /**

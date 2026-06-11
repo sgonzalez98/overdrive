@@ -26,7 +26,7 @@ public class WebSocketStreamServer extends WebSocketServer
     // KF-RESYNC-002: how long to wait before retrying a per-client SPS/PPS
     // re-send when a "keyframe" request arrives before the encoder has
     // published its format (cachedSpsPps still null). A freshly-started
-    // bsEncoder dequeues its first INFO_OUTPUT_FORMAT_CHANGED within a few
+    // streamEncoder dequeues its first INFO_OUTPUT_FORMAT_CHANGED within a few
     // frame intervals (~tens of ms at 10–15 fps); 50ms comfortably covers
     // that one-frame race while keeping the deferral imperceptible at reveal.
     private static final long KEYFRAME_RESEND_DEFER_MS = 50L;
@@ -137,10 +137,14 @@ public class WebSocketStreamServer extends WebSocketServer
     @Override
     public void onMessage(WebSocket conn, String message) {
         if ("keyframe".equals(message)) {
-            // A client (e.g. the blind-spot overlay) requests a clean decode
-            // restart — typically because its decoder just (re)gained a Surface
-            // AFTER the connection's one-shot onOpen SPS/PPS replay was already
-            // sent and dropped (decoder had no Surface yet). Without re-delivering
+            // A live-view stream client (port 8887, fed by streamEncoder) requests a
+            // clean decode restart — typically because its decoder just (re)gained a
+            // Surface AFTER the connection's one-shot onOpen SPS/PPS replay was already
+            // sent and dropped (decoder had no Surface yet). (The blind-spot lane no
+            // longer flows through any WS server — it is the native SurfaceControl
+            // path — so a "keyframe" request here only ever comes from the live-view
+            // client; the prior "blind-spot overlay" attribution is obsolete.)
+            // Without re-delivering
             // the parameter sets the decoder can never configure (maybeConfigure
             // blocks on pps==null) and shows permanent black. So: (1) re-send the
             // cached SPS/PPS to THIS client, and (2) ask the encoder for a fresh
@@ -156,10 +160,10 @@ public class WebSocketStreamServer extends WebSocketServer
                 // encoder hasn't published its format yet. The drainer only calls
                 // onSpsPps() when it dequeues INFO_OUTPUT_FORMAT_CHANGED (the encoder's
                 // first coded output) — until then there are NO parameter sets to send.
-                // This races a fresh BS-lane enable: WsH264Client connects fast and its
+                // This races a fresh stream start: a client connects fast and its
                 // onOpen fires "keyframe" within milliseconds, often BEFORE the just-
-                // started bsEncoder dequeues its first frame. Silently dropping the
-                // re-send here is the toggle-ON black screen — the per-client re-deliver
+                // started streamEncoder dequeues its first frame. Silently dropping the
+                // re-send here is the connect-then-black screen — the per-client re-deliver
                 // promised by this handler never happens, and once streamHeadersSent
                 // flips true the drainer won't re-emit on its own either, so a client
                 // that asked too early gets nothing and maybeConfigure() blocks on
@@ -267,14 +271,24 @@ public class WebSocketStreamServer extends WebSocketServer
                 // callback the bound port would stay held forever after the last
                 // client disconnects — so self-release here so the port frees within
                 // IDLE_TIMEOUT_MS of the last disconnect. The live-view wsStreamServer
-                // always has a callback and takes the branch above. NOTE: arm/disarm
-                // POLICY for the blind-spot lane (ACC + blindspot.enabled + debug
-                // preview) lives in BlindSpotOverlayService.tick(), which holds the WS
-                // socket the whole time it wants the lane warm — so this idle branch
-                // only fires for the BS lane once the overlay has ALREADY decided to
-                // stop and disconnected, making a port self-release the correct
-                // cleanup, not a policy decision.
-                logger.info("Idle timeout with no shutdown callback - self-releasing port");
+                // always has a callback and takes the branch above.
+                //
+                // FIX BS-DEFECT-D: this server is the LIVE-VIEW H.264 stream lane
+                // (port 8887, fed by streamEncoder). It is NOT the blind-spot lane.
+                // The blind-spot feature now uses the NATIVE SurfaceControl path
+                // (GpuSurveillancePipeline.enableBlindSpot → BsNativeLayer): the GPU
+                // composites the stitched 7/8 view straight onto an on-screen layer,
+                // with NO encoder, NO WebSocket server, and NO app-side decoder. There
+                // is therefore no BS WS server bound on 8889 and no WsH264Client to
+                // reconnect-storm it — the prior doc that attributed this idle branch
+                // to a BlindSpotOverlayService.tick()-driven BS lane is obsolete and
+                // has been corrected to prevent the false "8889 should be listening"
+                // expectation that masked the un-armed native lane.
+                //
+                // Use logger.warn so the self-release is visible on-device (I/D log
+                // levels are filtered out on the head unit); a port that could not
+                // free itself is a recoverability signal, not routine info.
+                logger.warn("Idle timeout with no shutdown callback - self-releasing port " + PORT);
                 try {
                     shutdown();
                 } catch (Exception e) {

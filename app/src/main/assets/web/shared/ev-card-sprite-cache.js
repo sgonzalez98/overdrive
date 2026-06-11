@@ -55,9 +55,6 @@
     // by the wrong bucket and re-painting them stretches the car —
     // bumping the version evicts those poisoned entries. The next live
     // 3D render after this ships writes a clean v3 sprite.
-    // v4: dashboard hero switched three-quarter view to the opposite side.
-    // Old three-quarter sprites would otherwise continue to render from
-    // cache with the previous angle.
     var SPRITE_VERSION = 4;
 
     // Keep the cache from growing unbounded as the user tries paint

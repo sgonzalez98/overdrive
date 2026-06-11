@@ -38,20 +38,16 @@ interface ImuStream {
         fun onStreamState(state: State) {}
     }
 
-    enum class State { ACTIVE, STALLED, UNAVAILABLE }
+    enum class State { ACTIVE, UNAVAILABLE }
 
     /** Register the sink. Must be called before [start]. */
     fun setListener(listener: Listener?)
 
     /**
-     * Begin producing samples at the given rate hint. RoadSense uses
-     * [Rate.FULL] while DRIVING and [Rate.RELAXED] while parked (D-021); the
-     * sidecar maps these to SensorManager delays (FASTEST vs a slow game rate).
+     * Begin producing samples at the given rate hint. RoadSense uses [Rate.FULL]
+     * while DRIVING; the sidecar maps it to a SensorManager delay (FASTEST).
      */
     fun start(rate: Rate = Rate.FULL)
-
-    /** Change rate without tearing down (DRIVING ⇄ RELAXED transitions). */
-    fun setRate(rate: Rate)
 
     /** Stop producing and release the underlying source (ACC OFF → silent, D-021). */
     fun stop()
@@ -59,7 +55,5 @@ interface ImuStream {
     enum class Rate {
         /** ~100 Hz (SENSOR_DELAY_FASTEST) — driving, full detection. */
         FULL,
-        /** Slow (~5–10 Hz) — parked/relaxed; keep warm without spending. */
-        RELAXED,
     }
 }

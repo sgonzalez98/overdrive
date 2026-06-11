@@ -160,24 +160,16 @@ class EventDetector(
     private var lastEmitValid = false
 
     // ---- Diagnostics ----------------------------------------------------------
-    private var samplesSeen = 0L
     // Last sample timestamp seen, for the monotonic / gap guard. NOT cleared by the
     // in-stream guard (it sets the new baseline); cleared by full reset().
     private var lastTMs = 0L
     private var candidatesEmitted = 0L
-
-    /** Total samples fed in. Diagnostics only. */
-    val totalSamples: Long get() = samplesSeen
 
     /** Total candidates emitted. Diagnostics only. */
     val totalCandidates: Long get() = candidatesEmitted
 
     /** True while accumulating a (not-yet-completed) event. Diagnostics only. */
     val inEvent: Boolean get() = active
-
-    /** Current speed-aware threshold for the most recent speed. Diagnostics only. */
-    var lastThreshold: Float = thresholdBase
-        private set
 
     /**
      * Feed one vertical sample. Returns a [DetectionCandidate] at the instant an
@@ -187,8 +179,6 @@ class EventDetector(
      * Hot path: no allocation except the returned candidate on a completing event.
      */
     fun onSample(s: VerticalSample): DetectionCandidate? {
-        samplesSeen++
-
         // Time-jump / sensor-gap guard (audit detection #3): a non-monotonic or
         // large-gap timestamp makes durations go negative (MAX_EVENT_MS never trips,
         // event hangs) and produces garbage candidate timings. On a backward jump or
@@ -211,19 +201,26 @@ class EventDetector(
 
         val speedKmh = s.speedMps * MPS_TO_KMH
 
-        // Speed gate (parking-lot noise). Below the floor we never detect; also
-        // abandon any half-built event — if we've slowed to a crawl mid-window
-        // it isn't a road-hazard signature worth completing.
+        // Near-stationary guard (NOT a hazard speed floor). Session-34 directive + data:
+        // the biggest speedbreakers/potholes are crossed SLOWLY, so a real speed FLOOR
+        // drops exactly the hazards that matter most. Proven on-device: 12 confirmed-real
+        // hazards in the recorded drive had raw-window speed <6 km/h (several at 0–2 km/h),
+        // yet the OLD minSpeedKmh=6 gate would have discarded them. So minSpeedKmh is now a
+        // tiny ~1 km/h NUMERICAL guard only — it keeps the speed-aware threshold defined and
+        // skips a dead-stop idle vibration (bus speed ~0), nothing more. The actual
+        // parking-lot/reverse/door-slam artefacts the old floor incidentally caught are
+        // rejected by CONTEXT in RejectionFilter (Rule 4 not_forward_gear) + the
+        // speed-aware threshold's own noise headroom, not by a speed cap. (Sub-1 km/h
+        // behaviour is physics-reasoned; a fresh marked crawl drive should re-confirm.)
         if (speedKmh < minSpeedKmh) {
             if (active) resetEvent()
             // Let the re-arm / pair memory keep ageing so we don't get stuck
-            // disarmed; treat a slow stretch as quiet.
-            ageRearmAndPairMemory(s.tMs, settled = true)
+            // disarmed; treat a near-stop as quiet.
+            ageRearmAndPairMemory(s.tMs)
             return null
         }
 
         val threshold = thresholdBase + thresholdSpeedSlope * speedKmh
-        lastThreshold = threshold
 
         val mag = abs(s.aVert)
         val settled = mag < (NOISE_FLOOR + NOISE_BAND_MARGIN)
@@ -246,11 +243,11 @@ class EventDetector(
             // pair-memory alive so a genuine rear-axle pulse can still be matched
             // even though we suppress re-emitting. (We simply don't emit it; the
             // first-axle candidate already carries axlePairGapMs once we see it.)
-            ageRearmAndPairMemory(s.tMs, settled)
+            ageRearmAndPairMemory(s.tMs)
             return null
         }
 
-        ageRearmAndPairMemory(s.tMs, settled)
+        ageRearmAndPairMemory(s.tMs)
 
         if (!active) {
             // ---- Idle: look for the opening threshold crossing ----------------
@@ -515,10 +512,9 @@ class EventDetector(
     /**
      * Age out the axle-pair memory once it's too old to plausibly be the same
      * road feature's other axle (slowest credible speed ⇒ longest gap). Keeps the
-     * pair check from matching an unrelated bump much later. `settled` is unused
-     * for memory ageing today but kept for symmetry / future hysteresis tuning.
+     * pair check from matching an unrelated bump much later.
      */
-    private fun ageRearmAndPairMemory(nowMs: Long, @Suppress("UNUSED_PARAMETER") settled: Boolean) {
+    private fun ageRearmAndPairMemory(nowMs: Long) {
         if (lastEmitValid && nowMs - lastEmitPeakMs > MAX_AXLE_PAIR_GAP_MS) {
             lastEmitValid = false
         }
@@ -533,9 +529,7 @@ class EventDetector(
         lastEmitValid = false
         lastEmitPeakMs = 0L
         lastEmitDipLeading = false
-        samplesSeen = 0L
         candidatesEmitted = 0L
-        lastThreshold = thresholdBase
         lastTMs = 0L
     }
 
@@ -573,15 +567,18 @@ class EventDetector(
         const val DEFAULT_THRESHOLD_SPEED_SLOPE = 0.015f
 
         /**
-         * Parking-lot / crawl gate: below this speed we don't open events. DATA-FIT
-         * (Session 32): the OLD 10 km/h floor censored careful slow crossings — the detected-
-         * event speed histogram floored hard at 2.78 m/s with a pile-up at 3.06–3.33, the
-         * classic signature of a hard gate eating the slow tail (a driver crawling a big
-         * breaker at 7–9 km/h was silently dropped + the half-built event reset). Lowered to
-         * 6 km/h to recover those, still above true parking-lot manoeuvring (<~5 km/h door-
-         * slam / shuffle noise). The speed-normalization clamp (MIN_NORM_SPEED_MPS=2.0) keeps
-         * severity sane down here. PROVISIONAL. */
-        const val DEFAULT_MIN_SPEED_KMH = 6.0f
+         * Near-stationary NUMERICAL guard — NOT a hazard speed floor (Session 34, per the
+         * user's no-speed-cap directive). History: 10 km/h (orig) → 6 (Session 32, still a
+         * floor) → 1.0 (now, effectively removed). On-device proof it had to go: 12
+         * confirmed-real hazards in the recorded drive had raw-window speed <6 km/h (several
+         * 0–2), exactly the "slow right down to cross a big breaker/pothole" case — the floor
+         * was discarding the most important hazards. At 1 km/h this only skips a dead-stop
+         * idle vibration and keeps the threshold defined; the parking-lot/reverse artefacts
+         * the floor used to mask are caught by RejectionFilter Rule 4 (not_forward_gear, a
+         * CONTEXT gate) instead. The speed-norm clamp (SeverityClassifier MIN_NORM_SPEED_MPS
+         * =2.0) keeps crawl-severity sane (flat-clamped, no blow-up). Sub-1 km/h is physics-
+         * reasoned (the data is censored at 6); re-confirm on a fresh marked crawl drive. */
+        const val DEFAULT_MIN_SPEED_KMH = 1.0f
 
         /** Assumed wheelbase (m) for the axle-pair check. Conservative ~2.7 m so
          *  the gap window straddles typical sedans (BYD Seal ≈ 2.9 m). */

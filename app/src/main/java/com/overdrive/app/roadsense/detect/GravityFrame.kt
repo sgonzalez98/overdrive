@@ -40,9 +40,6 @@ class GravityFrame(
     private var gz = 0f
     private var seeded = false
 
-    /** Samples folded in so far — used to report warm-up readiness. */
-    private var count = 0L
-
     /**
      * Horizontal-residual magnitude (m/s²) of the most recent [update] sample —
      * the component of acceleration ORTHOGONAL to gravity. Gravity lives entirely
@@ -104,17 +101,10 @@ class GravityFrame(
     var lateralResidual: Float = 0f
         private set
 
-    /** Latest gravity magnitude (≈ 9.8 once seeded). Exposed for diagnostics. */
+    /** Latest gravity magnitude (≈ 9.8 once seeded). Used internally by the
+     *  gravity-projection helpers ([alongGravity], [pitchRate]). */
     val gravityMagnitude: Float
         get() = sqrt(gx * gx + gy * gy + gz * gz)
-
-    /**
-     * True once the gravity estimate has settled enough that `a_vert` is
-     * meaningful. Before this, the detector should map/observe but treat
-     * confidence as low (consistent with "map from drive one", D-015).
-     */
-    val isWarm: Boolean
-        get() = count >= WARMUP_SAMPLES
 
     /**
      * Fold one accelerometer sample in and return the vertical residual.
@@ -128,13 +118,11 @@ class GravityFrame(
             // second ramping up from zero (which would emit a huge bogus a_vert).
             gx = ax; gy = ay; gz = az
             seeded = true
-            count = 1
             return 0f
         }
         gx += alpha * (ax - gx)
         gy += alpha * (ay - gy)
         gz += alpha * (az - gz)
-        count++
 
         val mag = sqrt(gx * gx + gy * gy + gz * gz)
         if (mag < 1e-3f) {
@@ -204,13 +192,6 @@ class GravityFrame(
         return dot - mag
     }
 
-    /** Current gravity unit vector (device frame). For diagnostics / direction work. */
-    fun gravityUnit(): FloatArray {
-        val mag = gravityMagnitude
-        return if (mag < 1e-3f) floatArrayOf(0f, 0f, 1f)
-        else floatArrayOf(gx / mag, gy / mag, gz / mag)
-    }
-
     /**
      * Signed component of the vector (x,y,z) ALONG the measured gravity unit vector
      * (i.e. about/along the true vertical), in the same units as the input.
@@ -275,16 +256,8 @@ class GravityFrame(
         return x * effLx + y * effLy + z * effLz
     }
 
-    /** Tilt of the device's Z axis off true vertical, in degrees (diagnostics). */
-    fun tiltDegrees(): Float {
-        val mag = gravityMagnitude
-        if (mag < 1e-3f) return 0f
-        val cos = (gz / mag).coerceIn(-1f, 1f)
-        return Math.toDegrees(kotlin.math.acos(cos).toDouble()).toFloat()
-    }
-
     fun reset() {
-        gx = 0f; gy = 0f; gz = 0f; seeded = false; count = 0; horizontalResidual = 0f
+        gx = 0f; gy = 0f; gz = 0f; seeded = false; horizontalResidual = 0f
         hax = 0f; hay = 0f; haz = 0f
         longitudinalResidual = 0f; lateralResidual = 0f
         latLx = 0f; latLy = 0f; latLz = 0f; longAxisLatched = false
@@ -322,8 +295,5 @@ class GravityFrame(
          *  (rigid mount ⇒ fore-aft is constant) so the pitch vote survives coasting to
          *  the breaker. ~0.6 m/s² ≈ a light-but-deliberate deceleration. PROVISIONAL. */
         const val LONG_AXIS_LATCH_MAG = 0.6f
-
-        /** ~2 s at 100 Hz before we call the gravity estimate "warm". */
-        const val WARMUP_SAMPLES = 200L
     }
 }

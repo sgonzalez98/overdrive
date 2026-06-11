@@ -189,6 +189,25 @@ public class PanoramicCameraGpu {
     private Image windshieldBoundImage;
     private HardwareBuffer windshieldBoundHwBuffer;
     private long windshieldFrameCount = 0;
+    // GL-thread-confined: wall-clock ms of the most recent successful
+    // windshield frame bind. Used by the render loop to detect a STALLED
+    // windshield feed — once frames stop arriving (AVMCamera handle
+    // contention from pano + OEM-dashcam + windshield all competing, a HAL
+    // pause, or a silent open that never delivers), windshieldFrameReady
+    // stays latched true and drawFrame would composite the last bound
+    // HardwareBuffer forever → the "stuck on a static frame" symptom in the
+    // dashcam recording layout. On stall we drop windshieldFrameReady (so the
+    // recorder falls back to the live 360 front in the top band — never a
+    // frozen image) and schedule one throttled reopen attempt.
+    private long windshieldLastFrameMs = 0;
+    private long windshieldLastReopenMs = 0;
+    // No new frame for this long ⇒ treat the windshield as stalled. Matches
+    // the main-camera FRAME_STALL_THRESHOLD_MS (4s) so a transient HAL/IO
+    // hiccup doesn't flap the top band between windshield and 360 front.
+    private static final long WINDSHIELD_STALL_THRESHOLD_MS = 4000;
+    // Don't hammer close+reopen: a single-client HAL that refuses the second
+    // client would otherwise spin. One attempt per this interval.
+    private static final long WINDSHIELD_REOPEN_MIN_INTERVAL_MS = 10_000;
     // Dedicated handler for ImageReader.OnImageAvailableListener. MUST be
     // separate from glHandler — renderLoop blocks the GL thread on
     // frameSync.wait(), which would starve the listener if it ran on the
@@ -247,6 +266,7 @@ public class PanoramicCameraGpu {
     // stream's view mode, quality, or WS. Null until setBsStreamingComponents().
     private volatile com.overdrive.app.streaming.GpuStreamScaler bsStreamScaler;
     private volatile HardwareEventRecorderGpu bsStreamEncoder;
+    private volatile boolean bsLayerVisible = false;
     private GpuDownscaler downscaler;
     /** Lazy-allocated full-resolution sampler for the camera-mapping dialog.
      *  Lives on the GL handler; allocates GL resources on first use. */
@@ -1445,6 +1465,9 @@ public class PanoramicCameraGpu {
             windshieldStarted = true;
             windshieldFrameReady = false;
             windshieldFrameCount = 0;
+            // Seed the stall clock at start so the first-frame grace window is
+            // measured from now, not from a stale prior-session timestamp.
+            windshieldLastFrameMs = System.currentTimeMillis();
             logger.info("Windshield camera started (id=" + windshieldCameraId + ")");
         } catch (Throwable t) {
             logger.warn("Windshield camera unavailable; dashcam layout will fall back to 360 front: "
@@ -2293,6 +2316,7 @@ public class PanoramicCameraGpu {
             windshieldBoundHwBuffer = hwBuffer;
             windshieldFrameReady = true;
             windshieldFrameCount++;
+            windshieldLastFrameMs = System.currentTimeMillis();
             transferredOwnership = true;
             return true;
         } catch (Throwable t) {
@@ -2570,23 +2594,56 @@ public class PanoramicCameraGpu {
                 // camera cadence, eliminating the rubber-banding/snapback the
                 // EMA introduced at 15+ fps.
                 updateWindshieldCameraOnGlThread();
-                // Windshield (dashcam top band): drain the ImageReader EVERY
-                // recorder frame, exactly like the main-camera ImageReader path
-                // (consumeLatestImageAndBind above is called unconditionally,
-                // never gated on imagePending). The BYD AVM HAL is finicky about
-                // draining — see the currentBoundImage field comment: the
-                // consumer must keep pulling the latest gralloc slot or the
-                // producer side stalls. The old `&& windshieldPending` gate let a
-                // single dropped OnImageAvailable wakeup (the listener can set the
-                // flag in the window between consume() and the reset) leave the
-                // queue undrained; the windshield producer then stalled and the
-                // top band froze on its first bound frame — the "only the first
-                // frame" bug. acquireLatestImage() returns null when nothing new
-                // arrived, so this is a cheap no-op that keeps the last frame
-                // bound on idle iterations.
+                // Drain the windshield ImageReader EVERY recorder frame, not
+                // only when windshieldPending is set. The pending flag is a
+                // lost-update race: the GL thread reads pending==true, drains,
+                // then clears it — but if the OnImageAvailable listener (its
+                // own thread) fires a NEW frame between the drain and the
+                // clear, our windshieldPending=false clobbers that set. The
+                // frame is never drained; with maxImages=4 the gralloc slots
+                // fill, the BYD AVM HAL producer stalls, no further callbacks
+                // fire, and the top band freezes — classically on the first
+                // frame. acquireLatestImage() returns null when nothing new
+                // arrived, so the unconditional drain is a cheap no-op that
+                // just keeps the last frame bound on idle iterations.
+                // (Ported from Overdrive-release PR #97.) The stall guard
+                // below remains as a safety net for genuine frame-stoppage
+                // (handle contention / HAL pause) that draining can't prevent.
                 if (windshieldStarted) {
                     consumeLatestWindshieldImageAndBind();
                     windshieldPending = false;
+                }
+                // Windshield stall guard. If the feed has gone quiet past the
+                // threshold while still "started", the bound HardwareBuffer is
+                // stale — keep drawing it and the dashcam top band freezes on
+                // one frame. Drop windshieldFrameReady so drawFrame composites
+                // the LIVE 360 front instead (never a frozen image), and make
+                // one throttled close+reopen attempt to recover the feed.
+                // All windshield fields are GL-thread-confined, so no lock.
+                if (windshieldStarted && windshieldFrameReady
+                        && windshieldLastFrameMs > 0
+                        && (System.currentTimeMillis() - windshieldLastFrameMs)
+                            > WINDSHIELD_STALL_THRESHOLD_MS) {
+                    long stalledMs = System.currentTimeMillis() - windshieldLastFrameMs;
+                    logger.warn("Windshield feed stalled " + stalledMs
+                        + "ms (frames=" + windshieldFrameCount
+                        + ") — falling back to 360 front + scheduling reopen");
+                    // Stop trusting the stale frame immediately.
+                    windshieldFrameReady = false;
+                    // Throttled reopen: close + restart on this (GL) thread.
+                    long nowReopen = System.currentTimeMillis();
+                    if (nowReopen - windshieldLastReopenMs > WINDSHIELD_REOPEN_MIN_INTERVAL_MS) {
+                        windshieldLastReopenMs = nowReopen;
+                        try {
+                            stopWindshieldCameraOnGlThread();
+                            // windshieldEnabled is still true; updateWindshield
+                            // on the next iteration will re-run start. Clearing
+                            // the open-failed latch lets that retry proceed.
+                            windshieldOpenFailed = false;
+                        } catch (Throwable t) {
+                            logger.warn("Windshield reopen (stop phase) failed: " + t.getMessage());
+                        }
+                    }
                 }
                 localRecorder.drawFrame(cameraTextureId, windshieldTextureId,
                     windshieldStarted && windshieldFrameReady, currentFrameTimestampNs);
@@ -2667,9 +2724,19 @@ public class PanoramicCameraGpu {
             // present; we only drain when an encoder is present (legacy/none now).
             // Local snapshot so a concurrent disableBlindSpot() nulling the field
             // can't NPE mid-frame.
+            //
+            // VISIBILITY GATE: only render when the SurfaceControl layer is actually
+            // shown (turn signal active / debug-preview). While the layer is hidden,
+            // rendering is pure GPU waste — eglSwapBuffers still rasterizes 1280×960
+            // into the SC surface, SurfaceFlinger just discards the buffer. On the
+            // Adreno 610 single shader core this doubles GPU load (recording mosaic +
+            // blind-spot mosaic) and pins the clock at 820 MHz. Gating on visibility
+            // reduces the "enabled but idle" cost to zero; the very next frame after
+            // the turn trigger sets bsLayerVisible=true picks up rendering (~66ms
+            // worst-case latency, imperceptible).
             com.overdrive.app.streaming.GpuStreamScaler localBsScaler = bsStreamScaler;
             HardwareEventRecorderGpu localBsEncoder = bsStreamEncoder;
-            if (localBsScaler != null) {
+            if (localBsScaler != null && bsLayerVisible) {
                 if (USE_ESCO_SURFACE_TEXTURE_PATH && localBsScaler == bsStreamScaler) {
                     localBsScaler.setTextureMatrix(currentTexMatrix);
                 }
@@ -4066,6 +4133,18 @@ public class PanoramicCameraGpu {
 
     /** @return the live blind-spot scaler, or null if the BS lane isn't active. */
     public com.overdrive.app.streaming.GpuStreamScaler getBsStreamScaler() { return bsStreamScaler; }
+
+    /** Called by GpuSurveillancePipeline when the blind-spot SurfaceControl layer
+     *  transitions between shown (turn active / debug-preview) and hidden. PASS 1C
+     *  uses this to skip rendering while the layer is invisible, saving a full
+     *  1280×960 GPU raster pass per frame. */
+    public void setBsLayerVisible(boolean visible) {
+        this.bsLayerVisible = visible;
+    }
+
+    /** Whether PASS 1C is currently drawing the BS lane (the render gate). Used by
+     *  the pipeline to detect a gate/show desync and re-arm. */
+    public boolean isBsLayerVisible() { return bsLayerVisible; }
 
     /**
      * Enables/disables the optional direct windshield camera used by the

@@ -24,9 +24,6 @@ class LocationSource(
     private val monitor: () -> GpsMonitor = { GpsMonitor.getInstance() },
 ) {
 
-    /** Whether GPS is live (sidecar feeding the monitor). */
-    fun isRunning(): Boolean = monitor().isRunning
-
     /**
      * Latest pose, or null if we have no usable fix yet. A 0/0 location or an
      * absurdly stale fix returns null rather than a bogus Pose, so the pipeline

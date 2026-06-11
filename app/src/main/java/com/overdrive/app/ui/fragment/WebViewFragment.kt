@@ -868,7 +868,20 @@ class WebViewFragment : Fragment() {
                     try {
                         startActivity(android.content.Intent(
                             android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url)))
-                    } catch (_: Exception) {}
+                    } catch (_: Exception) {
+                        // No browser/ACTION_VIEW handler on this head unit (common on
+                        // locked-down automotive ROMs). Don't fail silently — copy the
+                        // URL to the clipboard and tell the user, so a BYOK signup link
+                        // is still reachable (paste it on a phone).
+                        try {
+                            val cm = requireContext().getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                                as android.content.ClipboardManager
+                            cm.setPrimaryClip(android.content.ClipData.newPlainText("URL", url))
+                            android.widget.Toast.makeText(requireContext(),
+                                getString(R.string.url_copied_no_browser, url),
+                                android.widget.Toast.LENGTH_LONG).show()
+                        } catch (_: Exception) {}
+                    }
                     return true
                 }
             }
@@ -999,6 +1012,34 @@ class WebViewFragment : Fragment() {
             } catch (e: Exception) {
                 android.util.Log.w("WebViewFragment", "syncBlindSpotOverlay bridge failed: ${e.message}")
                 return "error"
+            }
+        }
+
+        /**
+         * Launch the native RoadSense hazard map (GPU MapLibre Activity). Called
+         * from the RoadSense web tab's "View Hazard Map" action. The map can't be
+         * a WebView page — MapLibre GL needs WebGL2/modern Chrome the head-unit
+         * WebView (Chrome 58) lacks — so it's a dedicated native Activity. Posted
+         * to the UI thread because JS bridge calls arrive on a WebView worker
+         * thread, and startActivity must run on the main looper.
+         */
+        @android.webkit.JavascriptInterface
+        fun openHazardMap(): String {
+            return try {
+                val act = activity ?: return "no_context"
+                act.runOnUiThread {
+                    try {
+                        act.startActivity(
+                            android.content.Intent(act, com.overdrive.app.navmap.RoadSenseMapActivity::class.java)
+                        )
+                    } catch (e: Exception) {
+                        android.util.Log.w("WebViewFragment", "openHazardMap launch failed: ${e.message}")
+                    }
+                }
+                "ok"
+            } catch (e: Exception) {
+                android.util.Log.w("WebViewFragment", "openHazardMap bridge failed: ${e.message}")
+                "error"
             }
         }
 

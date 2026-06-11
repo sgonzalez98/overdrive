@@ -40,9 +40,6 @@ class VehicleDataSource(
     private val collector: () -> BydDataCollector = { BydDataCollector.getInstance() },
 ) {
 
-    /** True once the collector exists and has been initialized by the daemon. */
-    fun isReady(): Boolean = collector().isInitialized
-
     /** The underlying collector if initialized, else null — for the controller to
      *  start/stop the scoped fast-dynamics poll (R-PERF-4). Returns null pre-init so
      *  the controller's start/stop calls are safe no-ops during daemon boot. */

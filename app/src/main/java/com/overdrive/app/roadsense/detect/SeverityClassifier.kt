@@ -6,7 +6,9 @@ import kotlin.math.sqrt
 
 /**
  * Turns a raw [DetectionCandidate] into a final [Assessment]: a speed- and
- * vehicle-normalized severity bucket, a hazard type, and a 0..1 confidence.
+ * vehicle-normalized severity bucket and a 0..1 confidence. (TYPE — breaker vs
+ * pothole — is decided by [HazardClassifier], not here; D-040. The [Assessment.type]
+ * field is left UNKNOWN and overwritten with the fusion verdict downstream.)
  *
  * Why this exists (R-DET-2, R-DET-4, R-EXT-1, R-EXT-3, D-005, D-011, D-015):
  * the [EventDetector] hands us the *raw* morphology of a vertical event. But the
@@ -24,10 +26,8 @@ import kotlin.math.sqrt
  *       — we CONSUME its scalar; we never learn it here, R-EXT-1),
  *   (3) bucket the resulting `normalizedPeak` via the D-011 thresholds.
  *
- * Then, separately, we decide breaker-vs-pothole from event *shape* (03-ARCH
- * "Severity buckets" type rule — type is an orthogonal axis from severity), and
- * compute a confidence (R-EXT-3) that starts LOW when the vehicle calibration is
- * immature (D-015) and is penalized by poor GPS accuracy.
+ * We also compute a confidence (R-EXT-3) that starts LOW when the vehicle
+ * calibration is immature (D-015) and is penalized by poor GPS accuracy.
  *
  * HONESTY NOTE: almost every number in here is a first-principles GUESS, not a
  * fit. The thresholds come straight from the provisional D-011 table; the
@@ -124,14 +124,16 @@ class SeverityClassifier {
         // ---- 3. Bucket → Severity (D-011 thresholds) ----
         val severity = bucket(normalizedPeak)
 
-        // ---- 4. Decide HazardType from shape (03-ARCH type rule) ----
-        val type = classifyType(candidate)
-
-        // ---- 5. Confidence 0..1 (R-EXT-3, D-015) ----
+        // ---- 4. Confidence 0..1 (R-EXT-3, D-015) ----
         val confidence = confidence(candidate, lonePeak, calibrationMaturity, gpsAccuracyM)
 
+        // TYPE is no longer decided here (D-040). The HazardClassifier's pitch-couplet
+        // fusion is the authoritative breaker/pothole call; finalizeClassification
+        // overwrites this field with its verdict (`sev.copy(type = v.type)`) before the
+        // Assessment is ever stored or labelled. We emit UNKNOWN as a neutral placeholder
+        // so the field stays populated for that copy()/label path.
         return Assessment(
-            type = type,
+            type = HazardType.UNKNOWN,
             severity = severity,
             confidence = confidence,
             normalizedPeak = normalizedPeak,
@@ -149,75 +151,6 @@ class SeverityClassifier {
         normalizedPeak >= SEVERE_FLOOR -> Severity.SEVERE
         normalizedPeak >= MODERATE_FLOOR -> Severity.MODERATE
         else -> Severity.MINOR
-    }
-
-    /**
-     * Breaker vs pothole vs unknown, from morphology only (orthogonal to
-     * severity, 03-ARCH). The rule of thumb from the architecture doc:
-     *   - POTHOLE: dip-leading (down-first), SHARP rise, often one-sided.
-     *   - BREAKER: crest-leading / symmetric, full-width (both wheels/axles).
-     *
-     * Evidence we weigh (each is a noisy hint, so we SUM signed votes and only
-     * commit if the margin clears a confidence band — otherwise UNKNOWN):
-     *   - dipLeading              → pothole vote   / breaker vote
-     *   - riseTimeMs < threshold  → sharp ⇒ pothole; slow ⇒ breaker
-     *   - lateralAsymmetry        → one-sided ⇒ pothole; symmetric ⇒ breaker
-     *   - axlePairGapMs present   → STRONG breaker / full-width vote (a clean
-     *                               same-shape second pulse at Δt=wheelbase/v is
-     *                               a transverse, full-width feature — 03-ARCH).
-     *
-     * HONESTY: the vote weights are hand-tuned priors. The axle-pair signal is
-     * the one I'd trust most (it's geometric, not amplitude-based); dipLeading
-     * and riseTime are the classic textbook discriminators but are noisy on a
-     * tilt-corrected single-IMU channel. All PROVISIONAL.
-     */
-    private fun classifyType(c: DetectionCandidate): HazardType {
-        var potholeVote = 0f
-
-        // Dip-leading: the defining pothole signature (down into the hole first).
-        potholeVote += if (c.dipLeading) DIP_LEADING_VOTE else -DIP_LEADING_VOTE
-
-        // Rise time: potholes have a sharp edge (fast rise), breakers a ramp.
-        potholeVote += if (c.riseTimeMs in 0 until POTHOLE_RISE_MS) RISE_TIME_VOTE
-        else -RISE_TIME_VOTE
-
-        // Lateral asymmetry: one-sided ⇒ single-wheel pothole; symmetric ⇒
-        // full-width breaker. Centered/scaled around the asymmetry midpoint. ONLY
-        // when measured — otherwise a hardcoded 0 adds a constant −0.6 BREAKER bias
-        // to every event (audit detection #1). Until the horizontal stage lands,
-        // type is decided by dipLeading + riseTime + axle-pair alone.
-        if (c.asymmetryValid) {
-            potholeVote += (c.lateralAsymmetry - ASYMMETRY_MIDPOINT) * ASYMMETRY_VOTE_SCALE
-        }
-
-        // Axle-pair: a clean second same-shape pulse ⇒ transverse full-width
-        // feature ⇒ leans BREAKER. This is a strong, geometric vote against
-        // pothole.
-        if (c.axlePairGapMs != null) {
-            potholeVote -= AXLE_PAIR_VOTE
-        }
-
-        // Pitch-vs-roll gyro signature (the user's "up-down movement" cue). A transverse
-        // breaker taken head-on PITCHES the body (nose up→over→down) with little roll; a
-        // one-sided pothole ROLLS the body (one corner drops) with little pitch. So the
-        // signed dominance pitch−roll is a geometric, amplitude-of-rotation cue that is
-        // independent of the vertical-accel morphology AND more speed-robust than the
-        // accel peak — exactly where the accel path is weakest (slow crossings). Only
-        // when the axes were actually resolvable (pitchValid; longitudinal axis
-        // established, e.g. after decelerating for the breaker) — else it's "not
-        // measured" and contributes nothing, like the asymmetry vote. Normalize the
-        // dominance by a reference rotation rate and clamp so one big number can't swamp
-        // the trusted dipLeading/axle votes; scale keeps it a strong-but-bounded cue.
-        if (c.pitchValid) {
-            val rotDominance = (c.peakPitchRate - c.peakRollRate) / PITCH_REF_RPS
-            potholeVote -= rotDominance.coerceIn(-1f, 1f) * PITCH_VOTE_SCALE
-        }
-
-        return when {
-            potholeVote >= TYPE_DECISION_MARGIN -> HazardType.POTHOLE
-            potholeVote <= -TYPE_DECISION_MARGIN -> HazardType.BREAKER
-            else -> HazardType.UNKNOWN // ambiguous — don't guess (03-ARCH)
-        }
     }
 
     /**
@@ -359,73 +292,10 @@ class SeverityClassifier {
         // (Minor floor / detection floor of 1.0 lives in EventDetector — anything
         //  reaching us is already above it, so we don't re-gate on it here.)
 
-        // ============================================================
-        //  Type classification votes (03-ARCH type rule) — PROVISIONAL
-        // ============================================================
-        /** Rise time below this ⇒ "sharp leading edge" ⇒ pothole. DATA-FIT (Session 32,
-         *  97 on-device labels): rise_ms is the SINGLE strongest, fully non-circular
-         *  type discriminator — potholes 38/38 had rise < 50 ms (median 8.5 ms), breakers
-         *  median 83 ms (14/16 ≥ 50 ms). The 50 ms split is confirmed near-perfect; the
-         *  rare miss is a low-amplitude breaker, not a threshold error. */
-        const val POTHOLE_RISE_MS = 50
-
-        /** Vote magnitude for the dip-leading signal. DEMOTED 1.0→0.6 (Session 32 fit):
-         *  dip-leading (which lobe dominates / which came first) is the NOISIER cue on a
-         *  single tilt-corrected IMU channel — on the 97-label set it disagreed with the
-         *  rise-time verdict on several real breakers (strong-rebound / load-dominant
-         *  breakers read dip-leading=true). Making it a SUPPORTING vote under rise-time
-         *  (below) fixes those without hurting the clean cases. */
-        const val DIP_LEADING_VOTE = 0.6f
-
-        /** Vote magnitude for the rise-time sharpness signal. PROMOTED 0.8→1.2 to be the
-         *  LEAD type vote (Session 32 fit): with rise leading + dip supporting, type
-         *  coverage on ground-truth breaker/pothole rows rose 94%→100% (the UNKNOWN
-         *  "punt" rate that drove the user's "too many UNKNOWN" complaint dropped to 0)
-         *  while commit-accuracy stayed ~96–98%. On the non-circular user-corrected
-         *  subset this converted 3 wrongly-UNKNOWN breakers into correct commits. */
-        const val RISE_TIME_VOTE = 1.2f
-
-        /** PROVISIONAL. lateralAsymmetry is the ratio horizPeak/(horizPeak+vertPeak)
-         *  (EventDetector). It is NOT a 50/50 split: on a real one-sided pothole the
-         *  body-roll lateral kick is a FRACTION of the vertical jolt (F-007: vert peak
-         *  ~3.5 m/s², horizontal much smaller), so the ratio sits well below 0.5 even
-         *  when fully one-sided. A 0.5 pivot is physically unreachable and made the
-         *  signed vote a constant breaker bias for every event — the exact bias the
-         *  asymmetryValid gate exists to avoid (audit detection #5). Pivot at the
-         *  measured median one-sidedness (~0.25) so the vote is centred on the real
-         *  distribution, not an idealized half. PROVISIONAL — fit on the labeled set. */
-        const val ASYMMETRY_MIDPOINT = 0.25f
-
-        /** PROVISIONAL. Scales the centered asymmetry into a vote. Kept SMALL until
-         *  the asymmetry stage is calibrated against the labeled test set (audit
-         *  detection #5): the ratio is still a rough, just-landed signal, so it must
-         *  not dominate the trusted dipLeading + riseTime + axle-pair votes. At a
-         *  fully one-sided ratio of ~0.5 (≈ horizontal == vertical) it contributes
-         *  ~+0.15 toward pothole — a nudge, not a deciding vote. */
-        const val ASYMMETRY_VOTE_SCALE = 0.6f
-
-        /** PROVISIONAL. Strong vote that a detected axle-pair ⇒ full-width
-         *  breaker (geometric, trusted more than the amplitude-based hints). */
-        const val AXLE_PAIR_VOTE = 1.0f
-
-        /** PROVISIONAL. Reference body-rotation rate (rad/s) that normalizes the
-         *  pitch−roll dominance into a 0..1-ish scale before the vote. F-006 saw a hard
-         *  STEERING turn ramp to ~0.35 rad/s; a breaker's pitch transient is briefer and
-         *  smaller, so ~0.15 rad/s is a reasonable "clearly pitching" reference. Tune
-         *  against raw IMU once the recorder lands. */
-        const val PITCH_REF_RPS = 0.15f
-
-        /** PROVISIONAL. Vote magnitude for the pitch-vs-roll gyro signature. Sized like a
-         *  primary geometric cue (between the amplitude hints and the axle-pair vote): at
-         *  full pitch-dominance it contributes −0.8 toward BREAKER, enough to clear the
-         *  ±0.6 decision margin on its own when the accel hints are ambiguous, but not so
-         *  large it overrides a clear dip-leading + axle-pair pothole reading. */
-        const val PITCH_VOTE_SCALE = 0.8f
-
-        /** PROVISIONAL. Required |vote| margin to commit to a type; inside the
-         *  band we stay UNKNOWN rather than guess (03-ARCH "ambiguous ⇒ UNKNOWN").
-         *  Higher = more conservative (more UNKNOWNs, fewer wrong calls). */
-        const val TYPE_DECISION_MARGIN = 0.6f
+        // (Type-vote constants removed with classifyType — D-040: HazardClassifier's
+        //  pitch-couplet fusion is now the authoritative breaker/pothole call, so the
+        //  amplitude-based type votes here were dead. POTHOLE_RISE_MS / the rise-time
+        //  discriminator live on in HazardClassifier.)
 
         // ============================================================
         //  Confidence blend (R-EXT-3, D-015) — PROVISIONAL

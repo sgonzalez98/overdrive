@@ -45,12 +45,6 @@ class TileCursor {
         } catch (_: Throwable) { /* missing/corrupt cursors → start fresh */ }
     }
 
-    /** Newest updated_ms already pulled for [tile] (0 = never synced). */
-    fun since(tile: Long): Long = synchronized(lock) {
-        ensureLoaded()
-        cursors[tile] ?: 0L
-    }
-
     /** Snapshot of cursors for the requested tiles, for a download call. */
     fun sinceMap(tiles: List<Long>): Map<Long, Long> = synchronized(lock) {
         ensureLoaded()

@@ -37,20 +37,34 @@ public class LocationSidecarService extends Service implements LocationListener 
     
     private LocationManager locationManager;
     private android.os.Handler handler;
+    // Dedicated background looper for the GPS callback + periodic sender + file
+    // write. Previously the handler was built on the MAIN looper and the 4-arg
+    // requestLocationUpdates delivered onLocationChanged on main, so the per-fix
+    // Log.d + synchronous saveToLocalCache() (JSON build + FileWriter + renameTo)
+    // ran on the UI thread at ~1-2Hz — measurable jank contribution on the
+    // foreground head unit. Moving the looper off-main keeps the UI thread free.
+    private android.os.HandlerThread workerThread;
     private Runnable periodicSender;
-    private double latitude = 0.0;
-    private double longitude = 0.0;
-    private float speed = 0.0f;
-    private float heading = 0.0f;
-    private float accuracy = 0.0f;
-    private double altitude = 0.0;
+    // Cross-thread now (GPS-IPC sender thread reads these) → volatile.
+    private volatile double latitude = 0.0;
+    private volatile double longitude = 0.0;
+    private volatile float speed = 0.0f;
+    private volatile float heading = 0.0f;
+    private volatile float accuracy = 0.0f;
+    private volatile double altitude = 0.0;
     private boolean permissionGranted = false;
 
     @Override
     public void onCreate() {
         super.onCreate();
         Log.i(TAG, "Service created");
-        
+
+        // Background looper for GPS callbacks + sender + file writes (off the UI
+        // thread). Started before anything posts to `handler`.
+        workerThread = new android.os.HandlerThread("location-sidecar");
+        workerThread.start();
+        handler = new android.os.Handler(workerThread.getLooper());
+
         // Create notification channel FIRST
         createNotificationChannel();
         
@@ -84,8 +98,8 @@ public class LocationSidecarService extends Service implements LocationListener 
             Log.e(TAG, "Location permission not granted - service will wait for permission");
             permissionGranted = false;
             
-            // Start a retry loop to check for permissions
-            handler = new android.os.Handler(android.os.Looper.getMainLooper());
+            // Start a retry loop to check for permissions (on the worker looper).
+            if (handler == null) handler = new android.os.Handler(workerThread.getLooper());
             handler.postDelayed(new Runnable() {
                 @Override
                 public void run() {
@@ -125,7 +139,7 @@ public class LocationSidecarService extends Service implements LocationListener 
     
     private void startPeriodicSender() {
         if (handler == null) {
-            handler = new android.os.Handler(android.os.Looper.getMainLooper());
+            handler = new android.os.Handler(workerThread.getLooper());
         }
         
         // FIX #3: Always send GPS data, even if 0,0.
@@ -222,7 +236,8 @@ public class LocationSidecarService extends Service implements LocationListener 
                     LocationManager.GPS_PROVIDER,
                     1000,  // 1 second
                     0.0f,  // 0 meters - always get updates even when stationary
-                    this
+                    this,
+                    workerThread.getLooper()  // deliver off the UI thread
                 );
                 Log.i(TAG, "GPS provider started (minDistance=0)");
             }
@@ -233,7 +248,8 @@ public class LocationSidecarService extends Service implements LocationListener 
                     LocationManager.NETWORK_PROVIDER,
                     2000,  // 2 seconds
                     0.0f,  // 0 meters
-                    this
+                    this,
+                    workerThread.getLooper()  // deliver off the UI thread
                 );
                 Log.i(TAG, "Network provider started (minDistance=0)");
             }
@@ -281,7 +297,7 @@ public class LocationSidecarService extends Service implements LocationListener 
         // `adb logcat *:V` but don't fill the normal log.
         if (!hadFix) {
             Log.i(TAG, "First location fix: " + latitude + ", " + longitude);
-        } else {
+        } else if (com.overdrive.app.BuildConfig.DEBUG) {
             Log.d(TAG, "Location update: " + latitude + ", " + longitude);
         }
         
@@ -455,7 +471,13 @@ public class LocationSidecarService extends Service implements LocationListener 
         if (locationManager != null) {
             locationManager.removeUpdates(this);
         }
-        
+
+        // Stop the background looper (callbacks already removed above).
+        if (workerThread != null) {
+            workerThread.quitSafely();
+            workerThread = null;
+        }
+
         Log.i(TAG, "Service destroyed");
     }
 

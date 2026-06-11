@@ -27,14 +27,9 @@ import kotlin.math.abs
  *                        purposes the exact axis split doesn't matter — any large
  *                        sustained rotation during a vertical jolt means the body
  *                        is turning, not hitting a transverse road feature.
- *  - [peakRollRateRps] : peak |roll rate| (rad/s). Carried for completeness /
- *                        future curb-strike + body-roll work; NOT load-bearing in
- *                        the v1 rules below (documented so the integrator knows it
- *                        is plumbed but currently informational).
  */
 data class GyroStats(
     val peakYawRateRps: Float,
-    val peakRollRateRps: Float,
 )
 
 /**
@@ -106,6 +101,17 @@ class RejectionFilter {
         dynamics: VehicleDynamics,
         recentGyro: GyroStats,
         eventsPerSec: Float = 0f,
+        /** When true (primary HazardClassifier path, D-038/D-040), SKIP the hard brake/accel
+         *  vetoes (Rules 1 & 2) and let the classifier weigh pedal input as a SOFT artifact
+         *  term gated by road-cue presence instead. This is the fix for "braking INTO a real
+         *  breaker": the driver slows for the breaker (brake>25%), so the hard brake veto would
+         *  drop exactly the hazard the user cares about — but a real breaker ALSO has a clean
+         *  pitch couplet + biphasic, which the classifier's artifact penalty checks for, so it
+         *  keeps the breaker while still suppressing a pure brake-dive (pedal high, no road
+         *  cue). The CONTEXT vetoes (gear, cornering, washboard, curb) still apply — they're
+         *  unambiguous regardless of road feature. Default false = legacy hard-reject behaviour
+         *  (existing callers/tests unchanged). */
+        softPedal: Boolean = false,
     ): RejectionVerdict {
 
         // ── Rule 4 (checked FIRST): not driving forward ──────────────────────
@@ -115,16 +121,20 @@ class RejectionFilter {
         // because it is the cheapest, highest-confidence veto and doesn't depend
         // on a fresh poll being a *jolt* cause — it's a context gate.
         //
-        // Staleness caveat: gear is a ~5 s poll. If the poll is very stale we
-        // can't trust it either way; but defaulting to "reject when not forward"
-        // would wrongly drop real hazards detected just after a poll that still
-        // reads N from a stop. So we only honor the gear veto when the poll is
-        // fresh enough to describe *now*. When stale, we fall through and let the
-        // speed-coherent motion of a real event speak for itself.
-        // Precision/recall: gating on freshness here protects recall (don't drop
-        // real hazards on a stale "N"); the forward-gear check itself protects
-        // precision against driveway/parking artefacts.
-        if (dynamics.brakeAgeMs < STALE_PEDAL_MS && !dynamics.isForwardDrive) {
+        // Staleness: gear is a ~5 s poll, BUT gear state is SLOWLY-VARYING — you sit in
+        // D for minutes, in P while parked — so a stale "P/R/N" reading is still
+        // trustworthy "now", unlike a stale pedal %. So the gear veto gets its own,
+        // larger staleness budget [STALE_GEAR_MS] instead of the tight pedal budget.
+        // This matters MORE since Session-34 removed the EventDetector speed floor: the
+        // forward-gear check is now the PRIMARY context guard against parking-lot /
+        // reverse / driveway / door-slam jolts at crawl speed (which the speed floor used
+        // to mask). Keying it on the 1.5 s pedal budget left it usually-stale → silently
+        // passing, so those low-speed artefacts would have leaked through once the floor
+        // was gone. The larger budget closes that hole while still ignoring a genuinely
+        // ancient poll. Precision/recall: protects precision at crawl (drops parking
+        // artefacts by CONTEXT, not speed) while a forward-gear crawl over a real breaker
+        // still passes — exactly the no-speed-cap behaviour we want.
+        if (dynamics.brakeAgeMs < STALE_GEAR_MS && !dynamics.isForwardDrive) {
             return RejectionVerdict(true, "not_forward_gear")
         }
 
@@ -137,7 +147,8 @@ class RejectionFilter {
         // precision/G-4 — light brake-and-bump overlaps will be dropped. That is
         // acceptable: the same hazard is almost always re-encountered without the
         // brake press and mapped then (D-015 "map from drive one" + repeats).
-        if (dynamics.brakeAgeMs < STALE_PEDAL_MS &&
+        if (!softPedal &&
+            dynamics.brakeAgeMs < STALE_PEDAL_MS &&
             dynamics.brakePercent > BRAKE_REJECT_PERCENT
         ) {
             return RejectionVerdict(true, "braking")
@@ -151,7 +162,8 @@ class RejectionFilter {
         // aggressive launch produces a squat transient worth vetoing.
         // Precision/recall: higher bar than brake protects recall during normal
         // throttle; still catches the aggressive launch that actually fakes a jolt.
-        if (dynamics.brakeAgeMs < STALE_PEDAL_MS &&
+        if (!softPedal &&
+            dynamics.brakeAgeMs < STALE_PEDAL_MS &&
             dynamics.accelPercent > ACCEL_REJECT_PERCENT
         ) {
             return RejectionVerdict(true, "accelerating")
@@ -250,6 +262,16 @@ class RejectionFilter {
          * precision (trust older pedal evidence). 1500 ms is a middle bias.
          */
         const val STALE_PEDAL_MS = 1500L
+
+        /**
+         * Max age (ms) a GEAR reading may have before the forward-drive veto stops
+         * trusting it. MUCH larger than [STALE_PEDAL_MS] because gear is slowly-varying
+         * (minutes in D, parked in P) — a 5 s-old "P/R/N" still describes "now", whereas a
+         * 5 s-old "brake 90%" does not. 6000 ms comfortably spans the ~5 s gear poll so the
+         * veto is reliably available (not silently stale), which is essential now that the
+         * gear gate is the PRIMARY low-speed parking-artefact guard (Session-34 removed the
+         * EventDetector speed floor). Lean: PRECISION at crawl, without a speed cap. */
+        const val STALE_GEAR_MS = 6000L
 
         /**
          * Brake pedal % above which a coincident jolt is attributed to braking

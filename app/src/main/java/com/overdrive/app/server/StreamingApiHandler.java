@@ -82,26 +82,21 @@ public class StreamingApiHandler {
                         new com.overdrive.app.camera.AvcHalWarmup();
                     warmup.warmupAndWait();
                     pano.start();
-                    // BS-ENABLE-001: self-arm the native blind-spot lane once pano
-                    // is genuinely running. The app-side BlindSpotControl.sync is a
-                    // one-shot POST with no re-poll (the old re-poll lived in the
-                    // deleted overlay service), so on a COLD ACC-on the initial
-                    // /api/bs/enable returns starting:true / throws NotReady and the
-                    // lane would otherwise never arm until the user re-toggles. Arm
-                    // it here, daemon-side, app-independently — enableBlindSpot is
-                    // idempotent and now past the running/camera gate.
-                    try {
-                        org.json.JSONObject bs =
-                            com.overdrive.app.config.UnifiedConfigManager.getBlindSpot();
-                        boolean want = bs != null && (bs.optBoolean("enabled", false)
-                            || bs.optBoolean("debugPreview", false));
-                        if (want && pano.isRunning()) {
-                            pano.enableBlindSpot(pano.getBlindSpotViewMode());
-                            CameraDaemon.log("BS: self-armed after pano cold-start");
-                        }
-                    } catch (Throwable t) {
-                        CameraDaemon.log("BS self-arm after pano start failed: " + t.getMessage());
-                    }
+                    // BS-DEFECT-A: do NOT self-arm the blind-spot lane here.
+                    // This worker runs concurrently with the app's re-arm loop
+                    // (BlindSpotControl.armWithRetry), which hammers /api/bs/enable →
+                    // handleBsEnable → pano.enableBlindSpot() until the lane reports
+                    // enabled. A self-arm enableBlindSpot() here sets bsEnabling=true
+                    // and then RELEASES the lifecycle lock during enableBlindSpotInternal's
+                    // GL-init wait; a concurrent handleBsEnable() acquiring the lock in
+                    // that window hits enableBlindSpot's `if (bsEnabling) return;`
+                    // early-return — a VOID return that handleBsEnable cannot distinguish
+                    // from success (it only catches exceptions), so it reports
+                    // {success:true} while blindSpotEnabled is still false. The app then
+                    // sees a false-armed lane and stops driving / its WS reconnect-storms
+                    // a dead 8889. Cold-start ONLY warms pano here; ALL arming routes
+                    // through handleBsEnable so the app's convergent re-poll wins the race
+                    // cleanly (single arming owner, no bsEnabling self-collision).
                 } catch (Throwable t) {
                     CameraDaemon.log("ensurePanoStartedNonBlocking: " + t.getMessage());
                 } finally {
@@ -198,7 +193,32 @@ public class StreamingApiHandler {
             handleBsGeometry(out, path);
             return true;
         }
+        if (path.startsWith("/api/bs/target/")) {
+            handleBsTarget(out, path.substring("/api/bs/target/".length()));
+            return true;
+        }
         return false;
+    }
+
+    /** POST /api/bs/target/{head_unit|cluster} — set the blind-spot display target.
+     *  Persists to UCM blindspot.target and live-retargets the layer (restoring the
+     *  gauges if flipping away from the cluster). The web UI also writes target via
+     *  the unified-settings POST; this route is for native/instant retarget. */
+    private static void handleBsTarget(OutputStream out, String raw) throws Exception {
+        String t = raw;
+        int slash = t.indexOf('/');
+        if (slash >= 0) t = t.substring(0, slash);
+        if (!"head_unit".equals(t) && !"cluster".equals(t)) {
+            HttpResponse.sendJsonError(out, "target must be head_unit or cluster");
+            return;
+        }
+        com.overdrive.app.config.UnifiedConfigManager.setBlindSpotTarget(t);
+        GpuSurveillancePipeline pipeline = CameraDaemon.getGpuPipeline();
+        if (pipeline != null && pipeline.isBlindSpotEnabled()) pipeline.retargetBlindSpot();
+        JSONObject response = new JSONObject();
+        response.put("success", true);
+        response.put("target", t);
+        HttpResponse.sendJson(out, response.toString());
     }
 
     private static void handleBsEnable(OutputStream out) throws Exception {
@@ -223,6 +243,26 @@ public class StreamingApiHandler {
             // + repoints the BS scaler onto it (GPU → screen). The daemon's own
             // turn-trigger loop shows/hides it; no app-process decoder/WS involved.
             pipeline.enableBlindSpot(pipeline.getBlindSpotViewMode());
+            // BS-DEFECT-A: enableBlindSpot() can return VOID without arming the lane
+            // when a concurrent enable is mid-flight (its `if (bsEnabling) return;`
+            // early-return). A void return is indistinguishable from success to the
+            // try/catch above, so reporting success here would falsely tell the app's
+            // re-arm loop the lane is up — it stops driving while blindSpotEnabled is
+            // still false and 8889 is dead (the observed NO-VIDEO flap). Re-check the
+            // lane state and only claim success when it ACTUALLY armed; otherwise reply
+            // {starting:true} so BlindSpotControl.armWithRetry keeps re-POSTing enable
+            // until the in-flight enable commits the lane. Convergent: no false success.
+            if (!pipeline.isBlindSpotEnabled()) {
+                CameraDaemon.log("handleBsEnable: enable returned but lane not armed yet"
+                    + " (concurrent enable in flight) — reporting starting so caller re-polls");
+                JSONObject pending = new JSONObject();
+                pending.put("success", false);
+                pending.put("starting", true);
+                pending.put("error", "Blind-spot lane arming — try again in a few seconds");
+                pending.put("errorCode", "bs_starting");
+                HttpResponse.sendJson(out, pending.toString());
+                return;
+            }
             JSONObject response = new JSONObject();
             response.put("success", true);
             response.put("native", true);
@@ -248,6 +288,80 @@ public class StreamingApiHandler {
         HttpResponse.sendJson(out, response.toString());
     }
 
+    // ── Blind-spot daemon-side self-arm ─────────────────────────────────────
+    // The app arms the BS lane by POSTing /api/bs/enable (BlindSpotControl.sync,
+    // fired from MainActivity / BootReceiver on the com.byd.action.ACC_ON
+    // broadcast EDGE). On a HARD REBOOT the car's ACC is already ON, so that
+    // broadcast edge fired before the app's receiver existed — the app never
+    // gets it, never calls sync(), and the lane stays un-armed until the user
+    // manually opens the debug-preview menu (the only other sync() trigger).
+    // The daemon, however, learns ACC=ON from its own hardware probe + the
+    // AccSentry IPC, so it CAN self-arm. This mirrors the OEM-dashcam
+    // edge-only-lifecycle fix (pano-ready hook + 30s self-heal ticker): the
+    // resolver is idempotent (no-op once the lane is live), so re-driving it is
+    // safe. Gated on blindspot.enabled so a disabled feature never arms.
+    private static final long BS_SELF_HEAL_INTERVAL_MS = 30_000L;
+    private static volatile Thread bsSelfHealThread;
+    private static volatile boolean bsSelfHealRunning;
+
+    /**
+     * Bring the BS lane to its desired state from the daemon side, independent
+     * of any app-side POST. Arms iff blindspot.enabled is set AND ACC is on AND
+     * the pano pipeline is running; idempotent (enableBlindSpot no-ops once the
+     * lane is live). Safe to call from any thread — enableBlindSpot serializes
+     * on its own lifecycle lock. Never disables: app-driven disable (feature
+     * toggled off) flows through handleBsDisable, and gating the arm on the
+     * enabled flag means we simply don't re-arm a feature the user turned off.
+     */
+    public static void resolveBlindSpotLifecycle() {
+        try {
+            org.json.JSONObject bs = com.overdrive.app.config.UnifiedConfigManager.getBlindSpot();
+            boolean enabled = bs.optBoolean("enabled", false)
+                || bs.optBoolean("debugPreview", false);
+            if (!enabled) return;
+            if (!com.overdrive.app.monitor.AccMonitor.isAccOn()) return;
+            GpuSurveillancePipeline pipeline = CameraDaemon.getGpuPipeline();
+            if (pipeline == null) return;
+            if (pipeline.isBlindSpotEnabled()) return;   // already armed — no-op
+            if (!pipeline.isRunning()) {
+                // Pano not up yet. Kick a cold-start; the pano-ready hook in
+                // GpuSurveillancePipeline.start() re-drives this resolver once
+                // running=true, and the 30s ticker is the backstop.
+                ensurePanoStartedNonBlocking(pipeline);
+                return;
+            }
+            CameraDaemon.log("BS self-arm: enabled+accOn+pano-running but lane not armed — arming");
+            pipeline.enableBlindSpot(pipeline.getBlindSpotViewMode());
+        } catch (Throwable t) {
+            CameraDaemon.log("BS self-arm: resolve failed: " + t.getMessage());
+        }
+    }
+
+    /**
+     * Start the periodic BS self-heal ticker. Idempotent — a second call while
+     * the thread is alive is a no-op. Call once at daemon boot. Bounds the
+     * cold-reboot arm latency to ~30s even if every edge is missed.
+     */
+    public static synchronized void startBsSelfHealTicker() {
+        if (bsSelfHealThread != null && bsSelfHealThread.isAlive()) return;
+        bsSelfHealRunning = true;
+        bsSelfHealThread = new Thread(() -> {
+            CameraDaemon.log("BS self-heal ticker started (" + (BS_SELF_HEAL_INTERVAL_MS / 1000) + "s interval)");
+            while (bsSelfHealRunning) {
+                try {
+                    Thread.sleep(BS_SELF_HEAL_INTERVAL_MS);
+                } catch (InterruptedException ie) {
+                    if (!bsSelfHealRunning) { Thread.currentThread().interrupt(); return; }
+                    continue;
+                }
+                if (!bsSelfHealRunning) return;
+                resolveBlindSpotLifecycle();
+            }
+        }, "BlindSpotSelfHeal");
+        bsSelfHealThread.setDaemon(true);
+        bsSelfHealThread.start();
+    }
+
     private static void handleBsStatus(OutputStream out) throws Exception {
         GpuSurveillancePipeline pipeline = CameraDaemon.getGpuPipeline();
         JSONObject response = new JSONObject();
@@ -257,6 +371,13 @@ public class StreamingApiHandler {
         response.put("running", pipeline != null && pipeline.isRunning());
         response.put("view", pipeline != null ? pipeline.getBlindSpotViewMode() : 7);
         response.put("native", true);
+        // Report the PERSISTED target, not the pipeline's in-memory bsTarget field
+        // (which stays at its head_unit default until the lane is enabled and
+        // resolveBsGeometry runs — so it would diverge from UCM in the pre-enable
+        // window). bsTarget is just a cache of blindspot.target; UCM is authoritative.
+        // forceReload honors cross-UID freshness (web/app write, daemon reads).
+        com.overdrive.app.config.UnifiedConfigManager.forceReload();
+        response.put("target", com.overdrive.app.config.UnifiedConfigManager.getBlindSpotTarget());
         HttpResponse.sendJson(out, response.toString());
     }
 
@@ -270,6 +391,18 @@ public class StreamingApiHandler {
         GpuSurveillancePipeline pipeline = CameraDaemon.getGpuPipeline();
         // Forms: /api/bs/geometry/{x}/{y}/{w}/{h}  (absolute px)
         //   or:  /api/bs/geometry/preset/{sizePct}/{corner}  (daemon does panel math)
+        // Optional ?target=head_unit|cluster scopes which target's geometry is set;
+        // defaults to the currently-active target.
+        String target = com.overdrive.app.config.UnifiedConfigManager.getBlindSpotTarget();
+        int q = path.indexOf("?target=");
+        if (q >= 0) {
+            String tq = path.substring(q + "?target=".length());
+            int amp = tq.indexOf('&'); if (amp >= 0) tq = tq.substring(0, amp);
+            if ("cluster".equals(tq) || "head_unit".equals(tq)) target = tq;
+            path = path.substring(0, q);
+        }
+        boolean cluster = "cluster".equals(target);
+        String geomKey = cluster ? "geometryCluster" : "geometry";
         String tail = path.length() > 16 ? path.substring(16) : "";
         if (tail.startsWith("/")) tail = tail.substring(1);
         if (tail.startsWith("preset/")) {
@@ -277,7 +410,7 @@ public class StreamingApiHandler {
                 String[] p = tail.substring("preset/".length()).split("/");
                 int pct = Integer.parseInt(p[0]);
                 String corner = p.length > 1 ? p[1] : "tr";
-                if (pipeline != null) pipeline.setBsGeometryPreset(pct, corner);
+                if (pipeline != null) pipeline.setBsGeometryPreset(pct, corner, target);
             } catch (Exception e) {
                 HttpResponse.sendJsonError(out, "preset must be /preset/{pct}/{corner}: " + e.getMessage());
                 return;
@@ -289,12 +422,17 @@ public class StreamingApiHandler {
                 int y = Integer.parseInt(p[1]);
                 int w = Integer.parseInt(p[2]);
                 int h = Integer.parseInt(p[3]);
-                // Persist to UCM so the daemon restores it on the next enable.
+                // Persist to the target's geometry key so the daemon restores it on
+                // the next enable. Shallow per-key merge — never clobbers the other
+                // target's key.
                 org.json.JSONObject g = new org.json.JSONObject();
                 g.put("x", x); g.put("y", y); g.put("w", w); g.put("h", h);
                 com.overdrive.app.config.UnifiedConfigManager.updateSection("blindspot",
-                    new org.json.JSONObject().put("geometry", g));
-                if (pipeline != null) pipeline.setBsGeometry(x, y, w, h);
+                    new org.json.JSONObject().put(geomKey, g));
+                // Apply live only when editing the active target.
+                if (pipeline != null && cluster == com.overdrive.app.config.UnifiedConfigManager.isBlindSpotCluster()) {
+                    pipeline.setBsGeometry(x, y, w, h);
+                }
             } catch (Exception e) {
                 HttpResponse.sendJsonError(out, "geometry must be /x/y/w/h ints: " + e.getMessage());
                 return;

@@ -323,8 +323,6 @@ class RoadSenseStore private constructor() {
         logger.info("RoadSense store stopped")
     }
 
-    fun isAvailable(): Boolean = initialized && connection != null
-
     /**
      * Delete stale lock + trace files left by a crashed daemon, so the retry in
      * [init] can re-open. Same heuristic as SocHistoryDatabase: only remove a
@@ -755,6 +753,43 @@ class RoadSenseStore private constructor() {
                 }
             } catch (e: Exception) {
                 logger.error("queryForUpload failed: " + e.message, e)
+                reconnect()
+                return emptyList()
+            }
+        }
+    }
+
+    /**
+     * Map-view read: every hazard whose lat/lng falls inside a viewport bounding box.
+     * Backs the RoadSense map's `GET /api/roadsense/hazards?bbox=` endpoint. Unlike
+     * [queryAhead] (3×3-tile scoped for the live "what's ahead" cone), the map needs the
+     * whole visible rectangle, so this is a lat/lng range scan ordered by recency and
+     * capped at [maxResults] (freshest kept). A bbox is a tiny fraction of the table and
+     * the result is small; this is not a hot path (fired on map pan/zoom, debounced client-side).
+     */
+    fun queryByBbox(
+        minLat: Double,
+        minLng: Double,
+        maxLat: Double,
+        maxLng: Double,
+        maxResults: Int,
+    ): List<StoredHazard> {
+        synchronized(lock) {
+            if (!ensureOpen()) return emptyList()
+            try {
+                val sql =
+                    "SELECT * FROM $TABLE WHERE lat >= ? AND lat <= ? AND lng >= ? AND lng <= ? " +
+                        "ORDER BY updated_ms DESC LIMIT ?;"
+                connection!!.prepareStatement(sql).use { ps ->
+                    ps.setDouble(1, minLat)
+                    ps.setDouble(2, maxLat)
+                    ps.setDouble(3, minLng)
+                    ps.setDouble(4, maxLng)
+                    ps.setInt(5, maxResults)
+                    ps.executeQuery().use { rs -> return readHazards(rs) }
+                }
+            } catch (e: Exception) {
+                logger.error("queryByBbox failed: " + e.message, e)
                 reconnect()
                 return emptyList()
             }

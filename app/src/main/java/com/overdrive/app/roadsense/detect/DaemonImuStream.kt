@@ -5,8 +5,8 @@ package com.overdrive.app.roadsense.detect
  *
  * Unlike an app-side sensor stream, this one has no SensorManager — samples
  * arrive already decoded (the controller hands it the lists pulled off an
- * `IMU_BATCH` IPC frame via [ImuFrameCodec]). So [start]/[setRate]/[stop] here
- * are bookkeeping only (track whether we're meant to be live, for stall
+ * `IMU_BATCH` IPC frame via [ImuFrameCodec]). So [start]/[stop] here are
+ * bookkeeping only (track whether we're meant to be live, for stall
  * detection); the actual data motion is [feed].
  *
  * Why implement [ImuStream] at all if it's just fed? Because the pipeline
@@ -33,12 +33,6 @@ class DaemonImuStream : ImuStream {
     override fun start(rate: ImuStream.Rate) {
         live = true
         listener?.onStreamState(ImuStream.State.ACTIVE)
-    }
-
-    override fun setRate(rate: ImuStream.Rate) {
-        // No-op here — rate is enforced app-side by the sidecar's SensorManager
-        // delay. The daemon just consumes whatever arrives. Kept for interface
-        // symmetry; the controller still tells the sidecar to change rate.
     }
 
     override fun stop() {

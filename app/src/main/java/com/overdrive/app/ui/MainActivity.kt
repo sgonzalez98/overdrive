@@ -82,6 +82,34 @@ class MainActivity : AppCompatActivity() {
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // The main app must run on the HEAD UNIT (display 0), never the driver
+        // cluster. When the OEM cluster projection opens a secondary display, AMS
+        // auto-launches the LAUNCHER activity (this one) onto it. If we land on a
+        // non-default display, relaunch on display 0 and finish — BEFORE any
+        // setContentView / startup work, so nothing partially initialises on the
+        // wrong display. (The earlier crash from this was the ADB launcher executor
+        // being torn down mid-sequence; that path is now guarded in AdbShellExecutor,
+        // and bailing here this early means the startup work hasn't begun yet.)
+        try {
+            val did = display?.displayId ?: android.view.Display.DEFAULT_DISPLAY
+            if (did != android.view.Display.DEFAULT_DISPLAY) {
+                android.util.Log.w("MainActivity", "launched on display $did — relaunching on display 0")
+                val opts = android.app.ActivityOptions.makeBasic().apply {
+                    launchDisplayId = android.view.Display.DEFAULT_DISPLAY
+                }
+                startActivity(
+                    android.content.Intent(this, MainActivity::class.java).apply {
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    },
+                    opts.toBundle()
+                )
+                finish()
+                return
+            }
+        } catch (_: Throwable) { /* best effort; fall through to a normal start */ }
+
         setContentView(R.layout.activity_main_new)
 
         // Storage setup is posted off the onCreate critical path so a failure
@@ -1093,6 +1121,11 @@ class MainActivity : AppCompatActivity() {
                 R.drawable.ic_integrations, R.string.rail_integrations),
             RailItem(R.id.railDestRoadSense, R.id.roadSenseFragment,
                 R.drawable.ic_roadsense, R.string.rail_roadsense),
+            // Hazard Map is a standalone Activity, not a nav-graph fragment,
+            // so it launches via startActivity (destinationId = 0).
+            RailItem(R.id.railDestMap, 0,
+                R.drawable.ic_roadsense_map, R.string.rail_hazard_map,
+                launchActivity = com.overdrive.app.navmap.RoadSenseMapActivity::class.java),
             RailItem(R.id.railDestDiagnostics, R.id.diagnosticsFragment,
                 R.drawable.ic_diagnostics, R.string.rail_diagnostics),
             RailItem(R.id.railDestSettings, R.id.settingsFragment,
@@ -1107,18 +1140,29 @@ class MainActivity : AppCompatActivity() {
             row.findViewById<ImageView>(R.id.railItemIcon)?.setImageResource(item.iconRes)
             row.findViewById<TextView>(R.id.railItemLabel)?.setText(item.labelRes)
             row.setOnClickListener {
-                navigateToRailDestination(item.destinationId)
+                val activity = item.launchActivity
+                if (activity != null) {
+                    startActivity(Intent(this, activity))
+                } else {
+                    navigateToRailDestination(item.destinationId)
+                }
             }
         }
 
         // Selection sync — light up the row whose destinationId matches
         // the current nav destination (or any of its ancestors).
+        // Only fragment-backed rows participate in sync. Activity-launch
+        // rows (launchActivity != null, destinationId == 0) never become the
+        // NavController's current destination, so they are excluded here to
+        // avoid a spurious highlight and to keep destinationId == 0 from
+        // colliding with the matcher.
+        val syncItems = items.filter { it.launchActivity == null && it.destinationId != 0 }
         navController.addOnDestinationChangedListener { _, destination, _ ->
             var node: androidx.navigation.NavDestination? = destination
             while (node != null) {
-                val match = items.firstOrNull { it.destinationId == node!!.id }
+                val match = syncItems.firstOrNull { it.destinationId == node!!.id }
                 if (match != null) {
-                    items.forEach { item ->
+                    syncItems.forEach { item ->
                         navigationRail.findViewById<View>(item.rowId)?.isSelected =
                             (item.destinationId == match.destinationId)
                     }
@@ -1145,7 +1189,12 @@ class MainActivity : AppCompatActivity() {
         val rowId: Int,
         val destinationId: Int,
         val iconRes: Int,
-        val labelRes: Int
+        val labelRes: Int,
+        // When non-null, the row launches this Activity via startActivity()
+        // instead of navigating to a nav-graph fragment. Such rows have no
+        // NavController destination (destinationId == 0) and are skipped by
+        // the selection-sync matcher.
+        val launchActivity: Class<*>? = null
     )
 
     /**
@@ -1360,7 +1409,10 @@ class MainActivity : AppCompatActivity() {
         val oemDashcamCameraId: Int,
         // Whether the user has manually overridden the OEM dashcam id
         // (camera.oemDashcamManualOverride). false = Auto = infer pano^1.
-        val oemDashcamManualOverride: Boolean
+        val oemDashcamManualOverride: Boolean,
+        // Opt-in for the destructive dual-camera concurrency probe
+        // (camera.concurrentAvmProbeEnabled). Default false = never auto-probe.
+        val concurrentAvmProbeEnabled: Boolean
     )
 
     /**
@@ -1474,6 +1526,8 @@ class MainActivity : AppCompatActivity() {
             val oemDashcamCameraId = cameraSection.optInt("oemDashcamCameraId", -1)
             val oemDashcamManualOverride = cameraSection.optBoolean(
                 "oemDashcamManualOverride", false)
+            val concurrentAvmProbeEnabled = cameraSection.optBoolean(
+                "concurrentAvmProbeEnabled", false)
 
             CameraMappingState(
                 summary = summary,
@@ -1486,7 +1540,8 @@ class MainActivity : AppCompatActivity() {
                 dilink4RedMask = config.optBoolean("dilink4RedMask", false),
                 panoCameraId = panoCameraId,
                 oemDashcamCameraId = oemDashcamCameraId,
-                oemDashcamManualOverride = oemDashcamManualOverride
+                oemDashcamManualOverride = oemDashcamManualOverride,
+                concurrentAvmProbeEnabled = concurrentAvmProbeEnabled
             )
         } catch (e: Exception) {
             logsViewModel.error("Camera", "Failed to load camera mapping state: ${e.message}")
@@ -1519,6 +1574,7 @@ class MainActivity : AppCompatActivity() {
         val oemDashcamGroup = dialogView.findViewById<android.widget.RadioGroup>(R.id.rgOemDashcamId)
         val currentOemDashcamView = dialogView.findViewById<TextView>(R.id.tvCurrentOemDashcam)
         val saveOemDashcamButton = dialogView.findViewById<View>(R.id.btnSaveOemDashcamId)
+        val concurrentProbeSwitch = dialogView.findViewById<com.google.android.material.materialswitch.MaterialSwitch>(R.id.swConcurrentAvmProbe)
         summaryView.text = state.summary
 
         val roleAdapter = android.widget.ArrayAdapter(
@@ -1999,6 +2055,7 @@ class MainActivity : AppCompatActivity() {
             R.id.rbOemDashcamAuto
         }
         oemDashcamGroup.check(initialOemDashcamRadioId)
+        concurrentProbeSwitch?.isChecked = state.concurrentAvmProbeEnabled
 
         fun refreshOemDashcamSubLabel(
             isManual: Boolean,
@@ -2044,9 +2101,15 @@ class MainActivity : AppCompatActivity() {
                 else -> -1
             }
             val manualOverride = selectedId >= 0
+            val probeOptIn = concurrentProbeSwitch?.isChecked ?: false
             val patch = org.json.JSONObject().apply {
                 put("oemDashcamManualOverride", manualOverride)
                 put("oemDashcamCameraId", if (manualOverride) selectedId else -1)
+                // Opt-in for the destructive dual-camera probe. Persist the
+                // user's explicit choice; the daemon only runs the probe on
+                // next boot when this is true (and even then defers if a
+                // pipeline is live, per ConcurrentAvmProbe liveness guard).
+                put("concurrentAvmProbeEnabled", probeOptIn)
             }
             saveOemDashcamButton.isEnabled = false
             // Background thread for the UCM write — updateSection rewrites

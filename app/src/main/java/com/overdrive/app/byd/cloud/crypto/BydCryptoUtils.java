@@ -117,6 +117,42 @@ public final class BydCryptoUtils {
                md5.substring(16, 24) + md5.substring(0, 8);
     }
 
+    /**
+     * China (CN) checkcode: lowercase SHA-256 hex of the compact JSON string.
+     *
+     * Unlike the overseas {@link #computeCheckcode(JSONObject)} (MD5 + chunk
+     * reorder), CN uses a plain SHA-256 of the JSON with NO reordering.
+     *
+     * CRITICAL — must match the bytes the CN server hashes:
+     *   - Key order = insertion order. Android's JSONObject is LinkedHashMap-backed,
+     *     so toString() preserves the order fields were put() — same guarantee the
+     *     overseas checkcode already relies on.
+     *   - Non-ASCII (e.g. networkOperator "无") must be emitted as raw UTF-8, NOT
+     *     \\uXXXX-escaped. org.json.JSONObject.toString() emits raw non-ASCII, which
+     *     is what we need; verified byte-for-byte against a real CN capture.
+     *
+     * Port of: pyBYD hashing.compute_cn_checkcode_payload (SHA-256 of json.dumps,
+     * separators=(",",":"), ensure_ascii=False).
+     */
+    public static String computeCnCheckcode(JSONObject payload) {
+        return sha256HexLower(payload.toString());
+    }
+
+    /** Lowercase SHA-256 hex of a UTF-8 string. */
+    public static String sha256HexLower(String value) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b & 0xFF));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("SHA-256 not available", e);
+        }
+    }
+
     // ── Sign String ─────────────────────────────────────────────────────
 
     /**
@@ -138,6 +174,44 @@ public final class BydCryptoUtils {
         }
         sb.append("&password=").append(password);
         return sb.toString();
+    }
+
+    /**
+     * China (CN) sign string: sorted key=value pairs + &password=..., with
+     * JS-style value coercion (a JSON null becomes the literal "null").
+     *
+     * Differs from {@link #buildSignString} only in that CN sign-field sets
+     * include genuine JSON nulls / ints; {@code String.valueOf(opt(key))} where
+     * opt() returns {@code JSONObject.NULL} would yield "null" too, but we go
+     * through {@link #cnSignValue} to make the contract explicit and match
+     * pyBYD's {@code _cn_sign_value} exactly.
+     *
+     * Port of: pyBYD signing.build_cn_sign_string.
+     */
+    public static String buildCnSignString(JSONObject fields, String password) {
+        List<String> keys = new ArrayList<>();
+        Iterator<String> it = fields.keys();
+        while (it.hasNext()) {
+            keys.add(it.next());
+        }
+        Collections.sort(keys);
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < keys.size(); i++) {
+            if (i > 0) sb.append('&');
+            String key = keys.get(i);
+            sb.append(key).append('=').append(cnSignValue(fields.opt(key)));
+        }
+        sb.append("&password=").append(password);
+        return sb.toString();
+    }
+
+    /** Stringify a CN sign-field value like JS String(x): JSON null -> "null". */
+    private static String cnSignValue(Object value) {
+        if (value == null || value == JSONObject.NULL) {
+            return "null";
+        }
+        return String.valueOf(value);
     }
 
     // ── AES-128-CBC (Inner Payload) ─────────────────────────────────────

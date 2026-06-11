@@ -7,6 +7,8 @@ import com.overdrive.app.roadsense.detect.DaemonImuStream
 import com.overdrive.app.roadsense.detect.DetectionCandidate
 import com.overdrive.app.roadsense.detect.EventDetector
 import com.overdrive.app.roadsense.detect.GravityFrame
+import com.overdrive.app.roadsense.detect.HazardClassifier
+import com.overdrive.app.roadsense.detect.PitchSignCalibrator
 import com.overdrive.app.roadsense.detect.GpsRingBuffer
 import com.overdrive.app.roadsense.detect.GyroStats
 import com.overdrive.app.roadsense.detect.HazardType
@@ -91,6 +93,36 @@ class RoadSenseController @JvmOverloads constructor(
     private val calibrator = VehicleCalibrator()
     private val gpsBuffer = GpsRingBuffer()
     private val imuStream = DaemonImuStream()
+    // SOTA temporal-fusion classifier + its pitch-sign self-calibrator (D-038/D-040). This is
+    // the PRIMARY accept/type gate: finalizeClassification runs classify() on the completed
+    // ±window and its `accept` decides whether the hazard is stored, its `type` is authoritative
+    // (SeverityClassifier supplies only severity/confidence). The rolling ~20 Hz context ring
+    // (speed/brake/accel/pitch around the event) feeds the crossing envelope. (Weights/threshold
+    // are still PROVISIONAL physics-seeded priors — to be fit on the trustworthy label set.)
+    private val hazardClassifier = HazardClassifier()
+    private val pitchSign = PitchSignCalibrator()
+    private val contextRing = ArrayDeque<HazardClassifier.ContextSample>()
+    private var lastContextSampleMs = 0L
+    private var lastCtxSpeedKmh = Float.NaN   // for the sign-calibrator's "speed dropping" flag
+    // DEFERRED-decision queue (D-040): the HazardClassifier is now the PRIMARY accept/type
+    // gate, but its crossing envelope needs the POST-event half (recover-after) which hasn't
+    // elapsed at candidate completion. So we don't decide at completion — we ENQUEUE the
+    // candidate + its rejection/severity context, and drain it ~CLASSIFY_DEFER_MS later (on the
+    // same single IPC thread, from onImuBatch), when the context ring holds the full ±window.
+    // Bounded; all access is on the IPC thread so no locking needed.
+    private val pendingClassify = ArrayDeque<PendingClassify>()
+
+    private data class PendingClassify(
+        val candidate: DetectionCandidate,
+        val dyn: VehicleDynamics?,
+        val enqueuedTMs: Long,     // sensor tMs of the event peak (envelope split point)
+        val enqueuedWall: Long,    // wall-clock at enqueue (for the store write clock)
+    )
+    // Latest SIGNED pitch rate + validity from the most recent gyro sample (onGyro), read by
+    // the onAccel context sampler (gyro & accel interleave on the same IPC thread, so this is
+    // a plain single-threaded hand-off — no volatile needed).
+    private var latestPitchRate = 0f
+    private var latestPitchValid = false
     // Debug raw-IMU recorder (D-036): captures raw 100 Hz accel+gyro + derived features to a
     // size-capped CSV when roadSense.rawRecord is on, so RECALL (missed breakers) can be
     // measured offline and the PROVISIONAL constants re-fit. Default-off; storage-bounded
@@ -129,14 +161,10 @@ class RoadSenseController @JvmOverloads constructor(
     // Only rotation concurrent with the jolt should vote "cornering".
     private var peakYaw = 0f
     private var peakYawTMs = 0L
-    private var peakRoll = 0f
-    private var peakRollTMs = 0L
-    // Separate, AXIS-RESOLVED pitch/roll peaks for the classifier's breaker-vs-pothole
-    // vote (the user's "up-down gyro movement" signal). DISTINCT from peakRoll above,
-    // which is the legacy pitch+roll-combined proxy kept untouched for RejectionFilter
-    // (G-4 cornering reject is heavily tuned — we don't perturb it). peakPitch is the
-    // body's nose-up/down rotation about the lateral axis (strong on a transverse
-    // breaker); peakTrueRoll is the fore-aft-axis roll (strong on a one-sided pothole).
+    // AXIS-RESOLVED pitch/roll peaks for the classifier's breaker-vs-pothole vote
+    // (the user's "up-down gyro movement" signal). peakPitch is the body's nose-up/
+    // down rotation about the lateral axis (strong on a transverse breaker);
+    // peakTrueRoll is the fore-aft-axis roll (strong on a one-sided pothole).
     // pitchEverValid records whether GravityFrame could isolate the axes for ≥1 gyro
     // sample in the event window (longitudinal axis established).
     private var peakPitch = 0f
@@ -144,6 +172,13 @@ class RoadSenseController @JvmOverloads constructor(
     private var peakTrueRoll = 0f
     private var peakTrueRollTMs = 0L
     private var pitchEverValid = false
+    // SIGNED pitch-couplet extrema, peak-held at 100 Hz over the event window (couplet-decimation
+    // fix): the strongest +nose-up and −nose-down signed-pitch lobes and their sensor times. The
+    // HazardClassifier couplet needs FULL gyro resolution — point-sampling the 16 Hz context ring
+    // aliases a fast breaker's ~150 ms lobes. Peak-held here (like peakPitch), carried on the
+    // candidate, so the couplet sees true extrema. Aged out per GYRO_PEAK_WINDOW_MS like the rest.
+    private var peakPitchUp = 0f;   private var peakPitchUpTMs = 0L
+    private var peakPitchDown = 0f; private var peakPitchDownTMs = 0L
 
     // Persistent IMU-flow heartbeat state (diagnostics; IPC thread only).
     private var imuBatchCount = 0L
@@ -180,6 +215,11 @@ class RoadSenseController @JvmOverloads constructor(
     // top of the next batch, so ALL detector/gravity/gps state is mutated by ONE
     // thread only. Avoids a data race without locking the 100 Hz hot path.
     @Volatile private var resetRequested = false
+    // Set by onVehicleStatePoll (tick thread) when leaving DRIVING; consumed at the TOP of the
+    // next onImuBatch (IPC thread, before the regime early-return) to FORCE-finalize any deferred
+    // candidates before resetTransient clears them (RS-DEFER-1). Flag-only hand-off like
+    // resetRequested — the tick thread never touches pipeline state directly.
+    @Volatile private var flushPendingRequested = false
     private var lastGpsPollMs = 0L
     // Cached vehicle snapshot, refreshed on a throttle (the source only updates
     // every ~5 s; re-fetching at 100 Hz would allocate needlessly). Read on the
@@ -312,10 +352,25 @@ class RoadSenseController @JvmOverloads constructor(
         // per-success and the next start() reloads them.
         syncExecutor?.shutdownNow()
         syncExecutor = null
+        // Force-finalize any deferred candidates before teardown (RS-DEFER-1): on a clean
+        // shutdown / DRIVING→OFF the sidecar stops, so no further onImuBatch will drain them —
+        // without this, a hazard crossed in the final ~1.5 s is lost.
+        // THREAD-SAFETY (audit RS-DEFER-1/d): stop() runs on the daemon shutdown thread, and the
+        // IPC server may STILL be dispatching IMU_BATCH → onImuBatch → drainPendingClassifications
+        // on its pool when roadSense.stop() is called (CameraDaemon stops the IPC server later in
+        // its shutdown sequence). pendingClassify is a non-thread-safe ArrayDeque guarded only by
+        // onImuBatch's @Synchronized(this) monitor — so we MUST take the same monitor here, or two
+        // threads race the deque (CME / double-finalize). synchronized(this) makes an in-flight
+        // batch either complete first or block until we're done.
+        try {
+            synchronized(this) {
+                if (pendingClassify.isNotEmpty()) drainPendingClassifications(lastContextSampleMs, clock(), force = true)
+            }
+        } catch (t: Throwable) { Log.w(TAG, "stop() flush error: ${t.message}") }
         imuStream.stop()
         // Stop the scoped fast-dynamics poll if it was running (DRIVING at shutdown).
         try { vehicleSource.collectorOrNull()?.stopFastDynamicsPoll() } catch (_: Throwable) {}
-        RoadSenseImuSidecarService.stop(appContext)
+        RoadSenseImuSidecarService.stop()
         warnings.release()
         // Flush + close any open raw recording (debug, D-036).
         try { rawRecorder.stop() } catch (_: Throwable) {}
@@ -353,6 +408,20 @@ class RoadSenseController @JvmOverloads constructor(
      */
     @Synchronized
     fun onImuBatch(line: String): Int {
+        // FLUSH-on-leaving-DRIVING (RS-DEFER-1): when the regime just left DRIVING, deferred
+        // candidates in pendingClassify would otherwise be stranded — the drain below is past
+        // the early-return, and resetTransient would CLEAR them unclassified. So FORCE-finalize
+        // the queue here, BEFORE the early-return, on this same IPC thread (single-writer safe).
+        // This catches the user's "cross a breaker then brake to a stop / park" case (the most
+        // important slow crossings). One-shot per leave-DRIVING; localization already used the
+        // event tMs, so finalizing now (slightly short post-envelope) beats dropping the hazard.
+        if (flushPendingRequested) {
+            flushPendingRequested = false
+            if (pendingClassify.isNotEmpty()) {
+                try { drainPendingClassifications(lastContextSampleMs, clock(), force = true) }
+                catch (t: Throwable) { Log.w(TAG, "flush drain error: ${t.message}") }
+            }
+        }
         if (!started || regime != VehicleStateGate.Regime.DRIVING) return 0
         // Perform any pending reset HERE (on this single IPC/sensor thread) so all
         // pipeline-state mutation is serialized — onVehicleStatePoll only flags it.
@@ -362,6 +431,10 @@ class RoadSenseController @JvmOverloads constructor(
         }
         val decoded = ImuFrameCodec.decode(line) ?: return 0
         val n = imuStream.feed(decoded, clock())
+        // Drain deferred classifications whose POST-event envelope has now elapsed (D-040).
+        // feed() ran onAccel/onGyro synchronously above, so lastContextSampleMs is the newest
+        // sensor clock. Same IPC thread → shares the contextRing/store single-writer contract.
+        if (pendingClassify.isNotEmpty()) drainPendingClassifications(lastContextSampleMs, clock())
         // Persistent IMU-flow heartbeat (survives a no-ADB drive). Throttled to
         // ~30 s so it's cheap on the IPC path. A drive with ZERO detected hazards
         // still leaves proof here that IMU actually flowed + how calibration climbed,
@@ -423,9 +496,7 @@ class RoadSenseController @JvmOverloads constructor(
 
         when {
             action.startImu -> {
-                RoadSenseImuSidecarService.start(
-                    appContext, RoadSenseImuSidecarService.ImuRate.FAST
-                )
+                RoadSenseImuSidecarService.start(RoadSenseImuSidecarService.ImuRate.FAST)
                 // Give the freshly-launched sidecar its grace window before the warn-tick
                 // stall check would consider relaunching it: lastFeedMs can be stale from
                 // a prior DRIVING stint (live stays true across RELAXED/OFF), so without
@@ -433,10 +504,8 @@ class RoadSenseController @JvmOverloads constructor(
                 // fire a redundant `am start` on the service we just launched.
                 lastSidecarRelaunchMs = now
             }
-            action.slowImu -> RoadSenseImuSidecarService.start(
-                appContext, RoadSenseImuSidecarService.ImuRate.SLOW
-            )
-            action.stopImu -> RoadSenseImuSidecarService.stop(appContext)
+            action.slowImu -> RoadSenseImuSidecarService.start(RoadSenseImuSidecarService.ImuRate.SLOW)
+            action.stopImu -> RoadSenseImuSidecarService.stop()
         }
 
         // App-side overlay lifecycle (D-024): show the floating pill/card whenever the
@@ -455,11 +524,13 @@ class RoadSenseController @JvmOverloads constructor(
         }
 
         if (action.persistState && newRegime != VehicleStateGate.Regime.DRIVING) {
-            // Hazards are already persisted per-detection (map from drive one);
-            // nothing buffered to flush. Request a transient-state reset so a stale
-            // half-event can't fire on resume — but DON'T mutate detector state
-            // here (we're on the housekeeping thread, not the IPC/sensor thread).
-            // The reset runs on the IPC thread at the next batch (thread safety).
+            // Leaving DRIVING. FORCE-finalize any deferred candidates BEFORE the transient
+            // reset clears them (RS-DEFER-1) — flag first, the reset consumes after. Both run
+            // on the IPC thread at the next batch (thread safety); flush is ordered first in
+            // onImuBatch so resetTransient can't discard an unclassified pending hazard.
+            flushPendingRequested = true
+            // Request a transient-state reset so a stale half-event can't fire on resume —
+            // but DON'T mutate detector state here (housekeeping thread, not IPC/sensor thread).
             resetRequested = true
         }
 
@@ -569,7 +640,7 @@ class RoadSenseController @JvmOverloads constructor(
         gravity.reset()
         detector.reset()
         gpsBuffer.reset()
-        peakYaw = 0f; peakYawTMs = 0L; peakRoll = 0f; peakRollTMs = 0L
+        peakYaw = 0f; peakYawTMs = 0L
         peakPitch = 0f; peakPitchTMs = 0L; peakTrueRoll = 0f; peakTrueRollTMs = 0L
         pitchEverValid = false
         recentCandidateMs.clear()
@@ -577,6 +648,19 @@ class RoadSenseController @JvmOverloads constructor(
         cachedDynamics = null
         lastVehiclePollMs = 0L
         lastGpsPollMs = 0L
+        // Clear the hazard-classifier context ring across a pause/regime reset so a stale
+        // pre-pause sample can't bridge into a post-resume envelope. Do NOT reset pitchSign:
+        // the mount orientation is drive-stable and regime resets fire at every stop, so
+        // re-anchoring each time would keep it perpetually cold (it only resets on a true
+        // sensor restart / large gap, in reset()).
+        contextRing.clear()
+        lastContextSampleMs = 0L
+        lastCtxSpeedKmh = Float.NaN
+        latestPitchRate = 0f
+        latestPitchValid = false
+        // Drop deferred candidates across a pause — their envelope would finalize against a
+        // post-resume context ring (stale). A half-built decision is not worth a wrong map row.
+        pendingClassify.clear()
     }
 
     /**
@@ -658,7 +742,7 @@ class RoadSenseController @JvmOverloads constructor(
             Log.w(TAG, "IMU sidecar stalled → relaunch FAST")
             plog.info("imu sidecar stalled (no batch >${DaemonImuStream.DEFAULT_STALL_MS}ms) → relaunching FAST")
             try {
-                RoadSenseImuSidecarService.start(appContext, RoadSenseImuSidecarService.ImuRate.FAST)
+                RoadSenseImuSidecarService.start(RoadSenseImuSidecarService.ImuRate.FAST)
             } catch (t: Throwable) { Log.w(TAG, "sidecar relaunch failed: ${t.message}") }
         }
 
@@ -929,11 +1013,21 @@ class RoadSenseController @JvmOverloads constructor(
 
         if (verdict == null) {
             // G-7 auto-accept: the confirm card must never demand interaction while
-            // driving. If no verdict arrived within CONFIRM_TIMEOUT_MS, record the
-            // ALGORITHM's own assessment as the (auto-)confirmed label and clear the
-            // card — exactly "accept algorithm assessment after N seconds". This is a
-            // weaker label than an explicit human tap, so we mark it auto (no user
-            // corrections) and still local-confirm the hazard.
+            // driving. If no verdict arrived within CONFIRM_TIMEOUT_MS, dismiss the card.
+            //
+            // Session-35 FIX (the user drives and almost never taps): the old path recorded
+            // confirmed=true AND called markHumanVerified — i.e. "the user did NOTHING" was
+            // logged as "the human agreed" AND promoted the row to human-verified/locally-
+            // confirmed. That (a) fabricated circular ground truth (algo grading itself —
+            // ~91 of 235 rows on the last drive) and (b) DEFEATED the MINOR-consensus chime
+            // gate, which treats humanVerified/locally-confirmed as "corroborated → chime".
+            // So in Calibration Mode every ignored first-pass minor FP would still chime.
+            //
+            // Now: record the label as AUTO (auto_accepted=1) so the analysis/fit can
+            // EXCLUDE it, and DO NOT markHumanVerified — auto-accept is not a human verdict
+            // and must not promote the row. The detection is already stored as a normal
+            // candidate by handleCandidate; it still earns confirmation the honest way
+            // (observations≥2 across passes / a real human tap / cloud consensus).
             if (now - pending.shownMs >= CONFIRM_TIMEOUT_MS) {
                 groundTruth.record(
                     hazardId = pending.hazardId,
@@ -941,18 +1035,19 @@ class RoadSenseController @JvmOverloads constructor(
                     algoType = pending.assessment.type,
                     algoSeverity = pending.assessment.severity,
                     algoConfidence = pending.assessment.confidence,
-                    confirmed = true,        // auto-accept = trust the algorithm
+                    confirmed = true,        // recorded as the algo's own (auto) label…
                     userSeverity = null,
                     userType = null,
                     nowMs = now,
                     lat = pending.lat,
                     lng = pending.lng,
+                    autoAccepted = true,     // …but flagged AUTO so it's excluded from the fit
                 )
-                store.markHumanVerified(pending.hazardId, true, null, null, now)
+                // NOTE: intentionally NO markHumanVerified here (was the poisoning bug).
                 pendingConfirm = null
                 visualSink.setPendingConfirm(null)
-                Log.i(TAG, "calibration auto-accept (timeout) id=${pending.hazardId} → algo label recorded")
-                plog.info("calibration auto-accept (timeout) id=${pending.hazardId}")
+                Log.i(TAG, "calibration auto-dismiss (timeout) id=${pending.hazardId} → AUTO label (not human-verified)")
+                plog.info("calibration auto-dismiss (timeout) id=${pending.hazardId} (auto label, not promoted)")
             }
             return
         }
@@ -1083,6 +1178,42 @@ class RoadSenseController @JvmOverloads constructor(
         // 4) feed the silent vehicle calibrator (quiet samples only — it self-gates)
         calibrator.onSample(aVert, speedKmh, detector.inEvent, eventsPerSec())
 
+        // 4.5) SOTA hazard-classifier context (D-038): maintain a decimated ~20 Hz ring of
+        //      speed/brake/accel/signed-pitch around now, and feed the pitch-sign calibrator.
+        //      Decimated (not 100 Hz) — the crossing envelope + couplet are seconds/100s-of-ms
+        //      scale; the ring stays tiny. The sign calibrator learns "nose-down = which sign"
+        //      from confident braking (physics), making the breaker/pothole couplet ORDER usable.
+        if (sample.tMs - lastContextSampleMs >= HazardClassifier.DECIMATE_MS) {
+            lastContextSampleMs = sample.tMs
+            val speedDropping = !lastCtxSpeedKmh.isNaN() && speedKmh < lastCtxSpeedKmh - 0.1f
+            val brakePct = dyn?.brakePercent ?: 0
+            // anchor the pitch sign from braking dive (uses RAW signed pitch — the calibrator
+            // only runs pre-latch, where latestPitchRate is raw since orientation is still 1).
+            // Pass current |yaw| (peakYaw) so cornering-contaminated braking can't latch a wrong
+            // sign (RS-3).
+            pitchSign.onSample(
+                pitchRate = if (latestPitchValid || gravity.pitchAxisReady) latestPitchRate else 0f,
+                pitchValid = gravity.pitchAxisReady,
+                brakePercent = brakePct,
+                speedDropping = speedDropping,
+                yawRateRps = peakYaw,
+            )
+            contextRing.addLast(
+                HazardClassifier.ContextSample(
+                    tMs = sample.tMs,
+                    speedKmh = speedKmh,
+                    brakePercent = brakePct,
+                    accelPercent = dyn?.accelPercent ?: 0,
+                    pitchRate = latestPitchRate,
+                    pitchValid = latestPitchValid,
+                )
+            )
+            // bound the ring to the context window (a little extra for the post-event half)
+            val cutoff = sample.tMs - (HazardClassifier.CONTEXT_WINDOW_MS * 2)
+            while (contextRing.isNotEmpty() && contextRing.first().tMs < cutoff) contextRing.removeFirst()
+            lastCtxSpeedKmh = speedKmh
+        }
+
         // 5) raw-IMU recorder (D-036, debug). Capture EVERY accel sample + its derived
         //    features BEFORE the detector's gate/early-return — recall measurement needs the
         //    full stream around a missed breaker, not just the samples that became events.
@@ -1117,33 +1248,47 @@ class RoadSenseController @JvmOverloads constructor(
         // genuine straight-line hazard as "cornering" — worst for exactly the severe,
         // sharp-edged hazards (audit: gyro-yaw false-reject). Fix: project the gyro
         // vector onto the MEASURED gravity unit vector to isolate the true yaw rate
-        // about vertical (allocation-free, hot-path safe). The remaining magnitude
-        // orthogonal to vertical is the body's pitch/roll, carried as the roll proxy.
+        // about vertical (allocation-free, hot-path safe).
         val yaw = abs(gravity.alongGravity(sample.gx, sample.gy, sample.gz))
-        val totalSq = sample.gx * sample.gx + sample.gy * sample.gy + sample.gz * sample.gz
-        val perpSq = totalSq - yaw * yaw
-        val roll = if (perpSq > 0f) kotlin.math.sqrt(perpSq) else 0f
         // Age out a peak older than ~one event window so a turn made before the
         // current jolt no longer dominates (audit detection #1). Uses the sensor
         // sample's own tMs (same clock the detector/rate window use), not wall-clock.
         val tMs = sample.tMs
         if (tMs - peakYawTMs > GYRO_PEAK_WINDOW_MS) peakYaw = 0f
-        if (tMs - peakRollTMs > GYRO_PEAK_WINDOW_MS) peakRoll = 0f
         if (yaw >= peakYaw) { peakYaw = yaw; peakYawTMs = tMs }
-        if (roll >= peakRoll) { peakRoll = roll; peakRollTMs = tMs }
 
         // AXIS-RESOLVED pitch/roll peaks for the breaker-vs-pothole classifier vote
         // (separate from the combined-roll proxy above; see field docs). Same age-out
         // window so only rotation concurrent with the jolt votes. pitchAxisReady gates
         // both — when the longitudinal axis isn't established the split is meaningless.
         if (gravity.pitchAxisReady) {
-            val pitch = abs(gravity.pitchRate(sample.gx, sample.gy, sample.gz))
+            val signedPitch = gravity.pitchRate(sample.gx, sample.gy, sample.gz)
+            val pitch = abs(signedPitch)
             val trueRoll = abs(gravity.rollRate(sample.gx, sample.gy, sample.gz))
             if (tMs - peakPitchTMs > GYRO_PEAK_WINDOW_MS) peakPitch = 0f
             if (tMs - peakTrueRollTMs > GYRO_PEAK_WINDOW_MS) peakTrueRoll = 0f
             if (pitch >= peakPitch) { peakPitch = pitch; peakPitchTMs = tMs }
             if (trueRoll >= peakTrueRoll) { peakTrueRoll = trueRoll; peakTrueRollTMs = tMs }
             pitchEverValid = true
+            // Hand the SIGNED pitch (in +nose-up convention once the sign is anchored) to the
+            // onAccel context sampler for the HazardClassifier (D-038).
+            val orientedPitch = signedPitch * (if (pitchSign.anchored) pitchSign.orientation else 1)
+            latestPitchRate = orientedPitch
+            latestPitchValid = pitchSign.anchored
+            // Peak-hold the signed couplet extrema at FULL 100 Hz (couplet-decimation fix): the
+            // strongest +nose-up and −nose-down lobes + their times, so the classifier's couplet
+            // sees true extrema instead of the aliased 16 Hz context ring. Oriented convention so
+            // +=nose-up once anchored; aged out per GYRO_PEAK_WINDOW_MS like the peaks above.
+            if (tMs - peakPitchUpTMs > GYRO_PEAK_WINDOW_MS) peakPitchUp = 0f
+            if (tMs - peakPitchDownTMs > GYRO_PEAK_WINDOW_MS) peakPitchDown = 0f
+            if (orientedPitch > peakPitchUp) { peakPitchUp = orientedPitch; peakPitchUpTMs = tMs }
+            if (-orientedPitch > peakPitchDown) { peakPitchDown = -orientedPitch; peakPitchDownTMs = tMs }
+        } else {
+            // Axis not established → clear the value too (STALE-PITCH-1): keeping the last real
+            // pitch and stamping it onto context samples with pitchValid=false is inconsistent
+            // hygiene (and the pitchSign feed already guards it). 0 is the honest "unknown".
+            latestPitchRate = 0f
+            latestPitchValid = false
         }
 
         // Raw-IMU recorder (D-036, debug): capture the raw gyro vector so pitch/roll can be
@@ -1153,6 +1298,11 @@ class RoadSenseController @JvmOverloads constructor(
 
     override fun onStreamState(state: ImuStream.State) {
         Log.d(TAG, "IMU stream state=$state")
+        // (Pitch-sign anchor is NOT reset here: DaemonImuStream fires ACTIVE on every
+        //  start()/OFF→DRIVING re-entry, so resetting on ACTIVE would re-cold the anchor at
+        //  every stop light. The mount is drive-stable; a bad anchor is instead prevented at
+        //  the source by PitchSignCalibrator's cornering guard (RS-3), and fully re-anchors on
+        //  a true process/sensor restart via reset().)
     }
 
     // ── Candidate → assessment → store ─────────────────────────────────────────
@@ -1169,6 +1319,11 @@ class RoadSenseController @JvmOverloads constructor(
             peakPitchRate = if (pitchEverValid) peakPitch else 0f,
             peakRollRate = if (pitchEverValid) peakTrueRoll else 0f,
             pitchValid = pitchEverValid,
+            // Full-resolution signed couplet extrema for the classifier (couplet-decimation fix).
+            peakPitchUp = if (pitchEverValid) peakPitchUp else 0f,
+            peakPitchUpTMs = if (pitchEverValid) peakPitchUpTMs else 0L,
+            peakPitchDown = if (pitchEverValid) peakPitchDown else 0f,
+            peakPitchDownTMs = if (pitchEverValid) peakPitchDownTMs else 0L,
         )
         trackCandidateRate(candidate.tMs)
         // Master toggle: if the feature is disabled we still let the detector +
@@ -1181,82 +1336,152 @@ class RoadSenseController @JvmOverloads constructor(
             dropNoDyn++
             resetEventGyro(); return
         }
-        val gyroStats = GyroStats(peakYawRateRps = peakYaw, peakRollRateRps = peakRoll)
-        val verdict = rejection.evaluate(candidate, dyn, gyroStats, eventsPerSec())
+        // CONTEXT vetoes only (softPedal=true): gear / cornering / washboard / curb are
+        // unambiguous regardless of road feature, so reject them NOW. The brake/accel hard
+        // vetoes are SKIPPED here and handed to the HazardClassifier's soft artifact term
+        // (D-040) so braking INTO a real breaker — the user's exact scenario — isn't dropped.
+        val gyroStats = GyroStats(peakYawRateRps = peakYaw)
+        val verdict = rejection.evaluate(candidate, dyn, gyroStats, eventsPerSec(), softPedal = true)
         resetEventGyro()
         if (verdict.rejected) {
-            // D-032: a SUSTAINED washboard/cobble stretch isn't noise to discard —
-            // it's a rough-section hazard worth ONE warning. Convert it (throttled
-            // so we map ~one row per stretch, not per cobble); every OTHER reject
-            // (brake/turn/curb/gear) is still dropped.
             if (verdict.reason == "washboard") {
                 maybeMapRoughSection(candidate, now)
             } else {
                 Log.d(TAG, "rejected: ${verdict.reason}")
             }
-            // Tally reject reasons so the imu-flow heartbeat can report WHY candidates
-            // didn't become hazards (logcat Log.d is volatile across a no-ADB drive).
             dropRejects[verdict.reason ?: "?"] = (dropRejects[verdict.reason ?: "?"] ?: 0) + 1
             return
         }
 
-        // Classify (speed-normalized + vehicle-cal + confidence).
+        // DEFER (D-040): the HazardClassifier is the PRIMARY accept/type decision, but its
+        // crossing envelope needs the POST-event half (recover-after) which hasn't happened
+        // yet. So enqueue; drainPendingClassifications() (called from onImuBatch on this same
+        // IPC thread) runs the classifier ~CLASSIFY_DEFER_MS later with the full context ring,
+        // and does the accept→classify→store→confirm-card work in finalizeClassification().
+        pendingClassify.addLast(PendingClassify(candidate, dyn, candidate.tMs, now))
+        // Bound the queue defensively (a stall shouldn't grow it unbounded).
+        while (pendingClassify.size > MAX_PENDING_CLASSIFY) pendingClassify.removeFirst()
+    }
+
+    /**
+     * Drain deferred classifications whose POST-event envelope has now elapsed (D-040). Called
+     * from onImuBatch on the single IPC/sensor thread, so it shares the contextRing/store
+     * single-writer contract. [latestSensorTMs] is the newest sample's sensor clock; an item
+     * is ready once that clock has advanced [CLASSIFY_DEFER_MS] past the event peak (so the
+     * recover-after half is in the ring). On a sensor gap/stall, items also drain by wall-clock
+     * age so they can't get stuck forever.
+     */
+    private fun drainPendingClassifications(latestSensorTMs: Long, nowWall: Long, force: Boolean = false) {
+        // SCAN the whole queue (not break-on-front): the front-is-earliest assumption breaks if
+        // a backward wall-clock step (NTP/manual set) makes a later candidate's enqueuedTMs
+        // smaller (RS-DEFER-4). Scanning finalizes every ready item regardless of order; cheap
+        // (queue ≤ MAX_PENDING_CLASSIFY). force=true (leaving DRIVING / shutdown) finalizes ALL
+        // outstanding so none is stranded (RS-DEFER-1). An item is also ready if its event tMs is
+        // IMPLAUSIBLY ahead of the latest sample (backward jump) — finalize rather than wait out
+        // the wall fallback.
+        val it = pendingClassify.iterator()
+        while (it.hasNext()) {
+            val p = it.next()
+            val sensorReady = latestSensorTMs - p.enqueuedTMs >= CLASSIFY_DEFER_MS
+            val wallFallback = nowWall - p.enqueuedWall >= CLASSIFY_DEFER_MS * 3
+            val backwardJump = p.enqueuedTMs - latestSensorTMs > CLASSIFY_DEFER_MS
+            if (!force && !sensorReady && !wallFallback && !backwardJump) continue
+            it.remove()
+            try { finalizeClassification(p, nowWall) }
+            catch (t: Throwable) { Log.w(TAG, "finalizeClassification error: ${t.message}") }
+        }
+    }
+
+    /**
+     * PRIMARY accept/type/store decision for one deferred candidate (D-040). The
+     * HazardClassifier fuses the full ±window envelope (now complete) — its `accept` is the
+     * gate (replacing the old confidence-free "store everything") and its `type` is
+     * authoritative. SeverityClassifier still supplies severity + confidence + normalizedPeak.
+     */
+    private fun finalizeClassification(p: PendingClassify, now: Long) {
+        val candidate = p.candidate
+        // PRIMARY gate: temporal multi-sensor fusion over the now-complete envelope.
+        val v = hazardClassifier.classify(candidate, contextRing.toList(), candidate.tMs)
+        if (!v.accept) {
+            dropRejects["classifier"] = (dropRejects["classifier"] ?: 0) + 1
+            Log.d(TAG, "classifier reject realness=${"%.2f".format(v.realnessScore)} " +
+                "pitch=${"%.2f".format(v.pitchScore)} cross=${"%.2f".format(v.crossingScore)} " +
+                "artifact=${"%.2f".format(v.artifactScore)}")
+            return
+        }
+
+        // Severity / confidence still from SeverityClassifier (amplitude→bucket, vehicle-cal).
         val pose = gpsBuffer.backProject(candidate.tMs, GpsRingBuffer.DEFAULT_FIX_LATENCY_MS)
         val gpsAcc = pose?.accuracyM ?: 999f
-        val assessment: Assessment = classifier.classify(
+        val sev = classifier.classify(
             candidate = candidate,
             vehicleScale = calibrator.vehicleScale,
             calibrationMaturity = calibrator.maturity,
             gpsAccuracyM = gpsAcc,
         )
-
-        // Map from drive one (D-015): store regardless of confidence. No pose ⇒
-        // we can't localize, so skip (a hazard with no position is useless).
         if (pose == null) {
             Log.d(TAG, "no pose to localize hazard; skipping store")
             dropNoPose++
             return
         }
+        // TYPE comes from the fusion classifier (pitch couplet leads); severity from sev.
         dropStored++
         val hazard = RoadSenseHazard(
             lat = pose.lat,
             lng = pose.lng,
-            type = assessment.type,
-            severity = assessment.severity,
+            type = v.type,
+            severity = sev.severity,
             headingDeg = validHeading(pose.bearingDeg, candidate.speedMps),
-            confidence = assessment.confidence,
+            confidence = sev.confidence,
             speedKmh = candidate.speedMps * 3.6f,
-            aVertPeak = assessment.normalizedPeak,
+            aVertPeak = sev.normalizedPeak,
             tMs = candidate.tMs,
             altitudeM = pose.altitudeM,
         )
         val id = store.upsertDetection(hazard, now)
-        val hazardMsg = "hazard ${assessment.type}/${assessment.severity} " +
-            "conf=${"%.2f".format(assessment.confidence)} @${pose.lat},${pose.lng} id=$id"
-        Log.i(TAG, hazardMsg)
-        plog.info(hazardMsg)   // persist (logcat is volatile across a no-ADB drive)
+        val msg = "hazard ${v.type}/${sev.severity} realness=${"%.2f".format(v.realnessScore)} " +
+            "${if (v.pitchCoupletUsed) (if (v.pitchCoupletSign < 0) "pitch:pot " else "pitch:brk ") else ""}" +
+            "cross=${"%.2f".format(v.crossingScore)} conf=${"%.2f".format(sev.confidence)} " +
+            "@${pose.lat},${pose.lng} id=$id"
+        Log.i(TAG, msg)
+        plog.info(msg)
 
-        // Calibration Mode (R-OVL-6/D-025): surface this detection for the user to
-        // confirm/correct in the overlay. We stash the raw candidate + assessment
-        // so onWarningTick can write the ground-truth label once the verdict
-        // round-trips. Only one pending confirm at a time — a newer detection
-        // replaces an unanswered one (the older just never gets a human label).
+        // Calibration Mode (R-OVL-6/D-025): surface the (now finalized) detection for optional
+        // human confirm/correct. Pre-fills with the classifier's type + severity's bucket.
+        // RS-DEFER-2: the deferred drain can finalize MULTIPLE candidates in one pass, but
+        // pendingConfirm is a single slot. If a card is already outstanding, DON'T clobber it
+        // (the first hazard would lose its card + label) — instead record THIS hazard's label
+        // immediately as auto (so it still gets a ground-truth row), and leave the earlier
+        // card's slot intact. Both hazards are already stored/mapped above regardless.
         if (calibrationMode) {
-            pendingConfirm = PendingLabel(id, candidate, assessment, pose.lat, pose.lng, now)
-            visualSink.setPendingConfirm(
-                OverlayState.PendingConfirm(
-                    hazardId = id,
-                    algoType = assessment.type.ordinal,
-                    algoSeverity = assessment.severity.level,
-                    algoConfidence = assessment.confidence,
+            val assess = sev.copy(type = v.type)
+            if (pendingConfirm == null) {
+                pendingConfirm = PendingLabel(id, candidate, assess, pose.lat, pose.lng, now)
+                visualSink.setPendingConfirm(
+                    OverlayState.PendingConfirm(
+                        hazardId = id,
+                        algoType = v.type.ordinal,
+                        algoSeverity = sev.severity.level,
+                        algoConfidence = sev.confidence,
+                    )
                 )
-            )
+            } else {
+                // A card is still up for an earlier hazard — record this one's label as AUTO
+                // now rather than dropping it (excluded from the fit, but not lost).
+                groundTruth.record(
+                    hazardId = id, candidate = candidate,
+                    algoType = v.type, algoSeverity = sev.severity, algoConfidence = sev.confidence,
+                    confirmed = true, userSeverity = null, userType = null,
+                    lat = pose.lat, lng = pose.lng, nowMs = now, autoAccepted = true,
+                )
+            }
         }
     }
 
     private fun resetEventGyro() {
-        peakYaw = 0f; peakYawTMs = 0L; peakRoll = 0f; peakRollTMs = 0L
+        peakYaw = 0f; peakYawTMs = 0L
         peakPitch = 0f; peakPitchTMs = 0L; peakTrueRoll = 0f; peakTrueRollTMs = 0L
+        peakPitchUp = 0f; peakPitchUpTMs = 0L; peakPitchDown = 0f; peakPitchDownTMs = 0L
         pitchEverValid = false
     }
 
@@ -1403,5 +1628,15 @@ class RoadSenseController @JvmOverloads constructor(
         /** Confidence for a rough_section row — modest; it's a texture/rate call,
          *  not a clean isolated biphasic pulse. Above the default warn floor (0). */
         private const val ROUGH_SECTION_CONFIDENCE = 0.5f
+        /** Defer window (ms) before the HazardClassifier finalizes a candidate (D-040): how
+         *  long after the event peak we wait for the POST-event "recover-after" half of the
+         *  crossing envelope to elapse into the context ring. Matches HazardClassifier
+         *  ENVELOPE_MS (1500). The hazard is still mapped at the SAME event tMs/pose (we only
+         *  delay the DECISION, not the localization), so a ~1.5 s map latency is invisible —
+         *  approach warnings fire on a future pass / the rest of the drive anyway. */
+        private const val CLASSIFY_DEFER_MS = 1_500L
+        /** Cap on outstanding deferred candidates — a washboard burst or a stall can't grow
+         *  the queue unboundedly; oldest dropped. Real isolated hazards never approach this. */
+        private const val MAX_PENDING_CLASSIFY = 32
     }
 }

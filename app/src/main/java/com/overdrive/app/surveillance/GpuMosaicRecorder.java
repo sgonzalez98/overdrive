@@ -1146,10 +1146,25 @@ public class GpuMosaicRecorder {
             if (outputDir != null) {
                 targetDir = outputDir;
             } else if (overrideDir != null) {
-                targetDir = overrideDir;
+                // Reconcile the latched override against current storage state
+                // before trusting it. The watchdog-FAILURE branch pushes an
+                // INTERNAL fallback while an external volume is gone; if that
+                // volume came back via the recording-start path's own mount
+                // (not a watchdog SUCCESS tick, which is the only place that
+                // re-pokes setOutputDir), the latch is stale and would land
+                // this recording on internal despite the configured SD/USB
+                // being available again. reconcileRecordingOverride redirects
+                // ONLY that confirmed-stale case and is otherwise a no-op.
+                java.io.File reconciled = storageManager.reconcileRecordingOverride(overrideDir);
+                targetDir = (reconciled != null) ? reconciled : overrideDir;
                 this.pendingOutputDirOverride = null;
-                logger.info("Recorder using watchdog-supplied output dir override: "
-                    + overrideDir.getAbsolutePath());
+                if (targetDir == overrideDir || targetDir.getAbsolutePath().equals(overrideDir.getAbsolutePath())) {
+                    logger.info("Recorder using watchdog-supplied output dir override: "
+                        + overrideDir.getAbsolutePath());
+                } else {
+                    logger.info("Recorder override reconciled to live storage dir: "
+                        + targetDir.getAbsolutePath() + " (was " + overrideDir.getAbsolutePath() + ")");
+                }
             } else {
                 targetDir = storageManager.getRecordingsDir();
             }
@@ -1171,8 +1186,15 @@ public class GpuMosaicRecorder {
             // could swap recordingsDir between our targetDir read above and
             // ensureRecordingsSpace's internal re-read, leaving the reserve
             // pointed at the new volume while the file lands on the old.
+            // Use the recorder-critical-path variant: it starts immediately when
+            // the volume has enough PHYSICAL free space (a ~200µs StatFs probe,
+            // no lock, no shell fork) and hands category-limit retention to the
+            // async cleanup executor. The full lock-held reap-to-limit only runs
+            // when the disk is genuinely short on space. This is the fix for the
+            // "recording doesn't start until ~9-10 min after ACC ON" stall, where
+            // this pre-flight blocked behind the boot reap on recordingsCleanupLock.
             long reserveStartNs = System.nanoTime();
-            storageManager.ensureRecordingsSpace(100 * 1024 * 1024, targetDir);
+            storageManager.ensureRecordingsSpaceForRecorder(100 * 1024 * 1024, targetDir);
             long reserveMs = (System.nanoTime() - reserveStartNs) / 1_000_000L;
             if (reserveMs > 1_000) {
                 logger.warn("Recorder pre-flight ensureRecordingsSpace took " + reserveMs

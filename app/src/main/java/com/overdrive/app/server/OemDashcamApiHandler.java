@@ -123,6 +123,70 @@ public class OemDashcamApiHandler {
         }
     };
 
+    // ==================== PERIODIC SELF-HEAL TICKER ====================
+    //
+    // The OEM lifecycle is otherwise purely edge-driven (ACC IPC, surveillance
+    // IPC, config POST, stream-view, safe-zone, gear, pano-ready). Pano's
+    // RecordingModeManager has a 30s resync ticker that re-drives activation
+    // when modeActive is false; the OEM pipeline had no equivalent, so a
+    // start that raced or transiently failed (most visibly in the DashCam+Pano
+    // dual-AVMCamera layout, where OEM and pano contend for the HAL handle at
+    // ACC ON) stayed dead until some later incidental edge — the "recording
+    // started ~2km into the drive" symptom.
+    //
+    // This ticker re-runs applyTriggerLifecycleFromUcm every
+    // SELF_HEAL_INTERVAL_MS. The resolver is idempotent: when the resolved
+    // desired-state already matches the live pipeline it returns without
+    // touching anything (no encoder rebuild, no camera reopen). Only a drift
+    // — desired-but-not-running, or running-but-should-stop — triggers work.
+    // Bounds worst-case recovery latency to ~30s instead of an unbounded
+    // wait for the next edge.
+    private static final long SELF_HEAL_INTERVAL_MS = 30_000L;
+    private static volatile Thread selfHealThread;
+    private static volatile boolean selfHealRunning;
+
+    /**
+     * Start the periodic self-heal ticker. Idempotent — a second call while
+     * the thread is alive is a no-op. Call once at daemon boot.
+     */
+    public static synchronized void startSelfHealTicker() {
+        if (selfHealThread != null && selfHealThread.isAlive()) return;
+        selfHealRunning = true;
+        selfHealThread = new Thread(() -> {
+            com.overdrive.app.daemon.CameraDaemon.log(
+                "OemDashcam: self-heal ticker started (" + (SELF_HEAL_INTERVAL_MS / 1000) + "s interval)");
+            while (selfHealRunning) {
+                try {
+                    Thread.sleep(SELF_HEAL_INTERVAL_MS);
+                } catch (InterruptedException ie) {
+                    if (!selfHealRunning) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    continue;
+                }
+                if (!selfHealRunning) return;
+                // Only do work when some trigger is actually armed — an
+                // all-Off install should never spin up the pipeline or even
+                // pay the forceReload inside the resolver. The resolver's own
+                // idempotence handles the running-but-should-stop case, but
+                // gating here keeps the steady-state tick to a single cheap
+                // UCM read when the feature is unused.
+                try {
+                    if (com.overdrive.app.config.UnifiedConfigManager
+                            .isAnyOemDashcamTriggerEnabled()) {
+                        scheduleLifecycleRecalc();
+                    }
+                } catch (Throwable t) {
+                    com.overdrive.app.daemon.CameraDaemon.log(
+                        "OemDashcam: self-heal tick failed: " + t.getMessage());
+                }
+            }
+        }, "OemDashcamSelfHeal");
+        selfHealThread.setDaemon(true);
+        selfHealThread.start();
+    }
+
     /**
      * Drive the OEM pipeline lifecycle from the trigger union. The pipeline
      * runs whenever {@code recordingDesired} OR {@code streamingDesired}
@@ -163,8 +227,26 @@ public class OemDashcamApiHandler {
                     // we'll wait OUTSIDE the lock then re-enter to start
                     // recording (re-checking liveness post-relock).
                     needFormatWait = recordingDesired && !existing.isRecording();
-                    if (!recordingDesired && existing.isRecording()) {
-                        try { existing.stopRecording(); } catch (Throwable ignored) {}
+                    // Only stop a recording the RESOLVER owns. A surveillance
+                    // motion clip (opened via tryStartIfIdle, surv=smart) sets
+                    // recordingEventOwned — its lifecycle belongs to
+                    // SurveillanceEngineGpu (stopRecordingIfOwned on event end),
+                    // NOT to this resolver. Without this guard the periodic
+                    // self-heal recalc (every 30s) would truncate every
+                    // surv=smart clip the instant a tick observed
+                    // recordingDesired=false while a motion clip was open.
+                    //
+                    // The ownership check and the stop MUST be atomic w.r.t. the
+                    // (recording, recordingEventOwned) pair: a separate
+                    // isRecording()/isRecordingEventOwned()/stopRecording()
+                    // sequence is a check-then-act race — an independent
+                    // handleWriterAbort clearing `recording` then a surveillance
+                    // tryStartIfIdle opening an event clip in the gap would let
+                    // the ownership-blind stopRecording() truncate it.
+                    // stopRecordingIfNotEventOwned() collapses both into one
+                    // recordingStateLock critical section.
+                    if (!recordingDesired) {
+                        try { existing.stopRecordingIfNotEventOwned(); } catch (Throwable ignored) {}
                     }
                 } else {
                     // No triggers, no streaming — tear down completely.

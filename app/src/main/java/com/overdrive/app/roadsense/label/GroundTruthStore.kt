@@ -70,20 +70,28 @@ class GroundTruthStore private constructor() {
                     "dip_leading INT, speed_mps DOUBLE, axle_gap_ms INT, lateral_asym DOUBLE," +
                     // gyro-derived pitch/roll features (breaker-vs-pothole; pitch_valid gates them)
                     "peak_pitch_rate DOUBLE, peak_roll_rate DOUBLE, pitch_valid INT," +
+                    // auto_accepted=1 ⇒ this "confirmed" label is the G-7 timeout AUTO-accept
+                    // (the user did NOTHING — the algo's own guess was recorded), NOT an
+                    // explicit human verdict. CRITICAL for honest analysis: an auto row is
+                    // CIRCULAR (the algorithm grading itself) and MUST be excluded from any
+                    // accuracy metric or weight fit. Only confirmed/rejected/corrected rows
+                    // with auto_accepted=0 are trustworthy ground truth.
+                    "auto_accepted INT DEFAULT 0," +
                     "lat DOUBLE, lng DOUBLE, created_ms BIGINT);"
             )
         }
         // Migration: CREATE TABLE IF NOT EXISTS won't add columns to a pre-existing
-        // table, so add the pitch/roll features idempotently for older databases.
+        // table, so add newer features idempotently for older databases.
         // H2 supports ADD COLUMN IF NOT EXISTS; a failure here must not crash init.
         try {
             connection?.createStatement()?.use { st ->
                 st.execute("ALTER TABLE roadsense_labels ADD COLUMN IF NOT EXISTS peak_pitch_rate DOUBLE;")
                 st.execute("ALTER TABLE roadsense_labels ADD COLUMN IF NOT EXISTS peak_roll_rate DOUBLE;")
                 st.execute("ALTER TABLE roadsense_labels ADD COLUMN IF NOT EXISTS pitch_valid INT;")
+                st.execute("ALTER TABLE roadsense_labels ADD COLUMN IF NOT EXISTS auto_accepted INT DEFAULT 0;")
             }
         } catch (e: Exception) {
-            logger.error("GroundTruthStore pitch-column migration failed: " + e.message, e)
+            logger.error("GroundTruthStore column migration failed: " + e.message, e)
         }
     }
 
@@ -104,6 +112,10 @@ class GroundTruthStore private constructor() {
         lat: Double,
         lng: Double,
         nowMs: Long,
+        /** true ⇒ the G-7 timeout AUTO-accepted the algo's guess (user did nothing). Such
+         *  rows are CIRCULAR (algo grading itself) and must be excluded from accuracy/fit.
+         *  false ⇒ an explicit human verdict (confirm/reject/correct) = trustworthy. */
+        autoAccepted: Boolean = false,
     ) {
         synchronized(lock) {
             val c = connection ?: return
@@ -112,8 +124,8 @@ class GroundTruthStore private constructor() {
                     "INSERT INTO roadsense_labels (id, hazard_id, confirmed, user_severity, " +
                         "user_type, algo_type, algo_severity, algo_confidence, peak_up, peak_down, " +
                         "rise_ms, duration_ms, dip_leading, speed_mps, axle_gap_ms, lateral_asym, " +
-                        "peak_pitch_rate, peak_roll_rate, pitch_valid, " +
-                        "lat, lng, created_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);"
+                        "peak_pitch_rate, peak_roll_rate, pitch_valid, auto_accepted, " +
+                        "lat, lng, created_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);"
                 ).use { ps ->
                     ps.setString(1, UUID.randomUUID().toString())
                     ps.setString(2, hazardId)
@@ -134,29 +146,16 @@ class GroundTruthStore private constructor() {
                     ps.setDouble(17, candidate.peakPitchRate.toDouble())
                     ps.setDouble(18, candidate.peakRollRate.toDouble())
                     ps.setInt(19, if (candidate.pitchValid) 1 else 0)
-                    ps.setDouble(20, lat)
-                    ps.setDouble(21, lng)
-                    ps.setLong(22, nowMs)
+                    ps.setInt(20, if (autoAccepted) 1 else 0)
+                    ps.setDouble(21, lat)
+                    ps.setDouble(22, lng)
+                    ps.setLong(23, nowMs)
                     ps.executeUpdate()
                 }
-                logger.info("ground-truth label: confirmed=$confirmed algo=$algoType/$algoSeverity hazard=$hazardId")
+                logger.info("ground-truth label: confirmed=$confirmed auto=$autoAccepted algo=$algoType/$algoSeverity hazard=$hazardId")
             } catch (e: Exception) {
                 logger.error("GroundTruthStore.record failed: " + e.message, e)
             }
-        }
-    }
-
-    /** Count of labels (diagnostics / "how mature is our training set"). */
-    fun count(): Int {
-        synchronized(lock) {
-            val c = connection ?: return 0
-            return try {
-                c.createStatement().use { st ->
-                    st.executeQuery("SELECT COUNT(*) FROM roadsense_labels;").use { rs ->
-                        if (rs.next()) rs.getInt(1) else 0
-                    }
-                }
-            } catch (e: Exception) { 0 }
         }
     }
 

@@ -90,6 +90,19 @@ public class GpuSurveillancePipeline {
     private volatile int bsSizePct = 40;
     private volatile String bsCorner = "tr";
     private volatile int bsLastPanelW = -1, bsLastPanelH = -1;  // for rotation detect
+    // Blind-spot DISPLAY TARGET: "head_unit" (default — the 15.6" center screen,
+    // layerStack 0, byte-for-byte the shipping behaviour) or "cluster" (the driver
+    // gauge screen, layerStack 1, reached only while an OEM cluster projection is
+    // open — driven by ClusterProjectionController). Read from UCM blindspot.target
+    // on enable + retarget. Geometry is persisted PER TARGET (geometry vs
+    // geometryCluster) since a card sized for the tall head-unit overflows the short
+    // 1920×720 cluster.
+    private volatile String bsTarget = "head_unit";
+    // The cluster's layerStack is NOT fixed — SurfaceFlinger reassigns it each time
+    // the projection display is (re)created (size-profile 30 → stack 1, 31 → stack 2).
+    // Resolved LIVE from dumpsys in onClusterProjectionReady (BsNativeLayer
+    // .clusterLayerStack); 1 is only the initial fallback before the first resolve.
+    private volatile int bsClusterStack = 1;
     // Whether the layer is currently shown (turn-triggered / debug-preview gates it).
     private volatile boolean bsLayerVisible = false;
     // Daemon-side turn-trigger: reads the turn lamps (daemon owns the BYD light
@@ -1877,6 +1890,48 @@ public class GpuSurveillancePipeline {
 
             logger.info( "GPU pipeline started (streaming on-demand, surveillance NOT auto-enabled)");
 
+            // OEM Dashcam re-sync on pano-ready. In the DashCam+Pano layout
+            // both AVMCamera clients race at ACC ON: if OEM's startPipeline()
+            // lost that race (AVM handle contention on a single-client HAL, or
+            // a transient open failure), nothing retried it — the OEM lifecycle
+            // is edge-driven, so the forward sensor stayed un-recorded until
+            // some later incidental edge (gear change, surveillance IPC) — the
+            // "started ~2km in" symptom. Now that pano is fully up
+            // (running=true), re-drive the OEM resolver: when OEM is NOT
+            // running it starts it fresh (and, because pano is now up, gets
+            // pano's shared EGL for the texture-share/streaming path); when OEM
+            // is already running it short-circuits to a no-op. NOTE: this does
+            // NOT restart an OEM that is already running on an independent EGL
+            // context — that only affects view-6 streaming (recording is
+            // unaffected) and the documented off/on workaround still applies
+            // for that narrow case. This is the recording-side half of the
+            // "defer/restart OEM when pano starts" fix flagged in
+            // OEM_DASHCAM_PROGRESS.md. Scheduled (not inline) so the OEM
+            // warmup+open doesn't block pano's start() return.
+            try {
+                if (com.overdrive.app.config.UnifiedConfigManager
+                        .isAnyOemDashcamTriggerEnabled()) {
+                    logger.info("Pano start complete — scheduling OEM Dashcam lifecycle recalc "
+                        + "(DashCam+Pano re-sync)");
+                    com.overdrive.app.server.OemDashcamApiHandler.scheduleLifecycleRecalc();
+                }
+            } catch (Throwable t) {
+                logger.warn("OEM Dashcam pano-ready recalc dispatch failed: " + t.getMessage());
+            }
+
+            // Blind-spot self-arm on pano-ready. Same edge-only-lifecycle class
+            // as OEM dashcam above: the app arms the BS lane only on the ACC_ON
+            // broadcast edge, which is missed on a hard reboot (ACC already on
+            // before the app receiver exists). Now that pano is running, re-drive
+            // the idempotent daemon-side resolver so the lane arms here instead of
+            // waiting for the 30s self-heal ticker. No-op when blindspot.enabled
+            // is false or the lane is already armed.
+            try {
+                com.overdrive.app.server.StreamingApiHandler.resolveBlindSpotLifecycle();
+            } catch (Throwable t) {
+                logger.warn("Blind-spot pano-ready self-arm dispatch failed: " + t.getMessage());
+            }
+
         } catch (Exception e) {
             // Reset flags on failure so retry is possible. Both `running`
             // and `starting` must be cleared — running may have been
@@ -2225,8 +2280,29 @@ public class GpuSurveillancePipeline {
         // pipeline monitor across that I/O.
         if (outputDir == null) {  // Only check for default recordings dir
             try {
-                StorageManager storage = StorageManager.getInstance();
-                if (!storage.ensureStorageReady(false)) {
+                // FIX (coldstart: ensureStorageReady unbounded on the activation
+                // critical path). This call runs under RecordingModeManager's
+                // activationLock with warmupInFlight=true. ensureStorageReady can
+                // block for MINUTES on a FUSE-bridged SD/USB at cold boot (mount
+                // retry loop + per-file dir-walk under binder contention) — and
+                // because it sits BEFORE the encoder-format branch below, a stall
+                // here means (a) activationLock + warmupInFlight stay pinned, so
+                // every 30s warmup/resync retry just coalesces and makes no
+                // progress, and (b) the deferred format-available listener that
+                // would actually start recording is never registered. Field log
+                // camera_daemon_20260610_155444 showed ACC-ON→first-frame take
+                // 4m28s for exactly this reason.
+                //
+                // Bound it like the isStorageWriteReady probe already does. On
+                // timeout we treat storage as "not confirmed ready" and fall
+                // through — which is the SAME path the method already takes on a
+                // false return: the bounded isStorageWriteReady probe just below
+                // verifies actual writability, and on a miss defers + schedules
+                // the 2s storage-ready retry. So recording still starts within
+                // seconds (once the encoder format lands / the volume settles)
+                // instead of stalling the whole activation for minutes. On a
+                // healthy mount (<500ms) this is byte-for-byte identical to before.
+                if (!ensureStorageReadyBounded(false)) {
                     logger.warn("Storage not ready for recording, but continuing with fallback");
                 }
             } catch (Exception e) {
@@ -2779,7 +2855,63 @@ public class GpuSurveillancePipeline {
         }
         return ok[0];  // false if the probe timed out (still running) or failed
     }
-    
+
+    /**
+     * Timeout-bounded wrapper around {@link StorageManager#ensureStorageReady}
+     * for the recording-start critical path. {@code ensureStorageReady} can
+     * block for minutes on a cold-boot FUSE-bridged SD/USB (mount retry loop +
+     * dir-walk under binder contention); when it does, {@link #startRecording}
+     * stalls BEFORE the encoder-format branch while holding
+     * RecordingModeManager's activationLock + warmupInFlight, wedging recording
+     * activation for the entire stall (field log
+     * camera_daemon_20260610_155444: 4m28s ACC-ON→first-frame).
+     *
+     * <p>Same daemon-thread + bounded-join idiom as {@link #isStorageWriteReady}.
+     * The worker holds no pipeline locks, so if it hangs on a wedged volume it is
+     * harmless and reaped when the volume/process recovers. A {@code true} return
+     * means {@code ensureStorageReady} completed and returned true within the
+     * budget; ANY other outcome (timeout, false, or throw) returns {@code false},
+     * which the caller already handles by continuing to the bounded
+     * {@code isStorageWriteReady} probe + deferred-retry machinery.
+     *
+     * <p>Budget: {@link #ENSURE_STORAGE_READY_TIMEOUT_MS}. A healthy mount
+     * resolves in well under this, so the common path is unchanged; the budget
+     * only caps the pathological cold-boot stall.
+     */
+    private boolean ensureStorageReadyBounded(boolean forSurveillance) {
+        final boolean[] ready = {false};
+        Thread probe = new Thread(() -> {
+            try {
+                ready[0] = StorageManager.getInstance().ensureStorageReady(forSurveillance);
+            } catch (Throwable t) {
+                logger.warn("ensureStorageReadyBounded: ensureStorageReady threw: " + t.getMessage());
+                // ready stays false — caller falls through to the write probe.
+            }
+        }, "EnsureStorageReady");
+        probe.setDaemon(true);
+        probe.start();
+        try {
+            probe.join(ENSURE_STORAGE_READY_TIMEOUT_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        if (probe.isAlive()) {
+            logger.warn("ensureStorageReady did not return within "
+                + ENSURE_STORAGE_READY_TIMEOUT_MS + "ms (storage mount likely wedged) — "
+                + "proceeding to bounded write probe + deferred retry instead of "
+                + "blocking activation");
+            return false;
+        }
+        return ready[0];
+    }
+
+    // Budget for the recording-start ensureStorageReady call. Generous relative
+    // to a healthy mount (sub-second) but well under the activation watchdog's
+    // 30s stuck-warmup threshold, so a wedged mount surfaces as a fast deferred
+    // retry rather than a multi-minute activation stall.
+    private static final long ENSURE_STORAGE_READY_TIMEOUT_MS = 4_000L;
+
     /**
      * Stops recording.
      */
@@ -3505,7 +3637,28 @@ public class GpuSurveillancePipeline {
 
     // ── Dedicated blind-spot lane (views 7/8) ────────────────────────────────
 
-    public boolean isBlindSpotEnabled() { return blindSpotEnabled; }
+    /**
+     * Whether the blind-spot lane is GENUINELY armed — i.e. the {@code
+     * blindSpotEnabled} flag is set AND the SurfaceControl layer it represents is
+     * actually live ({@code bsLayer != null && isCreated()}).
+     *
+     * BLIND_SPOT_004 (false-success): the bare {@code blindSpotEnabled} flag can
+     * transiently lag the layer state — e.g. a SurfaceControl handle lost on a
+     * pano teardown/race can leave the flag {@code true} with a dead/null
+     * {@code bsLayer}. This method is what {@code handleBsStatus} reports as
+     * {@code enabled} and what {@code handleBsView}'s "lane armed?" gate consults.
+     * If it returned the bare flag, the daemon would tell the overlay the lane is
+     * up while no live SurfaceControl layer exists: the overlay commits the view,
+     * STOPS re-driving the warm loop, and its WsH264Client reconnect-storms a dead
+     * port forever (the observed NO-VIDEO flap). Gating on the LIVE layer — the
+     * same liveness predicate enableBlindSpot()'s idempotent fast-path uses — makes
+     * status truthful, so the overlay keeps re-POSTing /api/bs/enable until the
+     * lane genuinely arms. Convergent: no false success, no dead-port loop.
+     */
+    public boolean isBlindSpotEnabled() {
+        com.overdrive.app.surveillance.BsNativeLayer layer = bsLayer;
+        return blindSpotEnabled && layer != null && layer.isCreated();
+    }
     public int getBlindSpotViewMode() { return bsViewMode; }
     /** Current on-screen BS layer rect [x,y,w,h] (panel px); -1s if unresolved. */
     public int[] getBsGeometry() { int[] r = bsGeomRect; return new int[]{r[0], r[1], r[2], r[3]}; }
@@ -3607,6 +3760,20 @@ public class GpuSurveillancePipeline {
             if (blindSpotEnabled && bsLayer != null && bsLayer.isCreated()) {
                 setBlindSpotViewMode(bsViewMode);
                 return;
+            }
+            // BLIND_SPOT_004 (orphan self-heal): blindSpotEnabled is set but the
+            // SurfaceControl layer is dead/null (lost on a pano teardown/race, or a
+            // partial arm that never reached a live layer). The fast-path above
+            // didn't fire because the layer isn't live, but the stale flag would
+            // (a) make isBlindSpotEnabled() lie → false-success masking, and
+            // (b) short-circuit enableBlindSpotInternal()'s top-of-init bail
+            //     (`if (blindSpotEnabled) return;`), so the lane could NEVER rebuild.
+            // Tear the orphan down so this enable proceeds to a clean re-arm.
+            // disableBlindSpot() is idempotent and re-acquires this re-entrant lock.
+            if (blindSpotEnabled && (bsLayer == null || !bsLayer.isCreated())) {
+                logger.warn("BS: stale blindSpotEnabled with dead layer — "
+                    + "tearing down orphan before re-arm");
+                disableBlindSpot();
             }
             if (bsEnabling) {
                 logger.info("BS: enable already in flight — skipping duplicate enable");
@@ -3831,13 +3998,21 @@ public class GpuSurveillancePipeline {
         try {
             android.content.Context ctx = savedContext;
             if (ctx == null) ctx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
-            android.graphics.Point panel = (ctx != null)
-                ? com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx)
-                : new android.graphics.Point(1920, 1080);
-            bsLastPanelW = panel.x; bsLastPanelH = panel.y;
 
             org.json.JSONObject bs = com.overdrive.app.config.UnifiedConfigManager.getBlindSpot();
-            org.json.JSONObject g = (bs != null) ? bs.optJSONObject("geometry") : null;
+            // Resolve the display target FIRST so panel + geometry-key pick the
+            // right display. Default head_unit = byte-for-byte the shipping path.
+            bsTarget = (bs != null) ? bs.optString("target", "head_unit") : "head_unit";
+
+            android.graphics.Point panel = (ctx != null)
+                ? panelForTarget(ctx)
+                : new android.graphics.Point(1920, isClusterTarget() ? 720 : 1080);
+            bsLastPanelW = panel.x; bsLastPanelH = panel.y;
+
+            // Per-target geometry: head_unit reads the existing "geometry" key
+            // unchanged; cluster reads its own "geometryCluster" sibling key.
+            String geomKey = isClusterTarget() ? "geometryCluster" : "geometry";
+            org.json.JSONObject g = (bs != null) ? bs.optJSONObject(geomKey) : null;
 
             // BS-GEO-1/5: decide preset-vs-absolute by WHAT IS PERSISTED, not by
             // the bsSizePct field default (which is always >0, making presetRect
@@ -3853,13 +4028,19 @@ public class GpuSurveillancePipeline {
                 // Absolute form: honour the stored rect, clamped to the live panel.
                 r = clampBsRect(g.optInt("x"), g.optInt("y"), g.optInt("w"), g.optInt("h"));
             } else {
-                // Nothing persisted → default ~40% panel width card, 4:3, top-right.
-                int defW = Math.max(320, (int) (panel.x * 0.40));
+                // Nothing persisted → target-aware default card, 4:3, top-right.
+                // Cluster default = 0.80 (matches web bsSizePctCluster=80; the short
+                // 1920×720 cluster is why the head-unit 0.40 is widened). clampBsRect
+                // keeps 4:3 + fits the panel height, so an 80% cluster card is safely
+                // height-limited rather than overflowing.
+                double defFrac = isClusterTarget() ? 0.80 : 0.40;
+                int defW = Math.max(320, (int) (panel.x * defFrac));
                 int defH = (int) (defW * (double) BS_HEIGHT / BS_WIDTH);
                 r = clampBsRect(panel.x - defW - 24, 24, defW, defH);
             }
             if (r == null) {   // presetRect defensive null
-                int defW = Math.max(320, (int) (panel.x * 0.40));
+                double defFrac = isClusterTarget() ? 0.80 : 0.40;
+                int defW = Math.max(320, (int) (panel.x * defFrac));
                 int defH = (int) (defW * (double) BS_HEIGHT / BS_WIDTH);
                 r = clampBsRect(panel.x - defW - 24, 24, defW, defH);
             } else {
@@ -3886,38 +4067,70 @@ public class GpuSurveillancePipeline {
         }
     }
 
+    /** Set on-screen geometry from a size%+corner preset for the CURRENT target. */
+    public void setBsGeometryPreset(int pct, String corner) {
+        setBsGeometryPreset(pct, corner, bsTarget);
+    }
+
     /** Set on-screen geometry from a size%+corner preset (the daemon does the
      *  panel math — the web UI doesn't know the real panel size). Width = pct% of
      *  panel width, height keeps the BS 4:3 aspect, inset 24px from the chosen
-     *  corner (tl/tr/bl/br). Persists to UCM + applies live. */
-    public void setBsGeometryPreset(int pct, String corner) {
+     *  corner (tl/tr/bl/br). Persists to the TARGET's geometry key (geometry vs
+     *  geometryCluster) + applies live only when that target is active. */
+    public void setBsGeometryPreset(int pct, String corner, String target) {
         try {
+            boolean cluster = "cluster".equals(target);
             android.content.Context ctx = savedContext;
             if (ctx == null) ctx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
             android.graphics.Point panel = (ctx != null)
-                ? com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx)
-                : new android.graphics.Point(1920, 1080);
+                ? (cluster ? com.overdrive.app.surveillance.BsNativeLayer.clusterDisplaySize(ctx)
+                           : com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx))
+                : new android.graphics.Point(1920, cluster ? 720 : 1080);
             int p = Math.max(15, Math.min(pct, 90));
             int w = (int) (panel.x * (p / 100.0));
             int h = (int) (w * (double) BS_HEIGHT / BS_WIDTH);
             int inset = 24;
-            boolean right = corner == null || corner.endsWith("r");
-            boolean bottom = corner != null && corner.startsWith("b");
-            int x = right ? panel.x - w - inset : inset;
-            int y = bottom ? panel.y - h - inset : inset;
-            // Persist the PRESET (sizePct + corner), NOT absolute px — so it stays
-            // correct across portrait↔landscape rotation. resolveBsGeometry()
-            // recomputes the px rect from the LIVE panel on enable + rotation.
-            bsSizePct = p;
-            bsCorner = (corner != null) ? corner : "tr";
+            int x, y;
+            if ("center".equals(corner)) {
+                x = (panel.x - w) / 2; y = (panel.y - h) / 2;
+            } else {
+                boolean right = corner == null || corner.endsWith("r");
+                boolean bottom = corner != null && corner.startsWith("b");
+                x = right ? panel.x - w - inset : inset;
+                y = bottom ? panel.y - h - inset : inset;
+            }
+            // Persist the PRESET (sizePct + corner) under the target's key — NOT
+            // absolute px — so it stays correct across rotation. resolveBsGeometry()
+            // recomputes the px rect from the LIVE target panel on enable + rotation.
+            // updateSection is a shallow per-key merge, so writing one geometry key
+            // never clobbers the other target's key.
+            String geomKey = cluster ? "geometryCluster" : "geometry";
             org.json.JSONObject g = new org.json.JSONObject();
-            g.put("sizePct", p); g.put("corner", bsCorner);
+            g.put("sizePct", p); g.put("corner", (corner != null) ? corner : "tr");
             com.overdrive.app.config.UnifiedConfigManager.updateSection("blindspot",
-                new org.json.JSONObject().put("geometry", g));
-            setBsGeometry(x, y, w, h);   // apply now for the current orientation
+                new org.json.JSONObject().put(geomKey, g));
+            // Apply live only if editing the active target; otherwise it's persisted
+            // for when that target is next selected.
+            if (cluster == isClusterTarget()) {
+                bsSizePct = p;
+                bsCorner = (corner != null) ? corner : "tr";
+                setBsGeometry(x, y, w, h);
+            }
         } catch (Throwable t) {
             logger.warn("setBsGeometryPreset failed: " + t.getMessage());
         }
+    }
+
+    /** True when the blind-spot display target is the driver cluster. */
+    private boolean isClusterTarget() { return "cluster".equals(bsTarget); }
+
+    /** The panel size of the active target (head-unit vs cluster). The cluster
+     *  metrics are only valid while an OEM projection is open; otherwise
+     *  clusterDisplaySize falls back to the fixed 1920×720. */
+    private android.graphics.Point panelForTarget(android.content.Context ctx) {
+        return isClusterTarget()
+            ? com.overdrive.app.surveillance.BsNativeLayer.clusterDisplaySize(ctx)
+            : com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx);
     }
 
     /** Recompute the px rect from the current size%/corner preset + LIVE panel.
@@ -3930,6 +4143,9 @@ public class GpuSurveillancePipeline {
         int h = (int) (w * (double) BS_HEIGHT / BS_WIDTH);
         int inset = 24;
         String corner = (bsCorner != null) ? bsCorner : "tr";
+        if ("center".equals(corner)) {
+            return new int[]{ (panel.x - w) / 2, (panel.y - h) / 2, w, h };
+        }
         boolean right = corner.endsWith("r");
         boolean bottom = corner.startsWith("b");
         int x = right ? panel.x - w - inset : inset;
@@ -3937,14 +4153,14 @@ public class GpuSurveillancePipeline {
         return new int[]{x, y, w, h};
     }
 
-    /** Clamp a requested rect into the current panel with a min card size. */
+    /** Clamp a requested rect into the current TARGET panel with a min card size. */
     private int[] clampBsRect(int x, int y, int w, int h) {
         try {
             android.content.Context ctx = savedContext;
             if (ctx == null) ctx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
             android.graphics.Point panel = (ctx != null)
-                ? com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx)
-                : new android.graphics.Point(1920, 1080);
+                ? panelForTarget(ctx)
+                : new android.graphics.Point(1920, isClusterTarget() ? 720 : 1080);
             w = Math.max(160, Math.min(w, panel.x));
             h = Math.max(120, Math.min(h, panel.y));
             // BS-GEO-4: keep the dest rect at the BS buffer's 4:3 ratio so the
@@ -3966,10 +4182,147 @@ public class GpuSurveillancePipeline {
     /** Show/hide the BS layer (turn-trigger / debug-preview gate). */
     public void setBlindSpotVisible(boolean visible) {
         bsLayerVisible = visible;
+        com.overdrive.app.camera.PanoramicCameraGpu cam = camera;
+        if (cam != null) cam.setBsLayerVisible(visible);
         com.overdrive.app.surveillance.BsNativeLayer layer = bsLayer;
         if (layer == null || !layer.isCreated()) return;
-        if (visible) { int[] g = bsGeomRect; layer.setGeometry(g[0], g[1], g[2], g[3]); }
-        else layer.hide();
+        if (visible) {
+            // Retarget to the cluster's layerStack before showing (no-op if already
+            // there). Head-unit keeps layerStack 0 (never calls setLayerStack with a
+            // changed value → identical transaction). The show only happens via the
+            // gated path in bsTurnTick when the cluster display is actually present.
+            layer.setLayerStack(isClusterTarget() ? bsClusterStack : 0);
+            int[] g = bsGeomRect; layer.setGeometry(g[0], g[1], g[2], g[3]);
+        } else {
+            layer.hide();
+        }
+    }
+
+    /** Current BS display target string for API/status ("head_unit"|"cluster"). */
+    public String getBsTargetString() { return bsTarget; }
+
+    /** Invoked by ClusterProjectionController when the cluster projection CLOSES
+     *  (linger / max-cap / disarm / any forceClose). Hide the BS layer + drop the
+     *  render gate so PASS 1C stops drawing — otherwise the gate stays ON after the
+     *  projection's display is gone and the GL pipeline keeps rendering at full rate
+     *  into an orphaned layer (the "GPU stays high after the turn signal stops" bug).
+     *  No-op for head-unit (this is only wired to the cluster lifecycle). */
+    public void onClusterProjectionClosed() {
+        try {
+            // GPU fix ONLY: drop the render gate so PASS 1C stops drawing once the
+            // projection's display is gone. Do the SAME as a turn-off: hide the layer
+            // + clear the visible intent. (setBlindSpotVisible(false) is just
+            // layer.hide() + gate off — no teardown, pipeline stays warm.)
+            bsLayerVisible = false;
+            com.overdrive.app.camera.PanoramicCameraGpu cam = camera;
+            if (cam != null) cam.setBsLayerVisible(false);
+            com.overdrive.app.surveillance.BsNativeLayer layer = bsLayer;
+            if (layer != null && layer.isCreated()) layer.hide();
+        } catch (Throwable t) {
+            logger.warn("onClusterProjectionClosed failed: " + t.getMessage());
+        }
+    }
+
+    /** Invoked by ClusterProjectionController once the OEM cluster projection is
+     *  open AND the cluster VirtualDisplay is present. Resolve the live layerStack
+     *  (changes per size profile: 30→stack 1, 31→stack 2) + geometry against the
+     *  real cluster panel, then show the card if a signal is currently active.
+     *  SIMPLE direct show (the known-working path) — accepts a brief stale-frame on
+     *  re-show as a minor cosmetic issue rather than the warm-reveal indirection
+     *  that regressed to no-video. */
+    /** Drive the cluster card to VISIBLE while a projection is open. Idempotent +
+     *  desync-proof: it unconditionally asserts the camera render gate ON (cheap
+     *  volatile write — fixes the "gate stuck off after a close, layer shown=true,
+     *  nothing draws = no video" desync) and applies geometry only when not already
+     *  shown (the one expensive transaction). Called every tick while intent=visible
+     *  AND the projection is ready. Cluster-only. */
+    private void clusterShowWhenReady() {
+        bsLayerVisible = true;
+        com.overdrive.app.camera.PanoramicCameraGpu cam = camera;
+        if (cam != null) cam.setBsLayerVisible(true);   // unconditional — re-arm gate
+        com.overdrive.app.surveillance.BsNativeLayer layer = bsLayer;
+        if (layer == null || !layer.isCreated()) return;
+        if (!layer.isShown()) {
+            // Re-resolve the live cluster layerStack on each hidden→shown edge — the
+            // fission display may have materialised AFTER the projection-ready commit
+            // (READY_SETTLE_MS=900ms is shorter than the ~1-3s materialise on some
+            // models), so a single resolve at onClusterProjectionReady can be stale.
+            int live = com.overdrive.app.surveillance.BsNativeLayer.clusterLayerStack(bsClusterStack);
+            // STACK_UNRESOLVED (-1) = no fission display found → DO NOT SHOW. Tagging
+            // the layer with a wrong/sentinel stack composites it onto a dead stack =
+            // BLACK (the model-dependent bug). Keep it hidden; bsTurnTick re-enters
+            // every poll within the linger/cap window and retries once the display
+            // appears. Never pass a negative stack to setLayerStack/setGeometry.
+            if (live == com.overdrive.app.surveillance.BsNativeLayer.STACK_UNRESOLVED) {
+                logger.warn("clusterShowWhenReady: fission display unresolved — deferring show");
+                return;
+            }
+            bsClusterStack = live;
+            layer.setLayerStack(bsClusterStack);
+            int[] g = bsGeomRect; layer.setGeometry(g[0], g[1], g[2], g[3]);   // shows it
+        }
+    }
+
+    public void onClusterProjectionReady() {
+        try {
+            if (!isClusterTarget()) return;
+            com.overdrive.app.surveillance.BsNativeLayer layer = bsLayer;
+            if (layer == null || !layer.isCreated()) return;
+            int live = com.overdrive.app.surveillance.BsNativeLayer.clusterLayerStack(bsClusterStack);
+            // Only adopt a positively-resolved stack; keep last-known-good on a miss
+            // (don't poison bsClusterStack with the -1 sentinel — clusterShowWhenReady
+            // re-resolves and defers the show until the display is actually present).
+            if (live != com.overdrive.app.surveillance.BsNativeLayer.STACK_UNRESOLVED) {
+                bsClusterStack = live;
+            }
+            logger.info("onClusterProjectionReady: cluster layerStack=" + bsClusterStack
+                    + " (resolved=" + live + ")");
+            resolveBsGeometry();   // recompute against the live cluster panel
+            if (bsLayerVisible) clusterShowWhenReady();
+        } catch (Throwable t) {
+            logger.warn("onClusterProjectionReady failed: " + t.getMessage());
+        }
+    }
+
+    /** Re-read the display target (after a UI/API target change) and re-apply.
+     *  Flipping to head_unit force-closes any open cluster projection (restoring
+     *  the gauges) and moves the layer back to layerStack 0. Flipping to cluster
+     *  just re-resolves geometry; the projection opens lazily on the next signal. */
+    public void retargetBlindSpot() {
+        try {
+            com.overdrive.app.config.UnifiedConfigManager.forceReload();
+            org.json.JSONObject bs = com.overdrive.app.config.UnifiedConfigManager.getBlindSpot();
+            String newTarget = (bs != null) ? bs.optString("target", "head_unit") : "head_unit";
+            boolean wasCluster = isClusterTarget();
+            bsTarget = newTarget;
+            com.overdrive.app.surveillance.BsNativeLayer layer = bsLayer;
+            if (wasCluster && !isClusterTarget()) {
+                // Leaving the cluster — restore gauges and move the card home.
+                try { com.overdrive.app.surveillance.ClusterProjectionController.getInstance().forceClose("retarget-headunit"); } catch (Throwable ignored) {}
+                if (layer != null) layer.setLayerStack(0);
+            }
+            resolveBsGeometry();
+            if (layer != null && layer.isCreated() && bsLayerVisible && !isClusterTarget()) {
+                int[] g = bsGeomRect; layer.setGeometry(g[0], g[1], g[2], g[3]);
+            }
+        } catch (Throwable t) {
+            logger.warn("retargetBlindSpot failed: " + t.getMessage());
+        }
+    }
+
+    /** Apply a changed cluster layout (size profile) LIVE. The daemon re-reads the
+     *  profile from config on the next projection open, so to make a UI change take
+     *  effect now we force-close any open projection + hide the card; the next turn
+     *  signal reopens with the new profile (and onClusterProjectionReady re-resolves
+     *  the stack/geometry). No-op when not on the cluster target. */
+    public void relayoutCluster() {
+        try {
+            if (!isClusterTarget()) return;
+            setBlindSpotVisible(false);
+            com.overdrive.app.surveillance.ClusterProjectionController.getInstance().forceClose("relayout");
+        } catch (Throwable t) {
+            logger.warn("relayoutCluster failed: " + t.getMessage());
+        }
     }
 
     /** Start the daemon-side turn-trigger loop (idempotent). Reads turn lamps +
@@ -3999,32 +4352,48 @@ public class GpuSurveillancePipeline {
     private void bsTurnTick() {
         try {
             if (!blindSpotEnabled) return;
-            // Orientation change: if the panel rotated (1920×1080 ↔ 1080×1920), the
+            boolean cluster = isClusterTarget();
+            // Orientation change (head-unit only — the cluster is a fixed 1920×720
+            // and never rotates). If the panel rotated (1920×1080 ↔ 1080×1920), the
             // px rect from the old orientation is wrong. Recompute from the preset
-            // against the live panel and re-apply so the card stays correctly
-            // placed in both portrait and landscape. Cheap check (one displaySize).
-            try {
-                android.content.Context ctx = savedContext;
-                if (ctx == null) ctx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
-                if (ctx != null) {
-                    android.graphics.Point panel =
-                        com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx);
-                    if (panel.x != bsLastPanelW || panel.y != bsLastPanelH) {
-                        resolveBsGeometry();   // updates bsGeomRect + bsLastPanel*
-                        if (bsLayerVisible && bsLayer != null) {
-                            int[] g = bsGeomRect;
-                            bsLayer.setGeometry(g[0], g[1], g[2], g[3]);
+            // against the live panel and re-apply. Cheap check (one displaySize).
+            // For the cluster target this is skipped (panel is constant), and the
+            // cluster metrics aren't valid until the projection is open anyway.
+            if (!cluster) {
+                try {
+                    android.content.Context ctx = savedContext;
+                    if (ctx == null) ctx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
+                    if (ctx != null) {
+                        android.graphics.Point panel =
+                            com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx);
+                        if (panel.x != bsLastPanelW || panel.y != bsLastPanelH) {
+                            resolveBsGeometry();   // updates bsGeomRect + bsLastPanel*
+                            if (bsLayerVisible && bsLayer != null) {
+                                int[] g = bsGeomRect;
+                                bsLayer.setGeometry(g[0], g[1], g[2], g[3]);
+                            }
                         }
                     }
-                }
-            } catch (Throwable ignored) {}
+                } catch (Throwable ignored) {}
+            }
 
             org.json.JSONObject bs = com.overdrive.app.config.UnifiedConfigManager.getBlindSpot();
             boolean debugPreview = bs.optBoolean("debugPreview", false);
             if (debugPreview) {
                 int want = bs.optInt("debugView", 7) == 8 ? 8 : 7;
                 if (want != bsViewMode) setBlindSpotViewMode(want);
-                if (!bsLayerVisible) setBlindSpotVisible(true);
+                if (cluster) {
+                    // Calibration on the cluster: keep the projection open while
+                    // previewing; show only once the cluster display is present
+                    // (onClusterProjectionReady also shows it on the ready edge).
+                    com.overdrive.app.surveillance.ClusterProjectionController c =
+                        com.overdrive.app.surveillance.ClusterProjectionController.getInstance();
+                    c.requestOpen(); c.noteSignal(); c.requestCloseLingered();
+                    bsLayerVisible = true;   // intent
+                    if (c.isReady()) clusterShowWhenReady();   // desync-proof show
+                } else {
+                    if (!bsLayerVisible) setBlindSpotVisible(true);
+                }
                 return;
             }
             // Turn-gated: daemon owns the light HAL. readTurnNow packs bit0=L,bit1=R.
@@ -4036,9 +4405,36 @@ public class GpuSurveillancePipeline {
             if (side != 0) {
                 bsLastTurnOnMs = now;
                 if (side != bsViewMode) setBlindSpotViewMode(side);
-                if (!bsLayerVisible) setBlindSpotVisible(true);
-            } else if (bsLayerVisible && (now - bsLastTurnOnMs) >= BS_OFF_DEBOUNCE_MS) {
-                setBlindSpotVisible(false);
+                if (cluster) {
+                    // Lazy-open the OEM cluster projection on the first signal; keep it
+                    // open across the blink phase. Show the layer only once the cluster
+                    // display is present (never composite stack-1 onto nothing).
+                    com.overdrive.app.surveillance.ClusterProjectionController c =
+                        com.overdrive.app.surveillance.ClusterProjectionController.getInstance();
+                    c.requestOpen(); c.noteSignal(); c.requestCloseLingered();
+                    bsLayerVisible = true;   // intent
+                    if (c.isReady()) clusterShowWhenReady();   // desync-proof show
+                } else {
+                    if (!bsLayerVisible) setBlindSpotVisible(true);
+                }
+            } else {
+                // side == 0 (no indicator). Lift any max-cap lockout on the first
+                // genuinely-clear tick so a fresh indicator after the cap re-opens
+                // normally (a real blink reaches here between flashes; a forgotten
+                // signal never does, keeping the cap effective).
+                if (cluster && side == 0) {
+                    com.overdrive.app.surveillance.ClusterProjectionController.getInstance()
+                        .notifySignalCleared();
+                }
+                if (bsLayerVisible && (now - bsLastTurnOnMs) >= BS_OFF_DEBOUNCE_MS) {
+                    setBlindSpotVisible(false);
+                    if (cluster) {
+                        // Hide the card now; restore the gauges after the linger window
+                        // (rides brief blink gaps without re-paying the open latency).
+                        com.overdrive.app.surveillance.ClusterProjectionController.getInstance()
+                            .requestCloseLingered();
+                    }
+                }
             }
         } catch (Throwable t) {
             logger.debug("bsTurnTick: " + t.getMessage());
@@ -4050,6 +4446,17 @@ public class GpuSurveillancePipeline {
         try {
             if (!blindSpotEnabled) return;
             logger.info("BS: disabling blind-spot lane...");
+            // SAFETY: if a cluster projection is open, restore the gauges FIRST,
+            // before any teardown. Gated on isClusterTarget() so a head-unit-only
+            // user never even constructs the ClusterProjectionController (its
+            // HandlerThread). Behavior-preserving: a projection can only be opened
+            // from the cluster branch of bsTurnTick, so when target=head_unit
+            // projState is provably CLOSED and forceClose would early-return anyway.
+            // The cluster→head_unit flip restores gauges via retargetBlindSpot()
+            // (which force-closes BEFORE flipping bsTarget), so this guard is safe.
+            if (isClusterTarget()) {
+                try { com.overdrive.app.surveillance.ClusterProjectionController.getInstance().forceClose("bs-disabled"); } catch (Throwable ignored) {}
+            }
             blindSpotEnabled = false;
             stopBsTurnLoop();   // stop the daemon turn-trigger before teardown
 
@@ -4094,6 +4501,8 @@ public class GpuSurveillancePipeline {
             bsScaler = null;
             bsLayer = null;
             bsLayerVisible = false;
+            com.overdrive.app.camera.PanoramicCameraGpu cam = camera;
+            if (cam != null) cam.setBsLayerVisible(false);
 
             // GL-thread teardown: scaler.release (which destroys its EGLSurface
             // wrapping the SurfaceControl layer's Surface) MUST happen before the

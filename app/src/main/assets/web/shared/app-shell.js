@@ -799,7 +799,7 @@
                     return;
                 }
                 setEvCardAppearance(data.modelId || FALLBACK_MODEL_ID,
-                                    data.color || FALLBACK_MODEL_COLOR);
+                    data.color || FALLBACK_MODEL_COLOR);
             };
             xhr.onerror = function () { applyFallbackAppearance(); };
             xhr.ontimeout = function () { applyFallbackAppearance(); };

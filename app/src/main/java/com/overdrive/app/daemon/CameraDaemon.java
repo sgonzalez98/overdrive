@@ -437,7 +437,17 @@ public class CameraDaemon {
             com.overdrive.app.config.UnifiedConfigManager.updateValues(
                     "surveillance", reset);
         } catch (Exception ignored) {}
-        
+
+        // SAFETY: if a previous daemon was SIGKILL'd while a driver-cluster
+        // blind-spot projection was open, the gauges were left blanked (the
+        // shutdown hook couldn't run). The leaked clusterProjection* gate flags
+        // tell us to blind-fire the projection-close opcodes (18→0) so the native
+        // gauges are restored on this respawn. Stateless / harmless if nothing
+        // leaked. Mirrors the screen-deterrent reset above.
+        try {
+            com.overdrive.app.surveillance.ClusterProjectionController.clearStaleGateAtBoot();
+        } catch (Exception ignored) {}
+
         // Enable daemon logging for StorageManager (uses DaemonLogger instead of android.util.Log).
         // The StorageManager singleton itself is constructed later, after the HTTP/TCP/IPC
         // server threads are already running — so a flaky external volume can't wedge the
@@ -526,6 +536,15 @@ public class CameraDaemon {
         aacIngestServer = new com.overdrive.app.server.AacIngestServer();
         accMonitor = new AccMonitor();
 
+        // Initialize the unified config (migration from legacy + schema fill)
+        // BEFORE the IPC server starts accepting commands. The app process now
+        // forwards its config writes to us as UPDATE_SECTION/UPDATE_VALUES IPC
+        // commands; if the server accepted one before init() ran, the write
+        // could interleave with migrateFromLegacy()'s own save. Running init
+        // first makes the daemon a clean atomic writer from its first accepted
+        // command. (init() is fast — file read + optional one-shot migration.)
+        com.overdrive.app.config.UnifiedConfigManager.init();
+
         new Thread(tcpServer::start, "TcpServer").start();
         new Thread(httpServer::start, "HttpServer").start();
         new Thread(ipcServer, "SurveillanceIPC").start();
@@ -551,8 +570,9 @@ public class CameraDaemon {
             }
         }, "NotificationsInit").start();
 
-        // SOTA: Initialize unified config manager (handles migration from legacy configs)
-        com.overdrive.app.config.UnifiedConfigManager.init();
+        // (UnifiedConfigManager.init() moved above IPC-server startup so the
+        // daemon is a clean atomic writer before it can accept app-forwarded
+        // UPDATE_SECTION/UPDATE_VALUES commands.)
 
         // OTA-survives stickiness for the "Disable Native DVR" toggle.
         // If the user previously disabled com.byd.cdr but a factory reset /
@@ -1077,6 +1097,26 @@ public class CameraDaemon {
         // dedicated lifecycle executor; it runs async so daemon boot isn't
         // blocked by AVC warmup + AVMCamera open inside the OEM pipeline.
         com.overdrive.app.server.OemDashcamApiHandler.enforceStickyEnableIfRequested();
+
+        // Periodic OEM self-heal. The OEM lifecycle is edge-driven (ACC IPC,
+        // surveillance IPC, config POST, stream-view, pano-ready); a start
+        // that raced or transiently failed — most visibly in the DashCam+Pano
+        // dual-AVMCamera layout where OEM and pano contend for the HAL handle
+        // at ACC ON — otherwise stayed dead until the next incidental edge.
+        // This ticker re-drives the (idempotent) resolver every 30s so a
+        // missed/lost start recovers within ~30s instead of mid-drive.
+        com.overdrive.app.server.OemDashcamApiHandler.startSelfHealTicker();
+
+        // Periodic blind-spot self-arm. The app arms the BS lane only on the
+        // com.byd.action.ACC_ON broadcast EDGE; on a hard reboot ACC is already
+        // ON before the app's receiver exists, so that edge is missed and the
+        // lane stays dead until the user manually hits debug-preview. The daemon
+        // knows ACC=ON from its own hardware probe, so this idempotent resolver
+        // (no-op once armed) brings the lane up independently within ~30s. Also
+        // re-driven inline from the daemon ACC-on edge + the pano-ready hook so
+        // the common cold-reboot case arms in seconds, not at the first tick.
+        com.overdrive.app.server.StreamingApiHandler.startBsSelfHealTicker();
+        com.overdrive.app.server.StreamingApiHandler.resolveBlindSpotLifecycle();
 
         log("Daemon ready on TCP:" + TCP_PORT + " HTTP:" + HTTP_PORT);
 
@@ -1928,6 +1968,22 @@ public class CameraDaemon {
                     log("Shutdown hook: screen deterrent flags cleared");
                 } catch (Exception e) {
                     log("Shutdown hook: screen deterrent cleanup error: " + e.getMessage());
+                }
+
+                // 0.5 SAFETY: if a driver-cluster blind-spot projection is open, the
+                //     native gauges are currently REPLACED. Restore them FIRST and
+                //     SYNCHRONOUSLY (shutdown() fires 18→0 and blocks on a latch so
+                //     the restore lands before the VM dies). shutdown() itself clears
+                //     the recovery gate flags ONLY after the full 18→0 issued — so we
+                //     must NOT clear them here. If shutdown()'s close did not complete
+                //     (wedged thread / latch timeout), the flags stay SET on purpose so
+                //     the next respawn's clearStaleGateAtBoot() re-fires 18→0. No-op
+                //     when on head-unit / already closed (instance never constructed).
+                try {
+                    com.overdrive.app.surveillance.ClusterProjectionController.shutdownIfActive();
+                    log("Shutdown hook: cluster projection restore issued");
+                } catch (Exception e) {
+                    log("Shutdown hook: cluster projection cleanup error: " + e.getMessage());
                 }
 
                 // 1. Stop PermissionGranter — prevent orphaned pm grant processes
@@ -4735,13 +4791,23 @@ public class CameraDaemon {
             
             log("Gear Monitor initialized successfully");
             
-            // Initialize Performance Monitor for system instrumentation
+            // Initialize Performance Monitor for system instrumentation.
+            // init() only resolves pid/uid/context — it does NOT start polling.
+            // Polling is ON-DEMAND: it starts when a client opens the perf page
+            // (PerformanceApiHandler.clientConnected → PerformanceMonitor.start)
+            // and stops when the last client disconnects. Do NOT call start()
+            // here: an eager start ran the 1 Hz sampler 24/7, and its thermal
+            // sweep (30 zones × 2 sysfs reads ≈ 1.5s of blocking I/O per tick on
+            // this 48-zone head-unit) pegged the "PerfMonitor" thread at ~40% of
+            // a core continuously — the single largest consumer in the daemon,
+            // dwarfing the GL/encoder pipeline and causing the ACC-ON lag. The
+            // monitor is a diagnostics tool; it must cost nothing when nobody's
+            // looking at it.
             com.overdrive.app.monitor.PerformanceMonitor perfMonitor =
                 com.overdrive.app.monitor.PerformanceMonitor.getInstance();
             perfMonitor.init(sharedAppContext);
-            perfMonitor.start();
-            
-            log("Performance Monitor initialized successfully");
+
+            log("Performance Monitor initialized successfully (polling on-demand)");
             
             // Initialize SOC History Database for persistent battery tracking
             com.overdrive.app.monitor.SocHistoryDatabase socDb =

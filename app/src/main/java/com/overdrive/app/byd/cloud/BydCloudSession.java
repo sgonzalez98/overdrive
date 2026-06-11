@@ -16,19 +16,40 @@ public final class BydCloudSession {
     public final String userId;
     public final String signToken;
     public final String encryToken;
+    /** CN superId (empty for overseas). Used for MQTT + CN outer identifier. */
+    public final String superId;
     private final long loginTimeMs;
     private final long ttlMs;
 
     public BydCloudSession(String userId, String signToken, String encryToken) {
-        this(userId, signToken, encryToken, DEFAULT_TTL_MS);
+        this(userId, signToken, encryToken, "", DEFAULT_TTL_MS);
+    }
+
+    /** CN-aware constructor carrying the superId. */
+    public BydCloudSession(String userId, String signToken, String encryToken, String superId) {
+        this(userId, signToken, encryToken, superId, DEFAULT_TTL_MS);
     }
 
     public BydCloudSession(String userId, String signToken, String encryToken, long ttlMs) {
+        this(userId, signToken, encryToken, "", ttlMs);
+    }
+
+    public BydCloudSession(String userId, String signToken, String encryToken,
+                           String superId, long ttlMs) {
         this.userId = userId;
         this.signToken = signToken;
         this.encryToken = encryToken;
+        this.superId = superId != null ? superId : "";
         this.loginTimeMs = System.currentTimeMillis();
         this.ttlMs = ttlMs;
+    }
+
+    /**
+     * Identifier for CN outer payloads and MQTT: superId preferred, else userId.
+     * For overseas this is always userId (superId is empty).
+     */
+    public String effectiveApiIdentifier() {
+        return (superId != null && !superId.isEmpty()) ? superId : userId;
     }
 
     /** AES key for encryData/respondData: MD5(encryToken). */

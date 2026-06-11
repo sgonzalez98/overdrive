@@ -254,13 +254,13 @@ class RoadSenseImuSidecarService : Service(), SensorEventListener {
          * `am start-foreground-service -n <component>` exec. The service is
          * `exported="true"` (like LocationSidecarService) so `am` from the shell-uid
          * daemon can reach it; it then runs in the real app process. The [rate] rides
-         * as a string extra. [ctx] is unused but kept for call-site compatibility.
+         * as a string extra.
          */
-        fun start(ctx: android.content.Context, rate: ImuRate) {
+        fun start(rate: ImuRate) {
             exec("am start-foreground-service -n $COMPONENT --es $EXTRA_RATE ${rate.name}")
         }
 
-        fun stop(ctx: android.content.Context) {
+        fun stop() {
             exec("am stopservice -n $COMPONENT")
         }
 

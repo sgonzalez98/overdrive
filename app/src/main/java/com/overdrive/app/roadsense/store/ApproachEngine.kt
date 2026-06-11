@@ -49,12 +49,16 @@ class ApproachEngine(
     private val headingMatchDeg: Double = DEFAULT_HEADING_MATCH_DEG,
 ) {
 
+    /** The "already under the car / too late to warn" range floor (m), read-only, so the
+     *  WarningCoordinator's sticky-visual latch uses the SAME passed-hazard threshold this
+     *  engine applies in rank() rather than duplicating the constant. */
+    val minRangeMeters: Double get() = minRangeM
+
     /**
      * One hazard resolved relative to the car: how far, and the turn-relative
      * bearing for the overlay's direction arrow.
      *
      * @param rangeM            great-circle distance car→hazard (m).
-     * @param absoluteBearingDeg true-north bearing car→hazard (0..360).
      * @param relativeBearingDeg bearing relative to travel direction, −180..+180;
      *                           0 = dead ahead, + = to the right, − = to the left.
      *                           This is what the arrow renders.
@@ -62,7 +66,6 @@ class ApproachEngine(
     data class Approach(
         val stored: StoredHazard,
         val rangeM: Double,
-        val absoluteBearingDeg: Double,
         val relativeBearingDeg: Double,
     )
 
@@ -95,24 +98,10 @@ class ApproachEngine(
     )
 
     /**
-     * Rank [hazards] by how imminent they are and return the closest one ahead
-     * (or null if none qualifies). "Imminent" = smallest range among those inside
-     * the forward cone and range band.
-     *
-     * @param pose            live (or back-projected current) vehicle pose.
-     * @param hazards         candidates from queryAhead (nearby tiles).
-     * @param headingReliable false at crawl speed / no-fix → rank returns empty
-     *                        (suppress; we can't judge road/direction without a bearing).
-     */
-    fun nextAhead(
-        pose: Pose,
-        hazards: List<StoredHazard>,
-        headingReliable: Boolean,
-    ): Approach? = rank(pose, hazards, headingReliable).firstOrNull()
-
-    /**
      * Full ranked list ahead (nearest first) — for an overlay that wants to show
      * "next 3" or to let the warning layer pick by severity, not just distance.
+     * Returns empty at crawl / no-fix ([headingReliable] false): without a reliable
+     * bearing we can't judge road/direction, so we suppress rather than warn blind.
      */
     fun rank(
         pose: Pose,
@@ -168,7 +157,7 @@ class ApproachEngine(
                 if (headingDelta > headingMatchDeg) continue
             }
 
-            out.add(Approach(h, rangeM, absBearing, relBearing))
+            out.add(Approach(h, rangeM, relBearing))
         }
         out.sortBy { it.rangeM }
         return out
@@ -242,13 +231,6 @@ class ApproachEngine(
      */
     private fun alongTrack(a: Approach): Double =
         a.rangeM * cos(Math.toRadians(a.relativeBearingDeg))
-
-    /** The nearest zone ahead, or null if none — the one to announce. */
-    fun nextZone(
-        pose: Pose,
-        hazards: List<StoredHazard>,
-        headingReliable: Boolean,
-    ): HazardZone? = zonesAhead(pose, hazards, headingReliable).firstOrNull()
 
     private fun buildZone(members: List<Approach>): HazardZone {
         // Members are now along-track-sorted (zonesAhead), so the nearest-by-range

@@ -188,21 +188,29 @@ public class StorageManager {
     private long tripsLimitMb = DEFAULT_TRIPS_LIMIT_MB;
     
     // Storage type selection (SOTA: independent selection for recordings and surveillance)
-    private StorageType recordingsStorageType = StorageType.INTERNAL;
-    private StorageType surveillanceStorageType = StorageType.INTERNAL;
-    private StorageType tripsStorageType = StorageType.INTERNAL;
-    
-    // SD card state
-    private String sdCardPath = null;
-    private boolean sdCardAvailable = false;
+    // volatile: read cross-thread (recorder pre-flight reconcile, size queries)
+    // and written on settings/HTTP threads.
+    private volatile StorageType recordingsStorageType = StorageType.INTERNAL;
+    private volatile StorageType surveillanceStorageType = StorageType.INTERNAL;
+    private volatile StorageType tripsStorageType = StorageType.INTERNAL;
+
+    // SD card state.
+    // volatile: (re)assigned by discoverVolumes/ensureVolumeMounted on the
+    // VolumeWatchdog + mount threads and read by unrelated threads (resolveActive
+    // via reconcileRecordingOverride, isSdCardLikelyMounted). The volatile fence
+    // gives those readers a happens-before edge to the mount-path writes; without
+    // it a remount-completed write could stay invisible to the recorder thread.
+    private volatile String sdCardPath = null;
+    private volatile boolean sdCardAvailable = false;
 
     // USB state — flash drives mounted via OTG. Treated as a separate volume
     // class from SD because of how head-units enumerate them: SD sits behind
     // an mmc driver (Linux major 179), USB behind sd/SCSI (major 8/65/66/...).
     // Without this distinction discoverSdCard() will happily latch onto a USB
-    // stick when both are present.
-    private String usbPath = null;
-    private boolean usbAvailable = false;
+    // stick when both are present. volatile for the same cross-thread reason
+    // as the SD state fields above.
+    private volatile String usbPath = null;
+    private volatile boolean usbAvailable = false;
     
     // Singleton instance
     private static StorageManager instance;
@@ -213,17 +221,22 @@ public class StorageManager {
     private File internalProximityDir;
     private File internalTripsDir;
     
-    // SD card directories (may be null if SD card not available)
-    private File sdCardRecordingsDir;
-    private File sdCardSurveillanceDir;
-    private File sdCardProximityDir;
-    private File sdCardTripsDir;
+    // SD card directories (may be null if SD card not available).
+    // volatile: initSdCardDirectories() (re)assigns / null-clears these on the
+    // remount paths (watchdog + mount threads); resolveActive reads them from
+    // other threads. NOT immutable-after-init — the volatile fence is what makes
+    // a freshly-assigned dir visible to the recorder-side reader.
+    private volatile File sdCardRecordingsDir;
+    private volatile File sdCardSurveillanceDir;
+    private volatile File sdCardProximityDir;
+    private volatile File sdCardTripsDir;
 
-    // USB directories (may be null if USB drive not available)
-    private File usbRecordingsDir;
-    private File usbSurveillanceDir;
-    private File usbProximityDir;
-    private File usbTripsDir;
+    // USB directories (may be null if USB drive not available). volatile for the
+    // same cross-thread remount-visibility reason as the SD directories above.
+    private volatile File usbRecordingsDir;
+    private volatile File usbSurveillanceDir;
+    private volatile File usbProximityDir;
+    private volatile File usbTripsDir;
     
     // Active directories (based on storage type selection).
     // Volatile because they're written by setters/watchdog threads (which
@@ -858,41 +871,100 @@ public class StorageManager {
     }
 
     /**
-     * Probe whether the SD slot has a physical card inserted, independent
-     * of vold/sm state. Used by the kernel-level mount fallback to distinguish
-     * "card pulled" (give up cleanly) from "vold hasn't caught up yet"
-     * (worth waiting on). Reads /sys/class/mmc_host/mmcN/mmcN:* — the kernel
-     * publishes this entry as soon as the card is electrically detected,
-     * regardless of mount state.
+     * Probe whether the SD slot has a physical card inserted, independent of
+     * vold/sm state. Used by the kernel-level mount fallback to distinguish
+     * "card pulled" (give up cleanly) from "vold hasn't caught up yet" (worth
+     * waiting on).
      *
-     * @return true if at least one mmc_host has a card-present subdirectory
+     * <p><b>Bus-agnostic by design.</b> The SD reader on some BYD trims is
+     * wired through a SCSI/USB-storage bridge, so the card enumerates under
+     * block major 8 / {@code DEVNAME=sd*} and NEVER appears in
+     * {@code /sys/class/mmc_host}. The historical mmc_host-only probe returned
+     * false on those vehicles, so this fallback never armed: an ACC-OFF
+     * vold-drop then fell back to internal storage for the whole (~tens of
+     * seconds) republish window even though the card was physically seated the
+     * entire time (see the SCSI-bridge ACC-OFF unmount report, 2026-06).
+     *
+     * <p>Two SD-specific signals, in order. Neither false-positives on the
+     * always-present internal eMMC or on a real USB stick — both of which a
+     * raw block-device / major-8 scan would wrongly match, which is exactly
+     * why we do NOT scan {@code /sys/block} or {@code /sys/class/scsi_disk}
+     * here:
+     * <ol>
+     *   <li><b>{@code sys.byd.isSDExist}</b> — BYD vendor prop. EXPECTED to
+     *       report SD-slot occupancy bus-agnostically (independent of how the
+     *       kernel surfaces the device), which is what would cover the
+     *       SCSI-bridged case. {@code ExternalStorageCleaner} already reads
+     *       this prop. <b>Unverified on-car for major-8/sd* bridged readers as
+     *       of 2026-06</b> — the raw value is logged on every probe (see below)
+     *       so a single ACC-OFF device session (card seated, then pulled)
+     *       resolves both (a) whether it is populated for the bridged reader
+     *       and (b) whether it tracks live occupancy or can latch stale. NOTE
+     *       we intentionally do NOT corroborate with {@code sys.byd.mSdcardUuid}
+     *       (as ExternalStorageCleaner does) here: that prop is empty during
+     *       the very unmount window this probe recovers from, so requiring it
+     *       would defeat the fallback.</li>
+     *   <li><b>{@code /sys/class/mmc_host/mmcN/mmcN:*}</b> — the original
+     *       MMC-bus probe, retained for non-BYD hosts and for the case where
+     *       the prop is unavailable. The kernel publishes this entry as soon
+     *       as a card is electrically detected on the native MMC subsystem.</li>
+     * </ol>
+     *
+     * <p>This probe is consulted only inside the SD kernel-fallback branch,
+     * which is reached only after {@code sm}/{@code /proc/mounts} already failed
+     * to find the SD — i.e. not on any hot path during normal operation — so
+     * logging the raw prop value on each call is a ~per-watchdog-tick cadence
+     * during an outage, not a flood.
+     *
+     * @return true if a card is physically present in the SD slot
      */
     private boolean isSdCardPhysicallyPresent() {
+        // Signal 1 (vendor prop, EXPECTED bus-agnostic + SD-specific): the BYD
+        // firmware's own SD-slot occupancy flag. Intended to cover SCSI/USB-
+        // bridged SD readers (major 8 / sd*) that never surface under
+        // /sys/class/mmc_host. Log the RAW value so on-car behavior (populated?
+        // live vs sticky?) is resolvable from the daemon log in one session.
+        try {
+            String sdExist = getSystemProperty("sys.byd.isSDExist");
+            logInfo("isSdCardPhysicallyPresent: sys.byd.isSDExist='" + sdExist + "'");
+            if ("true".equalsIgnoreCase(sdExist)) {
+                return true;
+            }
+        } catch (Throwable t) {
+            logDebug("isSdCardPhysicallyPresent: sys.byd.isSDExist read failed: " + t.getMessage());
+        }
+
+        // Signal 2 (MMC bus): /sys/class/mmc_host/mmcN/mmcN:* card-present entry.
         try {
             File mmcHostDir = new File("/sys/class/mmc_host");
-            if (!mmcHostDir.exists() || !mmcHostDir.isDirectory()) return false;
-            File[] hosts = mmcHostDir.listFiles();
-            if (hosts == null) return false;
-            for (File host : hosts) {
-                File[] children = host.listFiles();
-                if (children == null) continue;
-                for (File child : children) {
-                    // mmcN:NNNN entries appear when a card is attached.
-                    // Internal eMMC also creates such entries (mmc0:0001 typically),
-                    // so the presence check alone isn't SD-specific — but the
-                    // caller already gated on classifyPublicVolume not finding
-                    // an SD via sm, so any mmc_host child here that ISN'T the
-                    // eMMC indicates an inserted external card. We don't need
-                    // to disambiguate further: false-positives just trigger a
-                    // 5s vold-catchup poll that no-ops and falls through.
-                    if (child.getName().matches("mmc\\d+:[0-9a-fA-F]+")) {
-                        return true;
+            if (mmcHostDir.exists() && mmcHostDir.isDirectory()) {
+                File[] hosts = mmcHostDir.listFiles();
+                if (hosts != null) {
+                    for (File host : hosts) {
+                        File[] children = host.listFiles();
+                        if (children == null) continue;
+                        for (File child : children) {
+                            // mmcN:NNNN entries appear when a card is attached.
+                            // Internal eMMC also creates such entries (mmc0:0001 typically),
+                            // so the presence check alone isn't SD-specific — but the
+                            // caller already gated on classifyPublicVolume not finding
+                            // an SD via sm, so any mmc_host child here that ISN'T the
+                            // eMMC indicates an inserted external card. We don't need
+                            // to disambiguate further: false-positives just trigger a
+                            // 5s vold-catchup poll that no-ops and falls through.
+                            if (child.getName().matches("mmc\\d+:[0-9a-fA-F]+")) {
+                                return true;
+                            }
+                        }
                     }
                 }
             }
         } catch (Throwable t) {
             logDebug("isSdCardPhysicallyPresent probe failed: " + t.getMessage());
         }
+        // Neither signal found a card. Log so the silent-give-up path is
+        // visible in the daemon log (the kernel fallback will not arm).
+        logInfo("isSdCardPhysicallyPresent: no card detected (isSDExist not true, no mmc_host card entry)");
         return false;
     }
 
@@ -1658,6 +1730,113 @@ public class StorageManager {
     }
 
     /**
+     * Reconcile a recorder's latched recordings output-dir override against
+     * the CURRENT resolved storage state, at the instant the recorder is about
+     * to consume it for a fresh recording.
+     *
+     * <p><b>Why this exists.</b> The volume watchdog pushes a one-shot
+     * {@code setOutputDir} override onto the pano recorder: the SUCCESS branch
+     * pushes the live SD/USB path, the FAILURE branch pushes the INTERNAL
+     * fallback so segments keep landing somewhere while the external volume is
+     * gone. That override outranks {@link #getRecordingsDir()} at consumption
+     * time. But when an SD card comes back via the recording-start path's own
+     * mount attempt (not a watchdog SUCCESS tick), nothing refreshes the
+     * latched INTERNAL override — so the very next recording lands on internal
+     * even though the configured SD remounted moments earlier (observed
+     * 2026-06: SD back at 09:38:20.435, recording opened on internal 0.3s
+     * later). This reconciles that stale latch.
+     *
+     * <p><b>Conservative by construction — no regression to the override
+     * mechanism.</b> The override is redirected ONLY in the exact stale case:
+     * the configured recordings volume is external AND it now resolves as
+     * available again (the watchdog-FAILURE internal latch is obsolete). In
+     * every other case the override is returned unchanged:
+     * <ul>
+     *   <li>override already equals the live target → unchanged;</li>
+     *   <li>configured volume still resolves to internal (genuinely gone) →
+     *       unchanged, so we never redirect a recording onto a volume we just
+     *       resolved as unavailable;</li>
+     *   <li>configured storage is INTERNAL → unchanged (no external latch is
+     *       ever pushed in that mode).</li>
+     * </ul>
+     * Any failure falls back to returning the override as-is.
+     *
+     * <p>Safe to call at start-of-recording only (no in-flight segment to
+     * split): the recorder guards on {@code recording==false} before this.
+     *
+     * <p><b>Thread-safety.</b> This runs on the recording-start thread while the
+     * volume watchdog (a separate thread) and HTTP storage-setter threads mutate
+     * the volume state. We (1) snapshot the configured type, per-class dirs and
+     * availability flags under {@code recordingsCleanupLock} — the same lock the
+     * recordings-category writers ({@code updateActiveDirectories}) take, which
+     * gives this reader a happens-before edge to those writes and reads the
+     * {availability, dir} pair as a consistent unit rather than a torn mix; and
+     * (2) before actually redirecting, re-confirm the external volume is live
+     * RIGHT NOW with the cheap fork-free liveness probe. Step (2) is the real
+     * safety net: even if the snapshot's availability flag is momentarily stale
+     * (card re-pulled since the watchdog last ran), the StatFs+canWrite probe
+     * fails on the vanished mount and we keep the protective internal override
+     * — so a stale read can never redirect a recording onto a dead SD/USB path.
+     *
+     * @param override the recorder's currently latched override (may be null)
+     * @return the directory the recorder should actually use; {@code override}
+     *         unchanged unless it is a confirmed-stale internal fallback AND the
+     *         configured external volume is verified live at this instant
+     */
+    public File reconcileRecordingOverride(File override) {
+        if (override == null) return null;
+        try {
+            // (1) Consistent snapshot under the recordings-category lock.
+            final StorageType type;
+            final File sdDir, usbDir;
+            final boolean sdAvail, usbAvail;
+            synchronized (recordingsCleanupLock) {
+                type = recordingsStorageType;
+                sdDir = sdCardRecordingsDir;
+                usbDir = usbRecordingsDir;
+                sdAvail = sdCardAvailable;
+                usbAvail = usbAvailable;
+            }
+
+            // Internal mode never carries an external latch worth reconciling.
+            if (type == StorageType.INTERNAL) return override;
+
+            // Resolve the live external dir for the configured type, but only
+            // if it currently resolves as available. If it doesn't, the volume
+            // is genuinely gone — leave the protective override untouched.
+            final File live;
+            final boolean liveMounted;
+            if (type == StorageType.SD_CARD) {
+                if (!sdAvail || sdDir == null) return override;
+                live = sdDir;
+                liveMounted = isSdCardLikelyMounted();
+            } else { // USB
+                if (!usbAvail || usbDir == null) return override;
+                live = usbDir;
+                liveMounted = isUsbLikelyMounted();
+            }
+
+            // Already pointed at what we'd pick right now — nothing to do.
+            if (live.getAbsolutePath().equals(override.getAbsolutePath())) {
+                return override;
+            }
+
+            // (2) Ground-truth re-confirm: only redirect onto a volume that is
+            // verifiably live at this instant. Neutralizes a stale availability
+            // read — a re-pulled card fails this probe and we keep the override.
+            if (!liveMounted) return override;
+
+            logInfo("Recorder override reconciled: configured " + type
+                + " is available again — redirecting stale override "
+                + override.getAbsolutePath() + " → " + live.getAbsolutePath());
+            return live;
+        } catch (Throwable t) {
+            logWarn("reconcileRecordingOverride failed, using override as-is: " + t.getMessage());
+        }
+        return override;
+    }
+
+    /**
      * Emit the canonical "<Category> using <type>: <path>" line. When the
      * resolved type doesn't match what the user configured (external volume
      * missing → fell back to internal), the line includes both so log
@@ -1684,9 +1863,15 @@ public class StorageManager {
         // ensureXxxSpace / sweep / wipe sees an atomic dir swap (not a
         // torn read where one volatile read returns the old dir and a
         // later read in the same call path returns the new one).
-        // resolveActive reads internalXxxDir / sdCardXxxDir / usbXxxDir
-        // which are all immutable after init — it doesn't need the lock
-        // itself; we hold the lock only for the assignment fence.
+        // resolveActive reads internalXxxDir (immutable after init) plus
+        // sdCardXxxDir / usbXxxDir / sdCardAvailable / usbAvailable. The
+        // external dir + availability fields are NOT immutable — they are
+        // (re)assigned/null-cleared by initSdCardDirectories/initUsbDirectories
+        // and discoverVolumes on the remount paths. They are declared volatile
+        // for cross-thread visibility; we hold the per-category lock here for
+        // the assignment fence and so a reader taking the same lock (e.g.
+        // reconcileRecordingOverride) sees the {availability, dir} pair
+        // consistently rather than a torn mix.
 
         // Recordings directory
         synchronized (recordingsCleanupLock) {
@@ -2963,24 +3148,63 @@ public class StorageManager {
      * Returns every file in the directory regardless of extension.
      */
     private File[] listFilesViaShell(File dir) {
+        Process p = null;
         try {
-            Process p = Runtime.getRuntime().exec(new String[]{"ls", dir.getAbsolutePath()});
-            java.io.BufferedReader reader = new java.io.BufferedReader(
-                new java.io.InputStreamReader(p.getInputStream()));
+            p = Runtime.getRuntime().exec(new String[]{"ls", dir.getAbsolutePath()});
+            final Process proc = p;
+            final java.util.List<File> files =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<File>());
 
-            java.util.List<File> files = new java.util.ArrayList<>();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (line.isEmpty()) continue;
-                files.add(new File(dir, line));
+            // Run the stdout drain on a daemon thread so we can bound the WHOLE
+            // read, not just the post-EOF wait. A bare readLine() loop blocks
+            // indefinitely if `ls` hangs mid-write on a bad FUSE-bridged volume
+            // (a real fault on these head-units) — the previous waitForBounded
+            // here only fired AFTER stdout EOF, so a mid-write stat hang was
+            // still unbounded. We give the drain a hard deadline and
+            // destroyForcibly() the child on timeout (which unblocks the
+            // reader's readLine with EOF). Conservative on timeout: we return
+            // whatever lines were drained before the deadline — under-counting
+            // self-corrects on the next reap/ticker pass; we never delete a file
+            // we didn't fully see.
+            Thread drain = new Thread(() -> {
+                try (java.io.BufferedReader reader = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(proc.getInputStream()))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        if (line.isEmpty()) continue;
+                        files.add(new File(dir, line));
+                    }
+                } catch (Exception ignored) {
+                    // Stream closed by destroyForcibly on timeout, or read error
+                    // — return whatever we have.
+                }
+            }, "listFilesViaShell-drain");
+            drain.setDaemon(true);
+            drain.start();
+            drain.join(4_000);
+            if (drain.isAlive()) {
+                logWarn("listFilesViaShell(" + dir.getName() + "): `ls` drain exceeded 4s"
+                    + " — killing child and returning partial list (" + files.size() + " so far)");
+                p.destroyForcibly();
+                // Give the kernel a moment to close the stream so the drain
+                // thread unblocks and stops touching `files` before we snapshot.
+                drain.join(500);
+            } else {
+                // Drain finished; reap the (now-exited or about-to-exit) child.
+                waitForBounded(p, 1_000, "listFilesViaShell(" + dir.getName() + ")");
             }
-            reader.close();
-            p.waitFor();
 
-            logDebug("listFilesViaShell: found " + files.size() + " files in " + dir.getName());
-            return files.toArray(new File[0]);
+            File[] snapshot;
+            synchronized (files) {
+                snapshot = files.toArray(new File[0]);
+            }
+            logDebug("listFilesViaShell: found " + snapshot.length + " files in " + dir.getName());
+            return snapshot;
         } catch (Exception e) {
             logWarn("listFilesViaShell failed: " + e.getMessage());
+            if (p != null) {
+                try { p.destroyForcibly(); } catch (Exception ignored) {}
+            }
             return new File[0];
         }
     }
@@ -3172,6 +3396,128 @@ public class StorageManager {
                 namePrefixForCategory("recordings"),
                 recordingsLimitMb * 1024 * 1024, reserveBytes);
         }
+    }
+
+    /**
+     * Recorder-critical-path variant of {@link #ensureRecordingsSpace(long, File)}.
+     *
+     * <p>WHY THIS EXISTS — the ~9-10 min "recording doesn't start after ACC ON"
+     * bug. The full {@code ensureRecordingsSpace} acquires
+     * {@code recordingsCleanupLock} and walks/deletes the entire recordings pool
+     * down to the configured size limit. On a cold boot that lock is held by the
+     * startup reap (constructor → {@code ensureRecordingsSpace(0)}), whose
+     * recordings leg can take many minutes on a FUSE-bridged SD/USB volume with
+     * thousands of legacy clips (one {@code ls}/{@code rm} shell fork per file).
+     * The recorder's pre-flight used to block on that same per-category lock for
+     * the WHOLE walk, so {@code RecordingModeManager.activateMode} →
+     * {@code pipeline.startRecording()} stalled and the user's drive was silently
+     * not recorded until the reap finished. The historical per-category-lock
+     * split fixed cross-category starvation but NOT recordings-vs-recordings:
+     * boot reap and recorder pre-flight are the same category.
+     *
+     * <p>THE INSIGHT — the recorder pre-flight only needs ONE guarantee: enough
+     * PHYSICAL free space that the next segment won't hit ENOSPC mid-file. That's
+     * a {@link android.os.StatFs} question (single ~200µs binder call, no lock, no
+     * shell fork), not a category-retention question. Keeping the folder under its
+     * configured MB limit is housekeeping that the startup reap, the 30s periodic
+     * ticker, AND the post-save cleanup all already enforce OFF the critical path.
+     *
+     * <p>So: if the target volume already has {@code reserveBytes} free, start
+     * recording immediately and hand category-limit retention to the async
+     * executor (it serialises behind any in-flight boot reap on the single-thread
+     * {@link #asyncCleanupExecutor} — correct ordering, no double-reap contention;
+     * and if the encoder is by then writing, {@code deferIfEncoderBusy} defers it
+     * to the next idle drain, so it never competes with live muxer writes). Only
+     * when the disk is GENUINELY short of physical space do we fall back to the
+     * synchronous lock-held reap — the one case where blocking is correct, because
+     * we truly cannot write the next segment until space frees.
+     *
+     * <p>This keeps every existing caller of {@link #ensureRecordingsSpace} (boot
+     * reap, periodic ticker, post-save, TCP limit-change, reset/wipe) byte-for-byte
+     * unchanged — only the recorder's hot path routes through here.
+     *
+     * @param reserveBytes physical bytes the next segment needs (recorder passes ~100MB)
+     * @param targetDir    the directory the recorder is about to write into
+     * @return true once it's safe to start recording (fast-path) or after a
+     *         successful synchronous reap; false only if the synchronous reap
+     *         could not free enough space.
+     */
+    public boolean ensureRecordingsSpaceForRecorder(long reserveBytes, File targetDir) {
+        File dir = (targetDir != null) ? targetDir : recordingsDir;
+
+        long availableBytes = -1L;
+        try {
+            // Probe the target dir itself when it exists; otherwise its parent
+            // (the dir may not be mkdir'd yet on first boot). StatFs reads the
+            // volume the path lives on either way.
+            File probeDir = null;
+            if (dir != null) {
+                probeDir = dir.exists() ? dir : dir.getParentFile();
+            }
+            if (probeDir != null && probeDir.exists()) {
+                android.os.StatFs stat = new android.os.StatFs(probeDir.getAbsolutePath());
+                availableBytes = stat.getAvailableBytes();
+            }
+        } catch (Throwable t) {
+            // StatFs throws IllegalArgumentException on an unmounted / half-
+            // mounted volume. Treat as "unknown" → fall through to the
+            // synchronous reap (which has its own dir-existence guards and is
+            // the correct conservative choice when we can't measure free space).
+            logWarn("Recorder pre-flight StatFs failed for "
+                + (dir != null ? dir.getAbsolutePath() : "null") + ": " + t.getMessage()
+                + " — falling back to synchronous reap");
+            availableBytes = -1L;
+        }
+
+        if (availableBytes >= reserveBytes) {
+            // Enough physical space — do NOT block on recordingsCleanupLock
+            // (which the boot reap may hold for minutes). Start recording now;
+            // hand category-limit retention to the async executor.
+            logDebug("Recorder pre-flight fast-path: " + formatSize(availableBytes)
+                + " free >= " + formatSize(reserveBytes) + " reserve — starting now, "
+                + "deferring retention to async cleanup");
+            final File asyncTarget = dir;
+            try {
+                asyncCleanupExecutor.execute(() -> {
+                    try {
+                        ensureRecordingsSpace(0, asyncTarget);
+                    } catch (Throwable t) {
+                        logWarn("Deferred recorder retention reap failed: " + t.getMessage());
+                    }
+                });
+            } catch (Throwable t) {
+                // Executor rejected (shutting down) — non-fatal; the 30s
+                // periodic ticker and post-save cleanup still enforce the limit.
+                logDebug("Could not enqueue deferred retention: " + t.getMessage());
+            }
+            return true;
+        }
+
+        // Genuine physical-space pressure (or StatFs unavailable): we MUST free
+        // space before writing, so the synchronous lock-held reap is correct
+        // here even if it means waiting on an in-flight reap. The bounded shell
+        // forks (listFilesViaShell / deleteFileViaShell) keep each delete from
+        // hanging indefinitely while we hold the recorder thread.
+        // WARN (not INFO): this is the ONE path that can still block the
+        // recorder behind the boot reap on recordingsCleanupLock — the exact
+        // mechanism behind the historical "~9-10 min late recording" stall.
+        // It is correct to block here (we genuinely cannot write a segment with
+        // less than the reserve free), but if this fires repeatedly in the
+        // field it means a volume is chronically near-full and recording start
+        // is being delayed — so make it loud and timed for diagnosability.
+        logWarn("Recorder pre-flight: only "
+            + (availableBytes < 0 ? "unknown (StatFs unavailable)" : formatSize(availableBytes))
+            + " free (< " + formatSize(reserveBytes) + " reserve) — running "
+            + "SYNCHRONOUS lock-held reap before recording (may block behind an "
+            + "in-flight boot/periodic reap; this is the near-full-volume fallback)");
+        long syncReapStartNs = System.nanoTime();
+        boolean ok = ensureRecordingsSpace(reserveBytes, targetDir);
+        long syncReapMs = (System.nanoTime() - syncReapStartNs) / 1_000_000L;
+        if (syncReapMs > 1_000) {
+            logWarn("Recorder pre-flight synchronous reap took " + syncReapMs
+                + "ms (freedEnough=" + ok + ") — recording start was delayed by storage cleanup");
+        }
+        return ok;
     }
 
     /**
@@ -3663,7 +4009,13 @@ public class StorageManager {
     private boolean deleteFileViaShell(File file) {
         try {
             Process p = Runtime.getRuntime().exec(new String[]{"rm", file.getAbsolutePath()});
-            int exitCode = p.waitFor();
+            // Bounded wait — a stuck `rm` on a bad FUSE-bridged external volume
+            // would otherwise pin the reap (and any caller holding a per-category
+            // cleanup lock) indefinitely. This is the per-file fork the boot reap
+            // runs hundreds of times; without a bound, a single hung delete stalls
+            // the entire walk. Returns -1 on timeout (treated as "not deleted",
+            // matching a non-zero exit) and force-kills the child.
+            int exitCode = waitForBounded(p, 4_000, "deleteFileViaShell(" + file.getName() + ")");
             return exitCode == 0;
         } catch (Exception e) {
             logWarn("deleteFileViaShell failed: " + e.getMessage());
