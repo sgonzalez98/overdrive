@@ -1016,52 +1016,52 @@
     <string name="roadsense_map_zoom_out">ズームアウト</string>
     <!-- Hazard visibility filter -->
     <string name="roadsense_map_hazards_filter">ハザードの可視性</string>
-    <string name="roadsense_map_hazards_all">Show all hazards</string>
-    <string name="roadsense_map_hazards_moderate">Moderate and severe</string>
-    <string name="roadsense_map_hazards_severe">Severe only</string>
-    <string name="roadsense_map_hazards_hidden">Hide hazards</string>
+    <string name="roadsense_map_hazards_all">すべてのハザードを表示</string>
+    <string name="roadsense_map_hazards_moderate">中程度と厳しいです</string>
+    <string name="roadsense_map_hazards_severe">重大度のみ</string>
+    <string name="roadsense_map_hazards_hidden">危険を隠す</string>
     <!-- POI along route (EV charging / fuel) -->
-    <string name="roadsense_map_poi_toggle">Charging and fuel</string>
+    <string name="roadsense_map_poi_toggle">充電と燃料</string>
     <!-- 2D / 3D buildings toggle -->
-    <string name="roadsense_map_dimension_toggle">2D / 3D buildings</string>
-    <string name="roadsense_map_3d_on">3D buildings on</string>
-    <string name="roadsense_map_3d_off">3D buildings off</string>
+    <string name="roadsense_map_dimension_toggle">2D / 3D 建物</string>
+    <string name="roadsense_map_3d_on">3D 建物 オン</string>
+    <string name="roadsense_map_3d_off">離れた 3D 建物</string>
     <string name="roadsense_map_poi_loading">Finding charging and fuel stops…</string>
-    <string name="roadsense_map_poi_none">No stations found nearby</string>
-    <string name="roadsense_map_poi_need_route">Choose a destination first</string>
+    <string name="roadsense_map_poi_none">近くに駅がありません</string>
+    <string name="roadsense_map_poi_need_route">先頭に目的地を選択してください</string>
     <!-- POI tap action sheet -->
-    <string name="roadsense_map_stop_added">Stop added</string>
-    <string name="roadsense_map_remove_stop_action">Remove stop</string>
-    <string name="roadsense_map_poi_navigate">Navigate here</string>
-    <string name="roadsense_map_poi_kind_charging">Charging station</string>
-    <string name="roadsense_map_poi_kind_fuel">Fuel station</string>
-    <string name="roadsense_map_poi_charging_generic">Charging station</string>
-    <string name="roadsense_map_poi_fuel_generic">Fuel station</string>
-    <string name="roadsense_map_route_switched">Switched route</string>
+    <string name="roadsense_map_stop_added">停止の追加</string>
+    <string name="roadsense_map_remove_stop_action">停止を削除</string>
+    <string name="roadsense_map_poi_navigate">ここに移動</string>
+    <string name="roadsense_map_poi_kind_charging">充電ステーション</string>
+    <string name="roadsense_map_poi_kind_fuel">燃料ステーション</string>
+    <string name="roadsense_map_poi_charging_generic">充電ステーション</string>
+    <string name="roadsense_map_poi_fuel_generic">燃料ステーション</string>
+    <string name="roadsense_map_route_switched">ルートの切り替え</string>
     <!-- Hazards-along-route pills (%1$d = count) -->
-    <string name="roadsense_map_pill_severe">%1$d severe</string>
-    <string name="roadsense_map_pill_moderate">%1$d moderate</string>
+    <string name="roadsense_map_pill_severe">%1$d 重症です</string>
+    <string name="roadsense_map_pill_moderate">%1$d 中</string>
     <string name="roadsense_map_pill_minor">%1$d minor</string>
     <!-- Shown briefly if the basemap can\'t be reached. -->
-    <string name="roadsense_map_offline">Map data unavailable offline</string>
+    <string name="roadsense_map_offline">地図データはオフラインで利用できません</string>
     <!-- Navigation: autocomplete + route options -->
-    <string name="roadsense_map_clear_search">Clear search</string>
+    <string name="roadsense_map_clear_search">検索をクリア</string>
     <!-- Route-options sheet -->
-    <string name="roadsense_map_routes_title">Choose a route</string>
-    <string name="roadsense_map_routes_to">Routes to %1$s</string>
-    <string name="roadsense_map_routes_cancel">Cancel</string>
+    <string name="roadsense_map_routes_title">ルートを選択</string>
+    <string name="roadsense_map_routes_to">%1$s へのルート</string>
+    <string name="roadsense_map_routes_cancel">キャンセル</string>
     <!-- Per-route row label, %1$d is the 1-based route number. -->
-    <string name="roadsense_map_route_option">Route %1$d</string>
-    <string name="roadsense_map_fastest">Fastest</string>
-    <string name="roadsense_map_start">Start</string>
+    <string name="roadsense_map_route_option">ルート %1$d</string>
+    <string name="roadsense_map_fastest">最速です</string>
+    <string name="roadsense_map_start">開始</string>
     <!-- Stops / waypoints in the route-options sheet -->
-    <string name="roadsense_map_your_location">Your location</string>
-    <string name="roadsense_map_add_stop">Add stop</string>
-    <string name="roadsense_map_add_stop_hint">Search a stop to add</string>
-    <string name="roadsense_map_stop_removed">Stop removed</string>
-    <string name="roadsense_map_remove_stop">Remove stop</string>
-    <string name="roadsense_map_move_stop_up">Move stop up</string>
-    <string name="roadsense_map_move_stop_down">Move stop down</string>
+    <string name="roadsense_map_your_location">現在地情報</string>
+    <string name="roadsense_map_add_stop">停止を追加</string>
+    <string name="roadsense_map_add_stop_hint">追加する停止を検索</string>
+    <string name="roadsense_map_stop_removed">削除停止</string>
+    <string name="roadsense_map_remove_stop">停止を削除</string>
+    <string name="roadsense_map_move_stop_up">停止を上に移動</string>
+    <string name="roadsense_map_move_stop_down">下へ移動</string>
     <!-- %1$d is the maximum number of stops allowed. -->
-    <string name="roadsense_map_max_stops">Up to %1$d stops allowed</string>
+    <string name="roadsense_map_max_stops">%1$d ストップまで</string>
 </resources>
