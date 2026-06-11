@@ -94,6 +94,9 @@
     <string name="logs_panel_title">Lokit</string>
     <!-- activity_main_new / activity_main-land -->
     <string name="url_connecting">Yhdistetään…</string>
+    <!-- Shown when an external link can't open (no browser on the head unit):
+         the URL is copied to the clipboard instead. %1$s = the URL. -->
+    <string name="url_copied_no_browser">Selainta ei löytynyt. Linkki kopioitu: %1$s</string>
     <!-- dialog_tailscale_settings -->
     <string name="tailscale_generate_login_url">Luo sisäänkirjautumisen URL</string>
     <string name="tailscale_scan_to_login">Skannaa sisään</string>
@@ -135,6 +138,8 @@
     <string name="camera_oem_dashcam_auto_resolved">Automaattinen — käyttää id %1$d (pano on id %2$d)</string>
     <string name="camera_oem_dashcam_auto_unavailable">Auto — pano id on %1$d, ei voi päätellä dashcamia</string>
     <string name="camera_oem_dashcam_save">Tallenna</string>
+    <string name="camera_concurrent_probe_label">Testaa kaksikameran tuki seuraavan käynnistyksen yhteydessä</string>
+    <string name="camera_concurrent_probe_subtitle">Tarkista, että molemmat kamerat avautuvat kerralla varmistaakseen, että tämä ajoneuvo voi ajaa pano + dashcam samanaikaisesti. Juokse kerran seuraavan uudelleenkäynnistyksen aikana pysäköitynä. Poistu pois käytöstä, ellei tallenteet näytä väärältä — sitä ei tarvita ja se voi hetkellisesti keskeyttää tallennuksen, jos se on aktiivinen, kun se toimii.</string>
     <!-- Dashcam-side camera labels — REVERSE of the pano labels above. The
          OEM dashcam id is the opposite of the pano id, so the helpful
          "this is what your trim should pick" hint flips between the two
@@ -927,6 +932,7 @@
          RoadSense — road-hazard detection feature
          ============================================================ -->
     <string name="rail_roadsense">RoadSense</string>
+    <string name="rail_hazard_map">Kartta</string>
     <string name="roadsense_title">RoadSense</string>
     <string name="roadsense_pill_scanning">Skannataan</string>
     <string name="roadsense_pill_idle">RoadSense</string>
@@ -972,4 +978,100 @@
     <!-- Blind Spot overlay labels (native overlay window). -->
     <string name="blindspot_overlay_left">Vasen</string>
     <string name="blindspot_overlay_right">OIKEUS</string>
+    <!-- ============================================================== -->
+    <!-- RoadSense Map (native MapLibre map view + tap-to-verify sheet). -->
+    <!-- ============================================================== -->
+    <string name="roadsense_map_title">Kartta</string>
+    <string name="roadsense_map_route_clear">Tyhjennä</string>
+    <string name="roadsense_map_route_unmapped">Ei vielä yhdistetty</string>
+    <string name="roadsense_map_back">Takaisin</string>
+    <string name="roadsense_map_recenter">Kirjoita uudelleen sijaintiini</string>
+    <!-- Tap-to-verify bottom sheet -->
+    <string name="roadsense_map_severity_label">Vakavuus</string>
+    <string name="roadsense_map_type_label">Tyyppi</string>
+    <string name="roadsense_map_type_unknown">Tuntematon</string>
+    <string name="roadsense_map_confirm">Vahvista</string>
+    <string name="roadsense_map_delete">Poista</string>
+    <!-- Status chip labels: candidate / on-device / shared with fleet -->
+    <string name="roadsense_map_status_candidate">Ehdokas</string>
+    <string name="roadsense_map_status_local">Laitteessa</string>
+    <string name="roadsense_map_status_cloud">Jaettu</string>
+    <!-- Meta line: "Moderate · 82% confidence · 3 reports" -->
+    <string name="roadsense_map_meta_format">%1$s · %2$d%% confidence · %3$s</string>
+    <!-- "3 reports" / "1 report" -->
+    <plurals name="roadsense_map_reports">
+        <item quantity="one">%1$d raportti</item>
+        <item quantity="other">%1$d raporttia</item>
+    </plurals>
+    <!-- Snackbar / toast confirmations -->
+    <string name="roadsense_map_confirmed_toast">Vaara vahvistettu</string>
+    <string name="roadsense_map_deleted_toast">Vaara poistettu</string>
+    <string name="roadsense_map_action_failed">RoadSensiin ei päästy. Yritä uudelleen.</string>
+    <string name="roadsense_map_no_location">Odotetaan GPS-korjausta…</string>
+    <!-- Navigation: search + routing + turn-by-turn -->
+    <string name="roadsense_map_search_hint">Etsi määränpää</string>
+    <string name="roadsense_map_search_action">Etsi</string>
+    <string name="roadsense_map_searching">Etsitään…</string>
+    <string name="roadsense_map_no_results">Paikkoja ei löytynyt</string>
+    <string name="roadsense_map_pick_destination">Valitse kohde</string>
+    <string name="roadsense_map_routing">Finding route…</string>
+    <string name="roadsense_map_route_failed">Reittiä ei löytynyt. Yritä uudelleen.</string>
+    <string name="roadsense_map_need_key">Lisää reititysavain RoadSensen asetuksiin navigoidaksesi.</string>
+    <string name="roadsense_map_rerouting">Off route — recalculating…</string>
+    <string name="roadsense_map_arrived">Olet saapunut.</string>
+    <string name="roadsense_map_nav_started">Navigoidaan kohteeseen %1$s</string>
+    <string name="roadsense_map_nav_ended">Navigointi päättyi</string>
+    <string name="roadsense_map_end_nav">Lopeta navigointi</string>
+    <string name="roadsense_map_zoom_in">Zoomaa sisään</string>
+    <string name="roadsense_map_zoom_out">Zoomaa ulos</string>
+    <!-- Hazard visibility filter -->
+    <string name="roadsense_map_hazards_filter">Vaaran näkyvyys</string>
+    <string name="roadsense_map_hazards_all">Näytä kaikki vaarat</string>
+    <string name="roadsense_map_hazards_moderate">Kohtalainen ja vakava</string>
+    <string name="roadsense_map_hazards_severe">Vain vaikea</string>
+    <string name="roadsense_map_hazards_hidden">Piilota vaarat</string>
+    <!-- POI along route (EV charging / fuel) -->
+    <string name="roadsense_map_poi_toggle">Lataus ja polttoaine</string>
+    <!-- 2D / 3D buildings toggle -->
+    <string name="roadsense_map_dimension_toggle">2D / 3D-rakennukset</string>
+    <string name="roadsense_map_3d_on">3D-rakennukset päällä</string>
+    <string name="roadsense_map_3d_off">3D-rakennukset pois käytöstä</string>
+    <string name="roadsense_map_poi_loading">Etsitään lataus- ja polttoainepysähdyksiä…</string>
+    <string name="roadsense_map_poi_none">Lähellä olevia asemia ei löytynyt</string>
+    <string name="roadsense_map_poi_need_route">Valitse määränpää ensin</string>
+    <!-- POI tap action sheet -->
+    <string name="roadsense_map_stop_added">Lopeta lisätty</string>
+    <string name="roadsense_map_remove_stop_action">Poista pysäytys</string>
+    <string name="roadsense_map_poi_navigate">Siirry tähän</string>
+    <string name="roadsense_map_poi_kind_charging">Latausasema</string>
+    <string name="roadsense_map_poi_kind_fuel">Polttoaineen asema</string>
+    <string name="roadsense_map_poi_charging_generic">Latausasema</string>
+    <string name="roadsense_map_poi_fuel_generic">Polttoaineen asema</string>
+    <string name="roadsense_map_route_switched">Vaihda reittiä</string>
+    <!-- Hazards-along-route pills (%1$d = count) -->
+    <string name="roadsense_map_pill_severe">%1$d severe</string>
+    <string name="roadsense_map_pill_moderate">%1$d moderate</string>
+    <string name="roadsense_map_pill_minor">%1$d minor</string>
+    <!-- Shown briefly if the basemap can\'t be reached. -->
+    <string name="roadsense_map_offline">Map data unavailable offline</string>
+    <!-- Navigation: autocomplete + route options -->
+    <string name="roadsense_map_clear_search">Clear search</string>
+    <!-- Route-options sheet -->
+    <string name="roadsense_map_routes_title">Choose a route</string>
+    <string name="roadsense_map_routes_to">Routes to %1$s</string>
+    <string name="roadsense_map_routes_cancel">Cancel</string>
+    <!-- Per-route row label, %1$d is the 1-based route number. -->
+    <string name="roadsense_map_route_option">Route %1$d</string>
+    <string name="roadsense_map_fastest">Fastest</string>
+    <string name="roadsense_map_start">Start</string>
+    <!-- Stops / waypoints in the route-options sheet -->
+    <string name="roadsense_map_your_location">Your location</string>
+    <string name="roadsense_map_add_stop">Add stop</string>
+    <string name="roadsense_map_add_stop_hint">Search a stop to add</string>
+    <string name="roadsense_map_stop_removed">Stop removed</string>
+    <string name="roadsense_map_remove_stop">Remove stop</string>
+    <string name="roadsense_map_move_stop_up">Move stop up</string>
+    <string name="roadsense_map_move_stop_down">Move stop down</string>
+    <!-- %1$d is the maximum number of stops allowed. -->
+    <string name="roadsense_map_max_stops">Up to %1$d stops allowed</string>
 </resources>
