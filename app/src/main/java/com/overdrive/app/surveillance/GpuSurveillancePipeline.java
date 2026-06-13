@@ -137,6 +137,15 @@ public class GpuSurveillancePipeline {
     private volatile boolean dashcamUseWindshieldConfig = false;
     private volatile int windshieldCameraIdConfig = -1;
 
+    // Sentry (surveillance) layout profile — the independent counterpart to
+    // recordingLayoutConfig / dashcamUseWindshieldConfig above. Persisted in
+    // surveillance.recordingLayout / surveillance.useWindshield. Selected over
+    // the dashcam profile by applyActiveLayoutProfile() whenever the pipeline
+    // is in SURVEILLANCE mode, so sentry and dashcam can use different layouts
+    // on the one shared recorder (the two modes are mutually exclusive).
+    private volatile int surveillanceLayoutConfig = 0;
+    private volatile boolean surveillanceUseWindshieldConfig = false;
+
     // Mode tracking
     private enum Mode {
         IDLE,           // Nothing active
@@ -1386,8 +1395,10 @@ public class GpuSurveillancePipeline {
         }
         // Apply persisted overlay enabled state to new recorder
         recorder.setOverlayEnabled(overlayEnabledConfig);
-        // Apply persisted recording composition layout (standard / dashcam).
-        recorder.setRecordingLayout(recordingLayoutConfig);
+        // Apply the layout profile that matches the current mode (dashcam vs
+        // sentry) to the freshly-created recorder. IDLE/normal-recording use
+        // the dashcam profile; surveillance uses its own.
+        applyActiveLayoutProfile();
 
         // 3. Create GPU downscaler with profile-driven offsets
         downscaler = new GpuDownscaler(quadrantStripOffsetX);
@@ -1447,8 +1458,10 @@ public class GpuSurveillancePipeline {
         camera = new PanoramicCameraGpu(cameraWidth, cameraHeight,
             quadrantStripOffsetX, quadrantCornerOffsetsXY);
         camera.setConsumers(recorder, downscaler, sentry);
-        // Apply persisted dashcam windshield-source preference to the new camera.
-        applyWindshieldToCamera();
+        // Apply the active layout profile's windshield-source preference to the
+        // new camera (dashcam profile at startup/IDLE; the surveillance profile
+        // is re-applied when enableSurveillance() runs).
+        applyActiveLayoutProfile();
 
         // Camera FPS config — must match the encoder FPS used above (loadTargetFps())
         // so that camera frame delivery rate matches the encoder's KEY_FRAME_RATE.
@@ -3001,8 +3014,14 @@ public class GpuSurveillancePipeline {
             telemetryCollector.setOverlayRecordingActive(false);
             telemetryCollector.stopPolling();
         }
+
+        // Now that the mode is SURVEILLANCE, switch the recorder + windshield
+        // to sentry's own layout profile. applyActiveLayoutProfile() reads
+        // currentMode, so if sentry was null (mode unchanged) this harmlessly
+        // re-applies the dashcam profile instead.
+        applyActiveLayoutProfile();
     }
-    
+
     /**
      * Disables surveillance mode.
      */
@@ -3011,6 +3030,10 @@ public class GpuSurveillancePipeline {
             sentry.disable();
             currentMode = Mode.IDLE;
             logger.info( "Surveillance mode disabled");
+            // Back to IDLE → restore the dashcam layout profile so the next
+            // normal/continuous recording uses the dashcam setting, not the
+            // sentry one we may have switched to in enableSurveillance().
+            applyActiveLayoutProfile();
         }
     }
     
@@ -5093,40 +5116,87 @@ public class GpuSurveillancePipeline {
     private boolean overlayPollingHeld = false;
 
     /**
-     * Select the recording composition layout (0 = standard 360 mosaic,
-     * 1 = dashcam: 360 front slice on top, 360 left/rear/right below).
-     * Persisted in recording.recordingLayout; hot-applied to the live
-     * recorder and re-applied to recorders created later. Called from the
-     * daemon at startup and from the settings API on change.
+     * Select the DASHCAM recording composition layout (0 = standard 360
+     * mosaic, 1 = dashcam: 360 front slice on top, 360 left/rear/right below).
+     * Persisted in recording.recordingLayout. Stored here and pushed to the
+     * recorder only while the pipeline is NOT in surveillance mode — sentry
+     * owns its own layout profile (see {@link #setSurveillanceRecordingLayout}).
+     * Called from the daemon at startup and from the settings API on change.
      */
     public void setRecordingLayout(int layout) {
         this.recordingLayoutConfig = (layout == 1) ? 1 : 0;
-        if (recorder != null) {
-            recorder.setRecordingLayout(this.recordingLayoutConfig);
-        }
+        applyActiveLayoutProfile();
     }
 
     /**
-     * Record the user's preference for sourcing the dashcam top band from a
-     * dedicated windshield camera. The windshield is captured by
-     * PanoramicCameraGpu and composited into the recorder's dashcam top band
-     * when available; the dashcam layout falls back to the 360 front-camera
-     * slice (the documented graceful fallback) when it isn't. Storing the
-     * flag keeps the setting persisted and the API/daemon callers resolved.
+     * Record the user's preference for sourcing the DASHCAM top band from a
+     * dedicated windshield camera (recording.dashcamUseWindshield). Pushed to
+     * the producer only while NOT in surveillance mode. The windshield is
+     * captured by PanoramicCameraGpu and composited into the recorder's dashcam
+     * top band when available; the dashcam layout falls back to the 360
+     * front-camera slice (the documented graceful fallback) when it isn't.
      */
     public void setDashcamUseWindshield(boolean useWindshield) {
         this.dashcamUseWindshieldConfig = useWindshield;
-        applyWindshieldToCamera();
+        applyActiveLayoutProfile();
     }
 
     /**
-     * Push the windshield-source preference to the producer: resolve the
-     * windshield camera id for this vehicle and enable/disable the dedicated
-     * windshield capture accordingly. No-op until the camera exists (reapplied
-     * on camera creation). PanoramicCameraGpu opens/closes the camera on its GL
-     * thread and falls back to the 360 front slice if it can't open it.
+     * Select the SENTRY (surveillance) recording composition layout — the
+     * independent counterpart to {@link #setRecordingLayout}. Persisted in
+     * surveillance.recordingLayout. Stored here and pushed to the recorder
+     * only while the pipeline IS in surveillance mode, so dashcam and sentry
+     * recordings can use two different layouts on the one shared recorder.
+     * Called from the daemon at startup and from the settings API on change.
      */
-    private void applyWindshieldToCamera() {
+    public void setSurveillanceRecordingLayout(int layout) {
+        this.surveillanceLayoutConfig = (layout == 1) ? 1 : 0;
+        applyActiveLayoutProfile();
+    }
+
+    /**
+     * SENTRY counterpart to {@link #setDashcamUseWindshield}: sentry's own
+     * "use the dedicated windshield camera for the dashcam top band"
+     * preference (surveillance.useWindshield). Pushed to the producer only
+     * while in surveillance mode.
+     */
+    public void setSurveillanceUseWindshield(boolean useWindshield) {
+        this.surveillanceUseWindshieldConfig = useWindshield;
+        applyActiveLayoutProfile();
+    }
+
+    /**
+     * Push the layout profile that matches the CURRENT pipeline mode to the
+     * shared recorder + windshield camera. Surveillance mode uses the
+     * surveillance.* profile; every other mode (normal recording / idle) uses
+     * the dashcam recording.* profile. The two modes are mutually exclusive,
+     * so a single recorder serves both by re-applying the right profile on each
+     * mode transition, recorder (re)creation, and config change. A change to
+     * the INACTIVE profile is stored but not shown until that mode is entered.
+     */
+    private void applyActiveLayoutProfile() {
+        boolean surveillance = currentMode == Mode.SURVEILLANCE;
+        int layout = surveillance ? surveillanceLayoutConfig : recordingLayoutConfig;
+        boolean useWindshield = surveillance
+            ? surveillanceUseWindshieldConfig : dashcamUseWindshieldConfig;
+        if (recorder != null) {
+            // GpuMosaicRecorder.setRecordingLayout early-returns when unchanged.
+            recorder.setRecordingLayout(layout);
+        }
+        applyWindshieldToCamera(useWindshield);
+    }
+
+    /**
+     * Push the given windshield-source preference to the producer: resolve the
+     * windshield camera id for this vehicle and enable/disable the dedicated
+     * windshield capture accordingly. No-op until the camera exists (re-applied
+     * on the next mode transition / recorder creation). PanoramicCameraGpu
+     * opens/closes the camera on its GL thread and falls back to the 360 front
+     * slice if it can't open it. Callers (config setters + mode transitions on
+     * ACC events) are infrequent, so re-resolving + pushing here is never on a
+     * hot path.
+     */
+    private void applyWindshieldToCamera(boolean useWindshield) {
         PanoramicCameraGpu cam = this.camera;
         if (cam == null) return;
         int windshieldCameraId = -1;
@@ -5139,7 +5209,7 @@ public class GpuSurveillancePipeline {
         }
         this.windshieldCameraIdConfig = windshieldCameraId;
         cam.setDashcamWindshieldCamera(
-            dashcamUseWindshieldConfig && windshieldCameraId >= 0, windshieldCameraId);
+            useWindshield && windshieldCameraId >= 0, windshieldCameraId);
     }
 
     /**

@@ -861,6 +861,56 @@
                     </div>
                 </div>
 
+                <!-- Sentry Recording Layout — the independent counterpart to
+                     the dashcam layout on the recording page. Saves
+                     immediately (not via the Apply button), mirroring the
+                     dashcam layout card. Reuses the recording.layout_* i18n
+                     strings (already translated everywhere). -->
+                <div class="card" data-tab="recording">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/>
+                            </svg>
+                            <span data-i18n="recording.layout_title">Recording Layout</span>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="setting-row">
+                            <div class="setting-info">
+                                <div class="setting-name">
+                                    <span data-i18n="recording.layout_label">Camera Layout</span>
+                                    <span class="setting-badge" data-i18n="recording.applies_live">Applies live</span>
+                                </div>
+                                <div class="setting-desc" data-i18n="recording.layout_desc">Standard records the four 360 cameras as a 2×2 grid. Dashcam puts the forward road view across the top with the 360 left, rear and right cameras along the bottom. Telemetry overlay is preserved either way.</div>
+                            </div>
+                            <div class="setting-control">
+                                <div class="btn-group btn-group-vertical" id="survLayoutBtns">
+                                    <button class="btn-toggle active" data-value="standard" onclick="SurvSettings.setSurveillanceLayout('standard')">
+                                        <span class="tier-name" data-i18n="recording.layout_standard">Standard (360 grid)</span>
+                                    </button>
+                                    <button class="btn-toggle" data-value="dashcam" onclick="SurvSettings.setSurveillanceLayout('dashcam')">
+                                        <span class="tier-name" data-i18n="recording.layout_dashcam">Dashcam (forward + sides)</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="setting-row" style="border-bottom:none;" id="survWindshieldRow">
+                            <div class="setting-info">
+                                <div class="setting-name" data-i18n="recording.layout_use_windshield_label">Use Windshield Camera in Dashcam Layout</div>
+                                <div class="setting-desc" data-i18n="recording.layout_use_windshield_desc">When available, use the dedicated windshield camera for the top dashcam view. Falls back to the 360 front camera if the stream cannot be opened.</div>
+                                <div class="setting-desc" id="survWindshieldCameraInfo" style="display:none;"></div>
+                            </div>
+                            <div class="setting-control">
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="survUseWindshield" onchange="SurvSettings.toggleSurveillanceWindshield()">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Fisheye Correction (Fitzgibbon division-model rectifier).
                      SHARED with the recording page — same unified-config key
                      (recording.rectifyStrength). Editing on either page

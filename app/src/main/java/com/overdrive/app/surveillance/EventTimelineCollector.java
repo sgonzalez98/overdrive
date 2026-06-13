@@ -751,15 +751,18 @@ public class EventTimelineCollector {
             JSONObject root = new JSONObject();
             root.put("version", 3);
             root.put("durationMs", durationMs);
-            // Composition layout (dashcam clips only) so the player picks the
-            // right per-camera zoom regions. Sentry events share the dashcam
-            // recorder, so they honour the same layout. Read at write time;
-            // omitted for the default standard layout to keep legacy sidecars
-            // byte-identical.
+            // Composition layout so the player picks the right per-camera zoom
+            // regions. Sentry events are composited under the SENTRY layout
+            // profile (surveillance.recordingLayout), independent of the
+            // dashcam layout; fall back to the dashcam value when the sentry
+            // key is unset. Read at write time; omitted for the default
+            // standard layout to keep legacy sidecars byte-identical.
             try {
-                String recLayout = com.overdrive.app.config.UnifiedConfigManager
-                        .getRecording().optString("recordingLayout", "standard");
-                if ("dashcam".equals(recLayout)) {
+                String survLayout = com.overdrive.app.config.UnifiedConfigManager
+                        .getSurveillance().optString("recordingLayout",
+                            com.overdrive.app.config.UnifiedConfigManager
+                                .getRecording().optString("recordingLayout", "standard"));
+                if ("dashcam".equals(survLayout)) {
                     root.put("layout", "dashcam");
                 }
             } catch (Throwable ignored) { /* default standard */ }

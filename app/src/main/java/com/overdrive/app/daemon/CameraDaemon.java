@@ -2541,6 +2541,20 @@ public class CameraDaemon {
                     gpuPipeline.setDashcamUseWindshield(dashcamUseWindshield);
                     log("Recording layout: " + recLayout);
 
+                    // Apply persisted sentry (surveillance) layout — the
+                    // independent counterpart to the dashcam layout above.
+                    // Falls back to the dashcam values when the sentry keys are
+                    // unset so existing installs keep their current look.
+                    org.json.JSONObject survLayoutCfg =
+                        com.overdrive.app.config.UnifiedConfigManager.getSurveillance();
+                    String survLayout = survLayoutCfg.optString("recordingLayout", recLayout);
+                    gpuPipeline.setSurveillanceRecordingLayout("dashcam".equals(survLayout) ? 1 : 0);
+                    boolean survUseWindshield = survLayoutCfg.has("useWindshield")
+                        ? survLayoutCfg.optBoolean("useWindshield", false)
+                        : dashcamUseWindshield;
+                    gpuPipeline.setSurveillanceUseWindshield(survUseWindshield);
+                    log("Sentry layout: " + survLayout);
+
                     // Late-bind TelemetryDataCollector to TripAnalyticsManager
                     // (it was null when TripAnalytics was initialized before the 45s GPU delay)
                     if (tripAnalyticsManager != null) {

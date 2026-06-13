@@ -135,6 +135,8 @@ BYD.surveillance = {
         await this.loadStorageStats();
         await this.loadCameraFps();
         await this.loadGeocoding();
+        // Sentry's own composition layout (independent of the dashcam layout).
+        await this.loadSurveillanceLayout();
         // Dedicated OEM Dashcam tab — load the mode picker, telemetry
         // toggle, status badge, and native DVR control on init so the
         // user can land directly on the OEM tab and find populated state.
@@ -242,6 +244,9 @@ BYD.surveillance = {
         // the cards re-evaluate without a page reload.
         this.loadOemDashcam();
         this.loadOemNativeDvr();
+        // Re-read sentry's layout so a change made elsewhere (or on another
+        // device) reflects without a full page reload.
+        this.loadSurveillanceLayout();
         // Lens-dewarp slider lives in unified-config recording.* (shared
         // with the dashcam page). /api/surveillance/config doesn't surface
         // it, so re-read it here so a change made on the recording page
@@ -3345,6 +3350,106 @@ BYD.surveillance = {
             }
         } finally {
             btn.disabled = false;
+        }
+    },
+
+    // ==================== Sentry Recording Layout ====================
+    //
+    // Sentry's OWN composition layout, independent of the dashcam recording
+    // layout on the recording page. Standard = 2x2 360 mosaic (default).
+    // Dashcam = forward road view on top with the 360 left/rear/right cameras
+    // along the bottom. Saves immediately (not via the Apply button), mirroring
+    // the dashcam layout card in recording.js. Hits
+    // /api/settings/surveillance-layout and reuses the recording.layout_* i18n
+    // strings (already translated in every language).
+
+    async loadSurveillanceLayout() {
+        try {
+            const resp = await fetch('/api/settings/surveillance-layout');
+            const data = await resp.json();
+            if (data.success) {
+                this._applySurveillanceLayoutButtons(data.layout || 'standard');
+
+                const wsToggle = document.getElementById('survUseWindshield');
+                if (wsToggle) {
+                    wsToggle.checked = data.dashcamUseWindshield || false;
+                    wsToggle.disabled = !data.windshieldAvailable;
+                }
+
+                const infoLine = document.getElementById('survWindshieldCameraInfo');
+                if (infoLine) {
+                    if (!data.windshieldAvailable) {
+                        infoLine.textContent = BYD.i18n.t('recording.layout_windshield_unavailable');
+                        infoLine.style.display = 'block';
+                    } else {
+                        infoLine.style.display = 'none';
+                    }
+                }
+
+                this._updateSurveillanceWindshieldVisibility(data.layout || 'standard');
+            }
+        } catch (e) {
+            console.warn('Failed to load surveillance layout:', e);
+        }
+    },
+
+    _updateSurveillanceWindshieldVisibility(layout) {
+        const subSetting = document.getElementById('survWindshieldRow');
+        if (subSetting) {
+            subSetting.style.display = layout === 'dashcam' ? 'flex' : 'none';
+        }
+    },
+
+    _applySurveillanceLayoutButtons(layout) {
+        const group = document.getElementById('survLayoutBtns');
+        if (!group) return;
+        group.querySelectorAll('.btn-toggle').forEach(btn =>
+            btn.classList.toggle('active', btn.dataset.value === layout));
+    },
+
+    async setSurveillanceLayout(layout) {
+        this._applySurveillanceLayoutButtons(layout);
+        this._updateSurveillanceWindshieldVisibility(layout);
+        await this._saveSurveillanceLayout();
+    },
+
+    async toggleSurveillanceWindshield() {
+        await this._saveSurveillanceLayout();
+    },
+
+    async _saveSurveillanceLayout() {
+        const group = document.getElementById('survLayoutBtns');
+        const active = group ? group.querySelector('.btn-toggle.active') : null;
+        const layout = active ? active.dataset.value : 'standard';
+
+        const wsToggle = document.getElementById('survUseWindshield');
+        const dashcamUseWindshield = wsToggle ? wsToggle.checked : false;
+
+        try {
+            const resp = await fetch('/api/settings/surveillance-layout', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ layout, dashcamUseWindshield })
+            });
+            const data = await resp.json();
+            if (data.success) {
+                this._applySurveillanceLayoutButtons(data.layout);
+                this._updateSurveillanceWindshieldVisibility(data.layout);
+
+                if (wsToggle) {
+                    wsToggle.checked = data.dashcamUseWindshield;
+                    wsToggle.disabled = !data.windshieldAvailable;
+                }
+
+                if (BYD.utils && BYD.utils.toast) {
+                    const key = data.layout === 'dashcam' ? 'recording.layout_dashcam_toast' : 'recording.layout_standard_toast';
+                    BYD.utils.toast(BYD.i18n.t(key), 'success');
+                }
+            } else if (BYD.utils && BYD.utils.toast) {
+                BYD.utils.toast(BYD.i18n.t('recording.layout_update_failed'), 'error');
+            }
+        } catch (e) {
+            if (BYD.utils && BYD.utils.toast) BYD.utils.toast(BYD.i18n.t('recording.layout_update_failed'), 'error');
         }
     }
 };

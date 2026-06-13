@@ -107,6 +107,16 @@ public class QualitySettingsApiHandler {
             handleRecordingLayoutPost(out, body);
             return true;
         }
+        // Sentry (surveillance) composition layout — independent of the
+        // dashcam layout above so sentry and dashcam can use different layouts.
+        if (path.equals("/api/settings/surveillance-layout") && method.equals("GET")) {
+            sendSurveillanceLayoutSettings(out);
+            return true;
+        }
+        if (path.equals("/api/settings/surveillance-layout") && method.equals("POST")) {
+            handleSurveillanceLayoutPost(out, body);
+            return true;
+        }
         // Web-shell appearance (theme picker shipped on every page).
         // Same UnifiedConfigManager-backed pattern as the rest of /api/settings.
         if (path.equals("/api/settings/appearance") && method.equals("GET")) {
@@ -1467,6 +1477,80 @@ public class QualitySettingsApiHandler {
             HttpResponse.sendJson(out, response.toString());
         } catch (Exception e) {
             CameraDaemon.log("Error setting recording layout: " + e.getMessage());
+            HttpResponse.sendJsonError(out, e.getMessage());
+        }
+    }
+
+    /**
+     * GET /api/settings/surveillance-layout — read the SENTRY composition
+     * layout ("standard" 360 mosaic, default, or "dashcam"). Independent of the
+     * dashcam recording-layout. When the sentry keys are unset we fall back to
+     * the dashcam values so existing installs keep their current sentry
+     * appearance until the user explicitly diverges.
+     */
+    private static void sendSurveillanceLayoutSettings(OutputStream out) throws Exception {
+        JSONObject surveillance = com.overdrive.app.config.UnifiedConfigManager.getSurveillance();
+        JSONObject recording = com.overdrive.app.config.UnifiedConfigManager.getRecording();
+        com.overdrive.app.camera.ResolvedCameraConfig camera =
+            com.overdrive.app.camera.CameraConfigResolver.resolve();
+        int windshieldCameraId = camera.getDirectCameraIdForRole(
+            com.overdrive.app.camera.CameraRole.WINDSHIELD);
+        String layout = surveillance.optString("recordingLayout",
+            recording.optString("recordingLayout", "standard"));
+        boolean useWindshield = surveillance.has("useWindshield")
+            ? surveillance.optBoolean("useWindshield", false)
+            : recording.optBoolean("dashcamUseWindshield", false);
+        JSONObject response = new JSONObject();
+        response.put("success", true);
+        response.put("layout", layout);
+        response.put("dashcamUseWindshield", useWindshield);
+        response.put("windshieldAvailable", windshieldCameraId >= 0);
+        response.put("windshieldCameraId", windshieldCameraId);
+        HttpResponse.sendJson(out, response.toString());
+    }
+
+    /**
+     * POST /api/settings/surveillance-layout — set the sentry layout. Hot-
+     * applies to the live recorder (only while in surveillance mode) via the
+     * pipeline and persists under surveillance.* for daemon restarts / later
+     * recorders. Mirrors {@link #handleRecordingLayoutPost} for the dashcam
+     * flow; the request/response use the same {@code dashcamUseWindshield}
+     * key so the web layer can reuse the recording-layout client code.
+     */
+    private static void handleSurveillanceLayoutPost(OutputStream out, String body) throws Exception {
+        try {
+            JSONObject settings = new JSONObject(body);
+            String layout = "dashcam".equals(settings.optString("layout", "standard"))
+                ? "dashcam" : "standard";
+            com.overdrive.app.camera.ResolvedCameraConfig camera =
+                com.overdrive.app.camera.CameraConfigResolver.resolve();
+            int windshieldCameraId = camera.getDirectCameraIdForRole(
+                com.overdrive.app.camera.CameraRole.WINDSHIELD);
+            boolean windshieldAvailable = windshieldCameraId >= 0;
+            boolean useWindshield = settings.optBoolean("dashcamUseWindshield", false)
+                && windshieldAvailable;
+
+            JSONObject delta = new JSONObject();
+            delta.put("recordingLayout", layout);
+            delta.put("useWindshield", useWindshield);
+            com.overdrive.app.config.UnifiedConfigManager.setSurveillance(delta);
+
+            com.overdrive.app.surveillance.GpuSurveillancePipeline pipeline =
+                CameraDaemon.getGpuPipeline();
+            if (pipeline != null) {
+                pipeline.setSurveillanceRecordingLayout("dashcam".equals(layout) ? 1 : 0);
+                pipeline.setSurveillanceUseWindshield(useWindshield);
+            }
+
+            JSONObject response = new JSONObject();
+            response.put("success", true);
+            response.put("layout", layout);
+            response.put("dashcamUseWindshield", useWindshield);
+            response.put("windshieldAvailable", windshieldAvailable);
+            response.put("windshieldCameraId", windshieldCameraId);
+            HttpResponse.sendJson(out, response.toString());
+        } catch (Exception e) {
+            CameraDaemon.log("Error setting surveillance layout: " + e.getMessage());
             HttpResponse.sendJsonError(out, e.getMessage());
         }
     }
