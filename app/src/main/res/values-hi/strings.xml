@@ -96,7 +96,7 @@
     <string name="url_connecting">कनेक्टिंग ...</string>
     <!-- Shown when an external link can't open (no browser on the head unit):
          the URL is copied to the clipboard instead. %1$s = the URL. -->
-    <string name="url_copied_no_browser">कोई ब्राउज़र नहीं मिला। लिंक कॉपी किया गया: %1$s</string>
+    <string name="url_copied_no_browser">No browser found. Link copied: %1$s</string>
     <!-- dialog_tailscale_settings -->
     <string name="tailscale_generate_login_url">लॉगिन उत्पन्न करें URL</string>
     <string name="tailscale_scan_to_login">लॉगिन करने के लिए स्कैन करें</string>
@@ -138,8 +138,8 @@
     <string name="camera_oem_dashcam_auto_resolved">Auto — using id %1$d (pano is id %2$d)</string>
     <string name="camera_oem_dashcam_auto_unavailable">Auto — pano id is %1$d, can\'t infer dashcam</string>
     <string name="camera_oem_dashcam_save">Save</string>
-    <string name="camera_concurrent_probe_label">अगले बूट पर ड्यूल-कैमरा समर्थन जाँचें</string>
-    <string name="camera_concurrent_probe_subtitle">एक बार की जाँच जो दोनों कैमरे एक साथ खोलकर पुष्टि करती है कि यह वाहन पैनो + डैशकैम एक साथ चला सकता है। पार्क होने पर अगले रीस्टार्ट पर एक बार चलती है। रिकॉर्डिंग गलत दिखने तक इसे बंद रखें — यह आवश्यक नहीं है और चलने के दौरान कोई रिकॉर्डिंग सक्रिय हो तो उसे थोड़ी देर बाधित कर सकती है।</string>
+    <string name="camera_concurrent_probe_label">Test dual-camera support on next boot</string>
+    <string name="camera_concurrent_probe_subtitle">One-time check that opens both cameras at once to confirm this vehicle can run pano + dashcam concurrently. Runs once on the next restart while parked. Leave OFF unless recordings look wrong — it is not required and may briefly interrupt a recording if one is active when it runs.</string>
     <!-- Dashcam-side camera labels — REVERSE of the pano labels above. The
          OEM dashcam id is the opposite of the pano id, so the helpful
          "this is what your trim should pick" hint flips between the two
@@ -377,45 +377,45 @@
     <string name="toast_updated_to">%1$s पर अद्यतन</string>
     <string name="toast_update_install_failed">अद्यतन स्थापना विफल: %1$s</string>
     <string name="toast_checking_for_updates">अद्यतनों की जाँच...</string>
-    <string name="toast_app_up_to_date">ऐप अद्यतित है (v%1$s)</string>
+    <string name="toast_app_up_to_date">App is up to date (%1$s)</string>
     <string name="toast_update_check_failed">अद्यतन जांच विफल: %1$s</string>
     <!-- Update dialog + version picker -->
-    <string name="update_dialog_available_title">अपडेट उपलब्ध है</string>
-    <string name="update_dialog_subtitle">एक नया बिल्ड इंस्टाल होने के लिए तैयार है</string>
-    <string name="update_dialog_current">वर्तमान: v%1$s</string>
-    <string name="update_dialog_new">नया: v%1$s</string>
-    <string name="update_dialog_current_label">इंस्टाल किया गया</string>
-    <string name="update_dialog_new_label">नया संस्करण</string>
-    <string name="update_dialog_whats_new">नया क्या है</string>
-    <string name="update_dialog_install_now">अभी इंस्टाल करें</string>
-    <string name="update_dialog_later">बाद में</string>
-    <string name="update_picker_title">एक संस्करण चुनें</string>
-    <string name="update_picker_subtitle">कोई भी प्रकाशित बिल्ड इंस्टाल करें — नया या पुराना</string>
-    <string name="update_picker_empty">अभी तक कोई संस्करण प्रकाशित नहीं हुआ है।</string>
-    <string name="update_picker_current_suffix">%1$s (इंस्टाल किया गया)</string>
-    <string name="update_picker_older_suffix">%1$s (पुराना)</string>
+    <string name="update_dialog_available_title">Update available</string>
+    <string name="update_dialog_subtitle">A newer build is ready to install</string>
+    <string name="update_dialog_current">Current: v%1$s</string>
+    <string name="update_dialog_new">New: v%1$s</string>
+    <string name="update_dialog_current_label">Installed</string>
+    <string name="update_dialog_new_label">New version</string>
+    <string name="update_dialog_whats_new">What\'s new</string>
+    <string name="update_dialog_install_now">Install now</string>
+    <string name="update_dialog_later">Later</string>
+    <string name="update_picker_title">Choose a version</string>
+    <string name="update_picker_subtitle">Install any published build — newer or older</string>
+    <string name="update_picker_empty">No versions published yet.</string>
+    <string name="update_picker_current_suffix">%1$s (installed)</string>
+    <string name="update_picker_older_suffix">%1$s (older)</string>
     <!-- Update progress (title + per-step status; no emoji — state icon carries the cue) -->
-    <string name="update_progress_title">Overdrive अपडेट हो रहा है</string>
-    <string name="update_step_downloading">अपडेट डाउनलोड हो रहा है…</string>
-    <string name="update_step_verifying">डाउनलोड सत्यापित हो रहा है…</string>
-    <string name="update_step_stopping">सेवाएँ बंद हो रही हैं…</string>
-    <string name="update_step_installing">अपडेट इंस्टाल हो रहा है…</string>
-    <string name="update_step_installed">अपडेट इंस्टाल हो गया</string>
-    <string name="update_step_restarting">ऐप रीस्टार्ट हो रहा है…</string>
-    <string name="update_step_queued">अपडेट शुरू हो रहा है…</string>
-    <string name="update_error_title">अपडेट विफल रहा</string>
-    <string name="update_error_daemon_down">कैमरा सेवा नहीं चल रही है। इसे \'सेवाएँ\' स्क्रीन से शुरू करें, फिर से अपडेट करने का प्रयास करें।</string>
-    <string name="update_error_start_failed">अपडेट शुरू नहीं हो सका: %1$s</string>
-    <string name="update_error_lost_headunit">इंस्टाल पूरा होने से पहले हेड यूनिट से संपर्क टूट गया। क्या आप किसी सुरंग में हैं? नए URL के लिए Telegram देखें, या स्थानीय IP का उपयोग करें।</string>
-    <string name="update_hide">छिपाएँ</string>
+    <string name="update_progress_title">Updating Overdrive</string>
+    <string name="update_step_downloading">Downloading update…</string>
+    <string name="update_step_verifying">Verifying download…</string>
+    <string name="update_step_stopping">Stopping daemons…</string>
+    <string name="update_step_installing">Installing update…</string>
+    <string name="update_step_installed">Update installed</string>
+    <string name="update_step_restarting">Restarting app…</string>
+    <string name="update_step_queued">Starting update…</string>
+    <string name="update_error_title">Update failed</string>
+    <string name="update_error_daemon_down">Camera daemon isn\'t running. Start it from the Daemons screen, then try updating again.</string>
+    <string name="update_error_start_failed">Couldn\'t start the update: %1$s</string>
+    <string name="update_error_lost_headunit">Lost contact with the head unit before the install finished. On a tunnel? Check Telegram for the new URL, or use the local IP.</string>
+    <string name="update_hide">Hide</string>
     <!-- Update channel selector (Settings → About) -->
-    <string name="settings_update_channel_title">अपडेट चैनल</string>
-    <string name="settings_update_channel_alpha">अल्फा</string>
+    <string name="settings_update_channel_title">Update channel</string>
+    <string name="settings_update_channel_alpha">Alpha</string>
     <string name="settings_update_channel_braveheart">Braveheart</string>
-    <string name="settings_update_channel_alpha_desc">स्थिर रिलीज़। हर प्रकाशित संस्करण रखा जाता है — इंस्टाल करने के लिए कोई भी चुनें (डाउनग्रेड की अनुमति है)। रोज़मर्रा के उपयोग के लिए अनुशंसित।</string>
-    <string name="settings_update_channel_braveheart_desc">अत्याधुनिक बिल्ड, प्रकाशित होते ही डिलीवर किए जाते हैं। आपको नई सुविधाएँ सबसे पहले मिलती हैं, लेकिन वे अस्थिर या बग-भरी हो सकती हैं। यदि कुछ टूट जाता है, तो \'सेवाएँ\' स्क्रीन खोलें, किसी सेवा के लॉग पर टैप करें, \"अपलोड करें और कोड प्राप्त करें\" चुनें, और समुदाय चैनलों पर हमारे साथ कोड साझा करें।</string>
-    <string name="settings_update_channel_save_failed">अपडेट चैनल सहेजा नहीं जा सका</string>
-    <string name="settings_update_channel_braveheart_toast">Braveheart पर स्विच किया गया। बिल्ड अस्थिर हो सकते हैं — यदि कुछ टूट जाता है, तो सेवा लॉग भेजें और Discord/GitHub/WhatsApp पर इसकी रिपोर्ट करें।</string>
+    <string name="settings_update_channel_alpha_desc">The stable release. Every published version is kept — pick any to install (downgrades allowed). Recommended for everyday use.</string>
+    <string name="settings_update_channel_braveheart_desc">Bleeding-edge builds, delivered the moment they\'re published. You get new features first, but they may be unstable or buggy. If something breaks, open the Daemons screen, tap a daemon\'s log, choose \"Upload &amp; get a code\", and share the code with us on the community channels.</string>
+    <string name="settings_update_channel_save_failed">Could not save the update channel</string>
+    <string name="settings_update_channel_braveheart_toast">Switched to Braveheart. Builds may be unstable — if something breaks, send the daemon log and report it on Discord/GitHub/WhatsApp.</string>
     <!-- Community / report-a-bug links -->
     <string name="toast_storage_permission_required">रिकॉर्डिंग के लिए आवश्यक भंडारण अनुमति</string>
     <string name="toast_url_copied_short">URL कॉपी!</string>
@@ -546,22 +546,22 @@
     <string name="log_header_exported">निर्यात किया गयाः %1$s</string>
     <string name="log_header_truncated">नोटः 10000 पंक्तियों तक काटा हुआ लॉग (कुलः %1$d पंक्तियाँ)</string>
     <!-- Braveheart log send (upload to Cloudflare or share-sheet) -->
-    <string name="logs_send_title">%1$s लॉग भेजें</string>
-    <string name="logs_send_title_plain">सेवा लॉग भेजें</string>
+    <string name="logs_send_title">Send %1$s log</string>
+    <string name="logs_send_title_plain">Send daemon log</string>
     <string name="logs_send_subtitle">%1$s · choose how to send it to us</string>
-    <string name="logs_send_upload">अपलोड करें और कोड प्राप्त करें</string>
-    <string name="logs_send_upload_desc">लॉग हमें भेजता है और आपको एक छोटा कोड देता है। समर्थन के लिए सबसे आसान।</string>
-    <string name="logs_send_share">फ़ाइल साझा करें…</string>
-    <string name="logs_send_share_desc">शेयर शीट के माध्यम से लॉग को स्वयं सहेजें या भेजें।</string>
-    <string name="logs_uploading_title">लॉग अपलोड हो रहा है…</string>
-    <string name="logs_uploading_subtitle">गोपनीय जानकारी हटाना और सुरक्षित रूप से भेजना</string>
-    <string name="logs_uploaded_title">लॉग अपलोड हो गया</string>
-    <string name="logs_uploaded_instructions">यह कोड हमारे साथ साझा करें, साथ ही एक नोट भी दें कि जब यह टूटा तो आप क्या कर रहे थे। इसे Discord, GitHub Issues या WhatsApp पर पोस्ट करें — लिंक \'About\' स्क्रीन पर हैं।</string>
+    <string name="logs_send_upload">Upload &amp; get a code</string>
+    <string name="logs_send_upload_desc">Sends the log to us and gives you a short code. Easiest for support.</string>
+    <string name="logs_send_share">Share file…</string>
+    <string name="logs_send_share_desc">Save or send the log yourself via the share sheet.</string>
+    <string name="logs_uploading_title">Uploading log…</string>
+    <string name="logs_uploading_subtitle">Redacting secrets and sending securely</string>
+    <string name="logs_uploaded_title">Log uploaded</string>
+    <string name="logs_uploaded_instructions">Share this code with us, along with a note on what you were doing when it broke. Post it on Discord, GitHub Issues or WhatsApp — links are on the About screen.</string>
     <string name="logs_uploaded_privacy">Secrets redacted · the log auto-expires</string>
-    <string name="logs_copy_code">कोड कॉपी करें</string>
-    <string name="logs_done">हो गया</string>
+    <string name="logs_copy_code">Copy code</string>
+    <string name="logs_done">Done</string>
     <string name="placeholder_dash">—</string>
-    <string name="errors_network">नेटवर्क त्रुटि</string>
+    <string name="errors_network">Network error</string>
     <!-- Recording controls -->
     <!-- Recording library -->
     <string name="toast_cannot_play_video">वीडियो नहीं खेल सकतेः %1$s</string>
@@ -572,7 +572,7 @@
     <string name="toast_batch_delete_partial">%1$d हटाया गया, %2$d विफल रहा</string>
     <string name="play_with_chooser">खेलने के साथ</string>
     <!-- Setup guide -->
-    <string name="setup_version_banner">v%1$s के लिए अद्यतन  फिर से पुष्टि ऑटोस्टार्ट, BYD हर स्थापना पर इसे मिटा देता है</string>
+    <string name="setup_version_banner">Updated to %1$s — re-confirm autostart, BYD wipes it on every install</string>
     <string name="setup_overlay_already_granted">पहले से ही दी गई</string>
     <!-- Setup guide — post-setup tips section -->
     <string name="setup_tips_header">सुझाव और समस्या निवारण</string>
@@ -987,7 +987,7 @@
          RoadSense — road-hazard detection feature
          ============================================================ -->
     <string name="rail_roadsense">RoadSense</string>
-    <string name="rail_hazard_map">नक्शा</string>
+    <string name="rail_hazard_map">Map</string>
     <string name="roadsense_title">RoadSense</string>
     <string name="roadsense_pill_scanning">Scanning</string>
     <string name="roadsense_pill_idle">RoadSense</string>
@@ -1036,21 +1036,21 @@
     <!-- ============================================================== -->
     <!-- RoadSense Map (native MapLibre map view + tap-to-verify sheet). -->
     <!-- ============================================================== -->
-    <string name="roadsense_map_title">नक्शा</string>
-    <string name="roadsense_map_route_clear">साफ़ करें</string>
-    <string name="roadsense_map_route_unmapped">अभी तक मैप नहीं किया गया</string>
-    <string name="roadsense_map_back">वापस</string>
-    <string name="roadsense_map_recenter">मेरे स्थान पर पुनः केंद्रित करें</string>
+    <string name="roadsense_map_title">Map</string>
+    <string name="roadsense_map_route_clear">Clear</string>
+    <string name="roadsense_map_route_unmapped">Not mapped yet</string>
+    <string name="roadsense_map_back">Back</string>
+    <string name="roadsense_map_recenter">Recenter on my location</string>
     <!-- Tap-to-verify bottom sheet -->
-    <string name="roadsense_map_severity_label">गंभीरता</string>
-    <string name="roadsense_map_type_label">प्रकार</string>
-    <string name="roadsense_map_type_unknown">अज्ञात</string>
-    <string name="roadsense_map_confirm">पुष्टि करें</string>
-    <string name="roadsense_map_delete">मिटाएँ</string>
+    <string name="roadsense_map_severity_label">Severity</string>
+    <string name="roadsense_map_type_label">Type</string>
+    <string name="roadsense_map_type_unknown">Unknown</string>
+    <string name="roadsense_map_confirm">Confirm</string>
+    <string name="roadsense_map_delete">Delete</string>
     <!-- Status chip labels: candidate / on-device / shared with fleet -->
-    <string name="roadsense_map_status_candidate">उम्मीदवार</string>
-    <string name="roadsense_map_status_local">डिवाइस पर</string>
-    <string name="roadsense_map_status_cloud">साझा किया गया</string>
+    <string name="roadsense_map_status_candidate">Candidate</string>
+    <string name="roadsense_map_status_local">On device</string>
+    <string name="roadsense_map_status_cloud">Shared</string>
     <!-- Meta line: "Moderate · 82% confidence · 3 reports" -->
     <string name="roadsense_map_meta_format">%1$s · %2$d%% confidence · %3$s</string>
     <!-- "3 reports" / "1 report" -->
@@ -1059,110 +1059,110 @@
         <item quantity="other">%1$d reports</item>
     </plurals>
     <!-- Snackbar / toast confirmations -->
-    <string name="roadsense_map_confirmed_toast">खतरा पुष्टि किया गया</string>
-    <string name="roadsense_map_deleted_toast">खतरा हटा दिया गया</string>
-    <string name="roadsense_map_action_failed">RoadSense तक नहीं पहुँच सका। पुनः प्रयास करें।</string>
-    <string name="roadsense_map_no_location">GPS फिक्स का इंतज़ार है…</string>
+    <string name="roadsense_map_confirmed_toast">Hazard confirmed</string>
+    <string name="roadsense_map_deleted_toast">Hazard removed</string>
+    <string name="roadsense_map_action_failed">Could not reach RoadSense. Try again.</string>
+    <string name="roadsense_map_no_location">Waiting for GPS fix…</string>
     <!-- Navigation: search + routing + turn-by-turn -->
-    <string name="roadsense_map_search_hint">गंतव्य खोजें</string>
-    <string name="roadsense_map_search_action">खोजें</string>
-    <string name="roadsense_map_searching">खोज रहा है…</string>
-    <string name="roadsense_map_no_results">कोई स्थान नहीं मिला</string>
-    <string name="roadsense_map_pick_destination">गंतव्य चुनें</string>
-    <string name="roadsense_map_routing">मार्ग ढूँढ रहा है…</string>
-    <string name="roadsense_map_route_failed">कोई मार्ग नहीं मिला। पुनः प्रयास करें।</string>
-    <string name="roadsense_map_need_key">नेविगेट करने के लिए RoadSense सेटिंग्स में एक रूटिंग कुंजी जोड़ें।</string>
-    <string name="roadsense_map_rerouting">मार्ग से बाहर — पुनर्गणना कर रहा है…</string>
-    <string name="roadsense_map_arrived">आप पहुँच गए हैं।</string>
-    <string name="roadsense_map_nav_started">%1$s पर नेविगेट कर रहा है</string>
-    <string name="roadsense_map_nav_ended">नेविगेशन समाप्त हो गया</string>
-    <string name="roadsense_map_end_nav">नेविगेशन समाप्त करें</string>
-    <string name="roadsense_map_zoom_in">ज़ूम इन करें</string>
-    <string name="roadsense_map_zoom_out">ज़ूम आउट करें</string>
+    <string name="roadsense_map_search_hint">Search destination</string>
+    <string name="roadsense_map_search_action">Search</string>
+    <string name="roadsense_map_searching">Searching…</string>
+    <string name="roadsense_map_no_results">No places found</string>
+    <string name="roadsense_map_pick_destination">Choose destination</string>
+    <string name="roadsense_map_routing">Finding route…</string>
+    <string name="roadsense_map_route_failed">Could not find a route. Try again.</string>
+    <string name="roadsense_map_need_key">Add a routing key in RoadSense settings to navigate.</string>
+    <string name="roadsense_map_rerouting">Off route — recalculating…</string>
+    <string name="roadsense_map_arrived">You have arrived.</string>
+    <string name="roadsense_map_nav_started">Navigating to %1$s</string>
+    <string name="roadsense_map_nav_ended">Navigation ended</string>
+    <string name="roadsense_map_end_nav">End navigation</string>
+    <string name="roadsense_map_zoom_in">Zoom in</string>
+    <string name="roadsense_map_zoom_out">Zoom out</string>
     <!-- Hazard visibility filter -->
-    <string name="roadsense_map_hazards_filter">खतरे की दृश्यता</string>
-    <string name="roadsense_map_hazards_all">सभी खतरे दिखाएँ</string>
-    <string name="roadsense_map_hazards_moderate">मध्यम और गंभीर</string>
-    <string name="roadsense_map_hazards_severe">केवल गंभीर</string>
-    <string name="roadsense_map_hazards_hidden">खतरे छिपाएँ</string>
+    <string name="roadsense_map_hazards_filter">Hazard visibility</string>
+    <string name="roadsense_map_hazards_all">Show all hazards</string>
+    <string name="roadsense_map_hazards_moderate">Moderate and severe</string>
+    <string name="roadsense_map_hazards_severe">Severe only</string>
+    <string name="roadsense_map_hazards_hidden">Hide hazards</string>
     <!-- POI along route (EV charging / fuel) -->
-    <string name="roadsense_map_poi_toggle">चार्जिंग और ईंधन</string>
+    <string name="roadsense_map_poi_toggle">Charging and fuel</string>
     <!-- 2D / 3D buildings toggle -->
-    <string name="roadsense_map_dimension_toggle">2D / 3D इमारतें</string>
-    <string name="roadsense_map_3d_on">3D इमारतें चालू</string>
-    <string name="roadsense_map_3d_off">3D इमारतें बंद</string>
-    <string name="roadsense_map_poi_loading">चार्जिंग और ईंधन स्टॉप ढूँढ रहा है…</string>
-    <string name="roadsense_map_poi_none">आस-पास कोई स्टेशन नहीं मिला</string>
-    <string name="roadsense_map_poi_need_route">पहले एक गंतव्य चुनें</string>
+    <string name="roadsense_map_dimension_toggle">2D / 3D buildings</string>
+    <string name="roadsense_map_3d_on">3D buildings on</string>
+    <string name="roadsense_map_3d_off">3D buildings off</string>
+    <string name="roadsense_map_poi_loading">Finding charging and fuel stops…</string>
+    <string name="roadsense_map_poi_none">No stations found nearby</string>
+    <string name="roadsense_map_poi_need_route">Choose a destination first</string>
     <!-- POI tap action sheet -->
-    <string name="roadsense_map_stop_added">स्टॉप जोड़ा गया</string>
-    <string name="roadsense_map_remove_stop_action">स्टॉप हटाएँ</string>
-    <string name="roadsense_map_poi_navigate">यहाँ नेविगेट करें</string>
-    <string name="roadsense_map_poi_kind_charging">चार्जिंग स्टेशन</string>
-    <string name="roadsense_map_poi_kind_fuel">ईंधन स्टेशन</string>
-    <string name="roadsense_map_poi_charging_generic">चार्जिंग स्टेशन</string>
-    <string name="roadsense_map_poi_fuel_generic">ईंधन स्टेशन</string>
-    <string name="roadsense_map_route_switched">मार्ग बदला गया</string>
+    <string name="roadsense_map_stop_added">Stop added</string>
+    <string name="roadsense_map_remove_stop_action">Remove stop</string>
+    <string name="roadsense_map_poi_navigate">Navigate here</string>
+    <string name="roadsense_map_poi_kind_charging">Charging station</string>
+    <string name="roadsense_map_poi_kind_fuel">Fuel station</string>
+    <string name="roadsense_map_poi_charging_generic">Charging station</string>
+    <string name="roadsense_map_poi_fuel_generic">Fuel station</string>
+    <string name="roadsense_map_route_switched">Switched route</string>
     <!-- "then <next maneuver>" preview shown in the maneuver banner -->
-    <string name="roadsense_map_then">फिर</string>
+    <string name="roadsense_map_then">then</string>
     <!-- Roundabout exit ordinal in the maneuver banner (%1$d = exit number) -->
-    <string name="roadsense_map_exit_n">बाहर निकलें %1$d</string>
+    <string name="roadsense_map_exit_n">exit %1$d</string>
     <!-- Hazards-along-route pills (%1$d = count) -->
-    <string name="roadsense_map_pill_severe">%1$d गंभीर</string>
-    <string name="roadsense_map_pill_moderate">%1$d मध्यम</string>
-    <string name="roadsense_map_pill_minor">%1$d मामूली</string>
+    <string name="roadsense_map_pill_severe">%1$d severe</string>
+    <string name="roadsense_map_pill_moderate">%1$d moderate</string>
+    <string name="roadsense_map_pill_minor">%1$d minor</string>
     <!-- Shown briefly if the basemap can\'t be reached. -->
-    <string name="roadsense_map_offline">नक्शा डेटा ऑफ़लाइन अनुपलब्ध</string>
+    <string name="roadsense_map_offline">Map data unavailable offline</string>
     <!-- Navigation: autocomplete + route options -->
-    <string name="roadsense_map_clear_search">खोज साफ़ करें</string>
+    <string name="roadsense_map_clear_search">Clear search</string>
     <!-- Route-options sheet -->
-    <string name="roadsense_map_routes_title">एक मार्ग चुनें</string>
-    <string name="roadsense_map_routes_to">%1$s के लिए मार्ग</string>
-    <string name="roadsense_map_routes_cancel">रद्द करें</string>
+    <string name="roadsense_map_routes_title">Choose a route</string>
+    <string name="roadsense_map_routes_to">Routes to %1$s</string>
+    <string name="roadsense_map_routes_cancel">Cancel</string>
     <!-- Per-route row label, %1$d is the 1-based route number. -->
-    <string name="roadsense_map_route_option">मार्ग %1$d</string>
-    <string name="roadsense_map_fastest">सबसे तेज़</string>
-    <string name="roadsense_map_start">शुरू करें</string>
+    <string name="roadsense_map_route_option">Route %1$d</string>
+    <string name="roadsense_map_fastest">Fastest</string>
+    <string name="roadsense_map_start">Start</string>
     <!-- Stops / waypoints in the route-options sheet -->
-    <string name="roadsense_map_your_location">आपका स्थान</string>
-    <string name="roadsense_map_add_stop">स्टॉप जोड़ें</string>
-    <string name="roadsense_map_add_stop_hint">जोड़ने के लिए एक स्टॉप खोजें</string>
-    <string name="roadsense_map_stop_removed">स्टॉप हटा दिया गया</string>
-    <string name="roadsense_map_remove_stop">स्टॉप हटाएँ</string>
-    <string name="roadsense_map_move_stop_up">स्टॉप ऊपर ले जाएँ</string>
-    <string name="roadsense_map_move_stop_down">स्टॉप नीचे ले जाएँ</string>
+    <string name="roadsense_map_your_location">Your location</string>
+    <string name="roadsense_map_add_stop">Add stop</string>
+    <string name="roadsense_map_add_stop_hint">Search a stop to add</string>
+    <string name="roadsense_map_stop_removed">Stop removed</string>
+    <string name="roadsense_map_remove_stop">Remove stop</string>
+    <string name="roadsense_map_move_stop_up">Move stop up</string>
+    <string name="roadsense_map_move_stop_down">Move stop down</string>
     <!-- %1$d is the maximum number of stops allowed. -->
-    <string name="roadsense_map_max_stops">%1$d स्टॉप तक की अनुमति है</string>
+    <string name="roadsense_map_max_stops">Up to %1$d stops allowed</string>
     <!-- Map day/night override (Auto → Light → Dark) -->
-    <string name="roadsense_map_theme_toggle">मैप थीम</string>
-    <string name="roadsense_map_theme_auto">मैप थीम: ऑटो</string>
-    <string name="roadsense_map_theme_light">मैप थीम: लाइट</string>
-    <string name="roadsense_map_theme_dark">मैप थीम: डार्क</string>
+    <string name="roadsense_map_theme_toggle">Map theme</string>
+    <string name="roadsense_map_theme_auto">Map theme: Auto</string>
+    <string name="roadsense_map_theme_light">Map theme: Light</string>
+    <string name="roadsense_map_theme_dark">Map theme: Dark</string>
     <!-- Saved places (Home / Work / custom favourites) -->
-    <string name="roadsense_map_saved_home">घर</string>
-    <string name="roadsense_map_saved_work">काम</string>
-    <string name="roadsense_map_saved_set_home">घर सेट करें</string>
-    <string name="roadsense_map_saved_set_work">काम सेट करें</string>
+    <string name="roadsense_map_saved_home">Home</string>
+    <string name="roadsense_map_saved_work">Work</string>
+    <string name="roadsense_map_saved_set_home">Set Home</string>
+    <string name="roadsense_map_saved_set_work">Set Work</string>
     <!-- Short action label for the "save as a custom favourite" button. -->
-    <string name="roadsense_map_saved_favourite">पसंदीदा</string>
-    <string name="roadsense_map_save_place">जगह सहेजें</string>
-    <string name="roadsense_map_save_as_home">घर के रूप में सहेजें</string>
-    <string name="roadsense_map_save_as_work">काम के रूप में सहेजें</string>
-    <string name="roadsense_map_save_as_custom">पसंदीदा के रूप में सहेजें…</string>
-    <string name="roadsense_map_saved_added">सहेजा गया</string>
-    <string name="roadsense_map_saved_removed">सहेजे गए से हटाया गया</string>
-    <string name="roadsense_map_saved_remove">हटाएँ</string>
-    <string name="roadsense_map_recent_remove">हाल के से हटाएँ</string>
-    <string name="roadsense_map_recent_removed">हाल के से हटाया गया</string>
-    <string name="roadsense_map_custom_label_hint">लेबल (उदा. जिम, माँ का)</string>
-    <string name="roadsense_map_custom_label_title">इस जगह का नाम दें</string>
-    <string name="roadsense_map_save">सहेजें</string>
-    <string name="roadsense_map_cancel">रद्द करें</string>
+    <string name="roadsense_map_saved_favourite">Favourite</string>
+    <string name="roadsense_map_save_place">Save place</string>
+    <string name="roadsense_map_save_as_home">Save as Home</string>
+    <string name="roadsense_map_save_as_work">Save as Work</string>
+    <string name="roadsense_map_save_as_custom">Save as favourite…</string>
+    <string name="roadsense_map_saved_added">Saved</string>
+    <string name="roadsense_map_saved_removed">Removed from saved</string>
+    <string name="roadsense_map_saved_remove">Remove</string>
+    <string name="roadsense_map_recent_remove">Remove from recents</string>
+    <string name="roadsense_map_recent_removed">Removed from recents</string>
+    <string name="roadsense_map_custom_label_hint">Label (e.g. Gym, Mum\'s)</string>
+    <string name="roadsense_map_custom_label_title">Name this place</string>
+    <string name="roadsense_map_save">Save</string>
+    <string name="roadsense_map_cancel">Cancel</string>
     <!-- Place-action sheet (long-press the map or a search result to save/navigate) -->
-    <string name="roadsense_map_dropped_pin">ड्रॉप किया गया पिन</string>
-    <string name="roadsense_map_navigate_here">यहाँ नेविगेट करें</string>
+    <string name="roadsense_map_dropped_pin">Dropped pin</string>
+    <string name="roadsense_map_navigate_here">Navigate here</string>
     <!-- Shown after tapping an unset Home/Work chip: search picks the place to save. -->
-    <string name="roadsense_map_search_to_save">%1$s के रूप में सेट करने के लिए कोई जगह खोजें</string>
+    <string name="roadsense_map_search_to_save">Search a place to set as %1$s</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
-    <string name="roadsense_map_trip_restored">यात्रा बहाल की गई</string>
+    <string name="roadsense_map_trip_restored">Trip restored</string>
 </resources>
