@@ -401,7 +401,7 @@
     <string name="update_picker_current_suffix">%1$s (установлен)</string>
     <string name="update_picker_older_suffix">%1$s (старше)</string>
     <!-- Update progress (title + per-step status; no emoji — state icon carries the cue) -->
-    <string name="update_progress_title">Обновление Overdrive</string>
+    <string name="update_progress_title">Обновление перегрузки</string>
     <string name="update_step_downloading">Загрузка обновления…</string>
     <string name="update_step_verifying">Проверка загрузки…</string>
     <string name="update_step_stopping">Остановка демонов…</string>
@@ -614,9 +614,9 @@
          notifications into one shade entry. The summary text is intentionally
          generic so it stays accurate whether all three services are running
          or only the keepalive survived an OOM respawn. -->
-    <string name="daemon_keepalive_notif_title">Overdrive активна</string>
+    <string name="daemon_keepalive_notif_title">Перегрузка активна</string>
     <string name="daemon_keepalive_notif_text">Мониторинг систем транспортных средств</string>
-    <string name="overdrive_status_summary_title">Overdrive</string>
+    <string name="overdrive_status_summary_title">Перегрузка</string>
     <string name="overdrive_status_summary_text">Фоновые службы запущены</string>
     <!-- ============================================================== -->
     <!-- M3 Revamp: navigation rail + settings sub-rail + theme picker  -->
@@ -904,7 +904,7 @@
          the app lock is enabled and the session isn\'t fresh. -->
     <string name="pin_lock_title">Введите PIN-код</string>
     <string name="pin_lock_title_unlocked">Разблокирован</string>
-    <string name="pin_lock_subtitle_default">Разблокируйте OverDrive, чтобы продолжить.</string>
+    <string name="pin_lock_subtitle_default">Разблокируйте передиск, чтобы продолжить.</string>
     <string name="pin_lock_subtitle_wrong">Неверный PIN-код. Попробуйте еще раз.</string>
     <string name="pin_lock_subtitle_locked_out">Слишком много попыток. Попробуйте позже.</string>
     <!-- %1$s is a formatted countdown like "30s" or "2:45". -->
@@ -1004,11 +1004,11 @@
     <!-- ============================================================
          RoadSense — road-hazard detection feature
          ============================================================ -->
-    <string name="rail_roadsense">RoadSense</string>
+    <string name="rail_roadsense">РоудСенс</string>
     <string name="rail_hazard_map">Карта</string>
-    <string name="roadsense_title">RoadSense</string>
+    <string name="roadsense_title">РоудСенс</string>
     <string name="roadsense_pill_scanning">Сканирование</string>
-    <string name="roadsense_pill_idle">RoadSense</string>
+    <string name="roadsense_pill_idle">РоудСенс</string>
     <string name="roadsense_status_idle">Простой</string>
     <!-- VEHICLE calibration (suspension-learning) — the green/orange/red dot. Worded
          about the car, not the route, since that's what maturity actually measures. -->
