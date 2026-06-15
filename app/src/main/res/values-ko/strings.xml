@@ -96,7 +96,7 @@
     <string name="url_connecting">연결...</string>
     <!-- Shown when an external link can't open (no browser on the head unit):
          the URL is copied to the clipboard instead. %1$s = the URL. -->
-    <string name="url_copied_no_browser">No browser found. Link copied: %1$s</string>
+    <string name="url_copied_no_browser">브라우저를 찾을 수 없습니다. 링크 복사됨: %1$s</string>
     <!-- dialog_tailscale_settings -->
     <string name="tailscale_generate_login_url">로그인 URL를 생성</string>
     <string name="tailscale_scan_to_login">로그인으로 스캔</string>
@@ -138,8 +138,8 @@
     <string name="camera_oem_dashcam_auto_resolved">Auto — using id %1$d (pano is id %2$d)</string>
     <string name="camera_oem_dashcam_auto_unavailable">Auto — pano id is %1$d, can\'t infer dashcam</string>
     <string name="camera_oem_dashcam_save">Save</string>
-    <string name="camera_concurrent_probe_label">Test dual-camera support on next boot</string>
-    <string name="camera_concurrent_probe_subtitle">One-time check that opens both cameras at once to confirm this vehicle can run pano + dashcam concurrently. Runs once on the next restart while parked. Leave OFF unless recordings look wrong — it is not required and may briefly interrupt a recording if one is active when it runs.</string>
+    <string name="camera_concurrent_probe_label">다음 부팅 시 듀얼 카메라 지원 테스트</string>
+    <string name="camera_concurrent_probe_subtitle">두 카메라를 동시에 열어 이 차량이 파노라마 + 대시캠을 동시에 실행할 수 있는지 확인하는 1회성 점검입니다. 주차 중 다음 재시작 시 한 번 실행됩니다. 녹화가 잘못된 경우가 아니면 끄세요 — 필수는 아니며, 실행 시 녹화가 진행 중이면 잠시 중단될 수 있습니다.</string>
     <!-- Dashcam-side camera labels — REVERSE of the pano labels above. The
          OEM dashcam id is the opposite of the pano id, so the helpful
          "this is what your trim should pick" hint flips between the two
@@ -374,45 +374,45 @@
     <string name="toast_updated_to">%1$s로 업데이트</string>
     <string name="toast_update_install_failed">업데이트 설치 실패: %1$s</string>
     <string name="toast_checking_for_updates">업데이트를 확인하고...</string>
-    <string name="toast_app_up_to_date">App is up to date (%1$s)</string>
+    <string name="toast_app_up_to_date">앱은 최신 (v%1$s)</string>
     <string name="toast_update_check_failed">업데이트 확인 실패: %1$s</string>
     <!-- Update dialog + version picker -->
-    <string name="update_dialog_available_title">Update available</string>
-    <string name="update_dialog_subtitle">A newer build is ready to install</string>
-    <string name="update_dialog_current">Current: v%1$s</string>
-    <string name="update_dialog_new">New: v%1$s</string>
-    <string name="update_dialog_current_label">Installed</string>
-    <string name="update_dialog_new_label">New version</string>
-    <string name="update_dialog_whats_new">What\'s new</string>
-    <string name="update_dialog_install_now">Install now</string>
-    <string name="update_dialog_later">Later</string>
-    <string name="update_picker_title">Choose a version</string>
-    <string name="update_picker_subtitle">Install any published build — newer or older</string>
-    <string name="update_picker_empty">No versions published yet.</string>
-    <string name="update_picker_current_suffix">%1$s (installed)</string>
-    <string name="update_picker_older_suffix">%1$s (older)</string>
+    <string name="update_dialog_available_title">업데이트 가능</string>
+    <string name="update_dialog_subtitle">새 빌드를 설치할 준비가 되었습니다</string>
+    <string name="update_dialog_current">현재: v%1$s</string>
+    <string name="update_dialog_new">신규: v%1$s</string>
+    <string name="update_dialog_current_label">설치됨</string>
+    <string name="update_dialog_new_label">새 버전</string>
+    <string name="update_dialog_whats_new">새로운 기능</string>
+    <string name="update_dialog_install_now">지금 설치</string>
+    <string name="update_dialog_later">나중에</string>
+    <string name="update_picker_title">버전 선택</string>
+    <string name="update_picker_subtitle">게시된 빌드 중 최신 또는 이전 버전을 설치합니다</string>
+    <string name="update_picker_empty">아직 게시된 버전이 없습니다.</string>
+    <string name="update_picker_current_suffix">%1$s (설치됨)</string>
+    <string name="update_picker_older_suffix">%1$s (이전 버전)</string>
     <!-- Update progress (title + per-step status; no emoji — state icon carries the cue) -->
-    <string name="update_progress_title">Updating Overdrive</string>
-    <string name="update_step_downloading">Downloading update…</string>
-    <string name="update_step_verifying">Verifying download…</string>
-    <string name="update_step_stopping">Stopping daemons…</string>
-    <string name="update_step_installing">Installing update…</string>
-    <string name="update_step_installed">Update installed</string>
-    <string name="update_step_restarting">Restarting app…</string>
-    <string name="update_step_queued">Starting update…</string>
-    <string name="update_error_title">Update failed</string>
-    <string name="update_error_daemon_down">Camera daemon isn\'t running. Start it from the Daemons screen, then try updating again.</string>
-    <string name="update_error_start_failed">Couldn\'t start the update: %1$s</string>
-    <string name="update_error_lost_headunit">Lost contact with the head unit before the install finished. On a tunnel? Check Telegram for the new URL, or use the local IP.</string>
-    <string name="update_hide">Hide</string>
+    <string name="update_progress_title">Overdrive 업데이트 중</string>
+    <string name="update_step_downloading">업데이트 다운로드 중…</string>
+    <string name="update_step_verifying">다운로드 확인 중…</string>
+    <string name="update_step_stopping">데몬 중지 중…</string>
+    <string name="update_step_installing">업데이트 설치 중…</string>
+    <string name="update_step_installed">업데이트 설치 완료</string>
+    <string name="update_step_restarting">앱 재시작 중…</string>
+    <string name="update_step_queued">업데이트 시작 중…</string>
+    <string name="update_error_title">업데이트 실패</string>
+    <string name="update_error_daemon_down">카메라 데몬이 실행 중이 아닙니다. 데몬 화면에서 시작한 다음 다시 업데이트를 시도하세요.</string>
+    <string name="update_error_start_failed">업데이트를 시작할 수 없습니다: %1$s</string>
+    <string name="update_error_lost_headunit">설치 완료 전에 헤드 유닛과의 연결이 끊어졌습니다. 터널 안에 계신가요? Telegram에서 새 URL을 확인하거나 로컬 IP를 사용하세요.</string>
+    <string name="update_hide">숨기기</string>
     <!-- Update channel selector (Settings → About) -->
-    <string name="settings_update_channel_title">Update channel</string>
+    <string name="settings_update_channel_title">업데이트 채널</string>
     <string name="settings_update_channel_alpha">Alpha</string>
     <string name="settings_update_channel_braveheart">Braveheart</string>
-    <string name="settings_update_channel_alpha_desc">The stable release. Every published version is kept — pick any to install (downgrades allowed). Recommended for everyday use.</string>
-    <string name="settings_update_channel_braveheart_desc">Bleeding-edge builds, delivered the moment they\'re published. You get new features first, but they may be unstable or buggy. If something breaks, open the Daemons screen, tap a daemon\'s log, choose \"Upload &amp; get a code\", and share the code with us on the community channels.</string>
-    <string name="settings_update_channel_save_failed">Could not save the update channel</string>
-    <string name="settings_update_channel_braveheart_toast">Switched to Braveheart. Builds may be unstable — if something breaks, send the daemon log and report it on Discord/GitHub/WhatsApp.</string>
+    <string name="settings_update_channel_alpha_desc">안정적인 릴리스입니다. 게시된 모든 버전이 유지되며, 원하는 버전을 선택하여 설치할 수 있습니다 (다운그레이드 허용). 일상적인 사용에 권장됩니다.</string>
+    <string name="settings_update_channel_braveheart_desc">게시되는 즉시 제공되는 최신 빌드입니다. 새로운 기능을 가장 먼저 사용할 수 있지만, 불안정하거나 버그가 있을 수 있습니다. 문제가 발생하면 데몬 화면을 열고 데몬 로그를 탭한 다음 \"업로드 및 코드 받기\"를 선택하고 커뮤니티 채널에서 코드를 공유해 주세요.</string>
+    <string name="settings_update_channel_save_failed">업데이트 채널을 저장할 수 없습니다</string>
+    <string name="settings_update_channel_braveheart_toast">Braveheart로 전환되었습니다. 빌드가 불안정할 수 있습니다. 문제가 발생하면 데몬 로그를 보내고 Discord/GitHub/WhatsApp에 보고해 주세요.</string>
     <!-- Community / report-a-bug links -->
     <string name="toast_storage_permission_required">기록에 필요한 저장 권한</string>
     <string name="toast_url_copied_short">URL 복사!</string>
@@ -543,22 +543,22 @@
     <string name="log_header_exported">수출: %1$s</string>
     <string name="log_header_truncated">참고: 줄여서 10000 라인까지의 로그 (전체: %1$d 라인)</string>
     <!-- Braveheart log send (upload to Cloudflare or share-sheet) -->
-    <string name="logs_send_title">Send %1$s log</string>
-    <string name="logs_send_title_plain">Send daemon log</string>
+    <string name="logs_send_title">%1$s 로그 보내기</string>
+    <string name="logs_send_title_plain">데몬 로그 보내기</string>
     <string name="logs_send_subtitle">%1$s · choose how to send it to us</string>
-    <string name="logs_send_upload">Upload &amp; get a code</string>
-    <string name="logs_send_upload_desc">Sends the log to us and gives you a short code. Easiest for support.</string>
-    <string name="logs_send_share">Share file…</string>
-    <string name="logs_send_share_desc">Save or send the log yourself via the share sheet.</string>
-    <string name="logs_uploading_title">Uploading log…</string>
-    <string name="logs_uploading_subtitle">Redacting secrets and sending securely</string>
-    <string name="logs_uploaded_title">Log uploaded</string>
-    <string name="logs_uploaded_instructions">Share this code with us, along with a note on what you were doing when it broke. Post it on Discord, GitHub Issues or WhatsApp — links are on the About screen.</string>
+    <string name="logs_send_upload">업로드 및 코드 받기</string>
+    <string name="logs_send_upload_desc">로그를 저희에게 보내고 짧은 코드를 제공합니다. 지원에 가장 편리합니다.</string>
+    <string name="logs_send_share">파일 공유…</string>
+    <string name="logs_send_share_desc">공유 시트를 통해 로그를 직접 저장하거나 보내세요.</string>
+    <string name="logs_uploading_title">로그 업로드 중…</string>
+    <string name="logs_uploading_subtitle">비밀 정보 삭제 및 보안 전송 중</string>
+    <string name="logs_uploaded_title">로그 업로드 완료</string>
+    <string name="logs_uploaded_instructions">이 코드를 문제가 발생했을 때 무엇을 하고 있었는지에 대한 메모와 함께 저희에게 공유해 주세요. Discord, GitHub Issues 또는 WhatsApp에 게시해 주세요. 링크는 정보 화면에 있습니다.</string>
     <string name="logs_uploaded_privacy">Secrets redacted · the log auto-expires</string>
-    <string name="logs_copy_code">Copy code</string>
-    <string name="logs_done">Done</string>
+    <string name="logs_copy_code">코드 복사</string>
+    <string name="logs_done">완료</string>
     <string name="placeholder_dash">—</string>
-    <string name="errors_network">Network error</string>
+    <string name="errors_network">네트워크 오류</string>
     <!-- Recording controls -->
     <!-- Recording library -->
     <string name="toast_cannot_play_video">비디오 재생 불가능: %1$s</string>
@@ -569,7 +569,7 @@
     <string name="toast_batch_delete_partial">%1$d는 삭제되었고, %2$d는 실패했습니다.</string>
     <string name="play_with_chooser">놀아</string>
     <!-- Setup guide -->
-    <string name="setup_version_banner">Updated to %1$s — re-confirm autostart, BYD wipes it on every install</string>
+    <string name="setup_version_banner">v%1$s에 업데이트  자동 시작을 다시 확인, BYD는 모든 설치에서 그것을 지워</string>
     <string name="setup_overlay_already_granted">이미 승인 되었습니다</string>
     <!-- Setup guide — post-setup tips section -->
     <string name="setup_tips_header">팁 &amp; 문제 해결</string>
@@ -978,7 +978,7 @@
          RoadSense — road-hazard detection feature
          ============================================================ -->
     <string name="rail_roadsense">RoadSense</string>
-    <string name="rail_hazard_map">Map</string>
+    <string name="rail_hazard_map">지도</string>
     <string name="roadsense_title">RoadSense</string>
     <string name="roadsense_pill_scanning">Scanning</string>
     <string name="roadsense_pill_idle">RoadSense</string>
@@ -1027,21 +1027,21 @@
     <!-- ============================================================== -->
     <!-- RoadSense Map (native MapLibre map view + tap-to-verify sheet). -->
     <!-- ============================================================== -->
-    <string name="roadsense_map_title">Map</string>
-    <string name="roadsense_map_route_clear">Clear</string>
-    <string name="roadsense_map_route_unmapped">Not mapped yet</string>
-    <string name="roadsense_map_back">Back</string>
-    <string name="roadsense_map_recenter">Recenter on my location</string>
+    <string name="roadsense_map_title">지도</string>
+    <string name="roadsense_map_route_clear">지우기</string>
+    <string name="roadsense_map_route_unmapped">아직 매핑되지 않음</string>
+    <string name="roadsense_map_back">뒤로</string>
+    <string name="roadsense_map_recenter">내 위치로 재중심</string>
     <!-- Tap-to-verify bottom sheet -->
-    <string name="roadsense_map_severity_label">Severity</string>
-    <string name="roadsense_map_type_label">Type</string>
-    <string name="roadsense_map_type_unknown">Unknown</string>
-    <string name="roadsense_map_confirm">Confirm</string>
-    <string name="roadsense_map_delete">Delete</string>
+    <string name="roadsense_map_severity_label">심각도</string>
+    <string name="roadsense_map_type_label">유형</string>
+    <string name="roadsense_map_type_unknown">알 수 없음</string>
+    <string name="roadsense_map_confirm">확인</string>
+    <string name="roadsense_map_delete">삭제</string>
     <!-- Status chip labels: candidate / on-device / shared with fleet -->
-    <string name="roadsense_map_status_candidate">Candidate</string>
-    <string name="roadsense_map_status_local">On device</string>
-    <string name="roadsense_map_status_cloud">Shared</string>
+    <string name="roadsense_map_status_candidate">후보</string>
+    <string name="roadsense_map_status_local">기기 내</string>
+    <string name="roadsense_map_status_cloud">공유됨</string>
     <!-- Meta line: "Moderate · 82% confidence · 3 reports" -->
     <string name="roadsense_map_meta_format">%1$s · %2$d%% confidence · %3$s</string>
     <!-- "3 reports" / "1 report" -->
@@ -1049,110 +1049,110 @@
         <item quantity="other">%1$d reports</item>
     </plurals>
     <!-- Snackbar / toast confirmations -->
-    <string name="roadsense_map_confirmed_toast">Hazard confirmed</string>
-    <string name="roadsense_map_deleted_toast">Hazard removed</string>
-    <string name="roadsense_map_action_failed">Could not reach RoadSense. Try again.</string>
-    <string name="roadsense_map_no_location">Waiting for GPS fix…</string>
+    <string name="roadsense_map_confirmed_toast">위험 확인됨</string>
+    <string name="roadsense_map_deleted_toast">위험 제거됨</string>
+    <string name="roadsense_map_action_failed">RoadSense에 연결할 수 없습니다. 다시 시도하세요.</string>
+    <string name="roadsense_map_no_location">GPS 신호 대기 중…</string>
     <!-- Navigation: search + routing + turn-by-turn -->
-    <string name="roadsense_map_search_hint">Search destination</string>
-    <string name="roadsense_map_search_action">Search</string>
-    <string name="roadsense_map_searching">Searching…</string>
-    <string name="roadsense_map_no_results">No places found</string>
-    <string name="roadsense_map_pick_destination">Choose destination</string>
-    <string name="roadsense_map_routing">Finding route…</string>
-    <string name="roadsense_map_route_failed">Could not find a route. Try again.</string>
-    <string name="roadsense_map_need_key">Add a routing key in RoadSense settings to navigate.</string>
-    <string name="roadsense_map_rerouting">Off route — recalculating…</string>
-    <string name="roadsense_map_arrived">You have arrived.</string>
-    <string name="roadsense_map_nav_started">Navigating to %1$s</string>
-    <string name="roadsense_map_nav_ended">Navigation ended</string>
-    <string name="roadsense_map_end_nav">End navigation</string>
-    <string name="roadsense_map_zoom_in">Zoom in</string>
-    <string name="roadsense_map_zoom_out">Zoom out</string>
+    <string name="roadsense_map_search_hint">목적지 검색</string>
+    <string name="roadsense_map_search_action">검색</string>
+    <string name="roadsense_map_searching">검색 중…</string>
+    <string name="roadsense_map_no_results">장소를 찾을 수 없습니다</string>
+    <string name="roadsense_map_pick_destination">목적지 선택</string>
+    <string name="roadsense_map_routing">경로 찾는 중…</string>
+    <string name="roadsense_map_route_failed">경로를 찾을 수 없습니다. 다시 시도하세요.</string>
+    <string name="roadsense_map_need_key">내비게이션을 위해 RoadSense 설정에서 라우팅 키를 추가하세요.</string>
+    <string name="roadsense_map_rerouting">경로 이탈 — 재계산 중…</string>
+    <string name="roadsense_map_arrived">도착했습니다.</string>
+    <string name="roadsense_map_nav_started">%1$s(으)로 내비게이션 중</string>
+    <string name="roadsense_map_nav_ended">내비게이션 종료됨</string>
+    <string name="roadsense_map_end_nav">내비게이션 종료</string>
+    <string name="roadsense_map_zoom_in">확대</string>
+    <string name="roadsense_map_zoom_out">축소</string>
     <!-- Hazard visibility filter -->
-    <string name="roadsense_map_hazards_filter">Hazard visibility</string>
-    <string name="roadsense_map_hazards_all">Show all hazards</string>
-    <string name="roadsense_map_hazards_moderate">Moderate and severe</string>
-    <string name="roadsense_map_hazards_severe">Severe only</string>
-    <string name="roadsense_map_hazards_hidden">Hide hazards</string>
+    <string name="roadsense_map_hazards_filter">위험 가시성</string>
+    <string name="roadsense_map_hazards_all">모든 위험 표시</string>
+    <string name="roadsense_map_hazards_moderate">보통 및 심각</string>
+    <string name="roadsense_map_hazards_severe">심각만</string>
+    <string name="roadsense_map_hazards_hidden">위험 숨기기</string>
     <!-- POI along route (EV charging / fuel) -->
-    <string name="roadsense_map_poi_toggle">Charging and fuel</string>
+    <string name="roadsense_map_poi_toggle">충전 및 주유</string>
     <!-- 2D / 3D buildings toggle -->
-    <string name="roadsense_map_dimension_toggle">2D / 3D buildings</string>
-    <string name="roadsense_map_3d_on">3D buildings on</string>
-    <string name="roadsense_map_3d_off">3D buildings off</string>
-    <string name="roadsense_map_poi_loading">Finding charging and fuel stops…</string>
-    <string name="roadsense_map_poi_none">No stations found nearby</string>
-    <string name="roadsense_map_poi_need_route">Choose a destination first</string>
+    <string name="roadsense_map_dimension_toggle">2D / 3D 건물</string>
+    <string name="roadsense_map_3d_on">3D 건물 켜기</string>
+    <string name="roadsense_map_3d_off">3D 건물 끄기</string>
+    <string name="roadsense_map_poi_loading">충전 및 주유소 찾는 중…</string>
+    <string name="roadsense_map_poi_none">주변에 스테이션을 찾을 수 없습니다</string>
+    <string name="roadsense_map_poi_need_route">먼저 목적지를 선택하세요</string>
     <!-- POI tap action sheet -->
-    <string name="roadsense_map_stop_added">Stop added</string>
-    <string name="roadsense_map_remove_stop_action">Remove stop</string>
-    <string name="roadsense_map_poi_navigate">Navigate here</string>
-    <string name="roadsense_map_poi_kind_charging">Charging station</string>
-    <string name="roadsense_map_poi_kind_fuel">Fuel station</string>
-    <string name="roadsense_map_poi_charging_generic">Charging station</string>
-    <string name="roadsense_map_poi_fuel_generic">Fuel station</string>
-    <string name="roadsense_map_route_switched">Switched route</string>
+    <string name="roadsense_map_stop_added">경유지 추가됨</string>
+    <string name="roadsense_map_remove_stop_action">경유지 제거</string>
+    <string name="roadsense_map_poi_navigate">여기로 내비게이션</string>
+    <string name="roadsense_map_poi_kind_charging">충전소</string>
+    <string name="roadsense_map_poi_kind_fuel">주유소</string>
+    <string name="roadsense_map_poi_charging_generic">충전소</string>
+    <string name="roadsense_map_poi_fuel_generic">주유소</string>
+    <string name="roadsense_map_route_switched">경로 변경됨</string>
     <!-- "then <next maneuver>" preview shown in the maneuver banner -->
-    <string name="roadsense_map_then">then</string>
+    <string name="roadsense_map_then">다음</string>
     <!-- Roundabout exit ordinal in the maneuver banner (%1$d = exit number) -->
-    <string name="roadsense_map_exit_n">exit %1$d</string>
+    <string name="roadsense_map_exit_n">종료 %1$d</string>
     <!-- Hazards-along-route pills (%1$d = count) -->
-    <string name="roadsense_map_pill_severe">%1$d severe</string>
-    <string name="roadsense_map_pill_moderate">%1$d moderate</string>
-    <string name="roadsense_map_pill_minor">%1$d minor</string>
+    <string name="roadsense_map_pill_severe">심각 %1$d개</string>
+    <string name="roadsense_map_pill_moderate">보통 %1$d개</string>
+    <string name="roadsense_map_pill_minor">경미 %1$d개</string>
     <!-- Shown briefly if the basemap can\'t be reached. -->
-    <string name="roadsense_map_offline">Map data unavailable offline</string>
+    <string name="roadsense_map_offline">오프라인에서는 지도 데이터를 사용할 수 없습니다</string>
     <!-- Navigation: autocomplete + route options -->
-    <string name="roadsense_map_clear_search">Clear search</string>
+    <string name="roadsense_map_clear_search">검색 지우기</string>
     <!-- Route-options sheet -->
-    <string name="roadsense_map_routes_title">Choose a route</string>
-    <string name="roadsense_map_routes_to">Routes to %1$s</string>
-    <string name="roadsense_map_routes_cancel">Cancel</string>
+    <string name="roadsense_map_routes_title">경로 선택</string>
+    <string name="roadsense_map_routes_to">%1$s(으)로 가는 경로</string>
+    <string name="roadsense_map_routes_cancel">취소</string>
     <!-- Per-route row label, %1$d is the 1-based route number. -->
-    <string name="roadsense_map_route_option">Route %1$d</string>
-    <string name="roadsense_map_fastest">Fastest</string>
-    <string name="roadsense_map_start">Start</string>
+    <string name="roadsense_map_route_option">경로 %1$d</string>
+    <string name="roadsense_map_fastest">최단 시간</string>
+    <string name="roadsense_map_start">시작</string>
     <!-- Stops / waypoints in the route-options sheet -->
-    <string name="roadsense_map_your_location">Your location</string>
-    <string name="roadsense_map_add_stop">Add stop</string>
-    <string name="roadsense_map_add_stop_hint">Search a stop to add</string>
-    <string name="roadsense_map_stop_removed">Stop removed</string>
-    <string name="roadsense_map_remove_stop">Remove stop</string>
-    <string name="roadsense_map_move_stop_up">Move stop up</string>
-    <string name="roadsense_map_move_stop_down">Move stop down</string>
+    <string name="roadsense_map_your_location">현재 위치</string>
+    <string name="roadsense_map_add_stop">경유지 추가</string>
+    <string name="roadsense_map_add_stop_hint">추가할 경유지 검색</string>
+    <string name="roadsense_map_stop_removed">경유지 제거됨</string>
+    <string name="roadsense_map_remove_stop">경유지 제거</string>
+    <string name="roadsense_map_move_stop_up">경유지 위로 이동</string>
+    <string name="roadsense_map_move_stop_down">경유지 아래로 이동</string>
     <!-- %1$d is the maximum number of stops allowed. -->
-    <string name="roadsense_map_max_stops">Up to %1$d stops allowed</string>
+    <string name="roadsense_map_max_stops">최대 %1$d개 경유지 허용</string>
     <!-- Map day/night override (Auto → Light → Dark) -->
-    <string name="roadsense_map_theme_toggle">Map theme</string>
-    <string name="roadsense_map_theme_auto">Map theme: Auto</string>
-    <string name="roadsense_map_theme_light">Map theme: Light</string>
-    <string name="roadsense_map_theme_dark">Map theme: Dark</string>
+    <string name="roadsense_map_theme_toggle">지도 테마</string>
+    <string name="roadsense_map_theme_auto">지도 테마: 자동</string>
+    <string name="roadsense_map_theme_light">지도 테마: 밝게</string>
+    <string name="roadsense_map_theme_dark">지도 테마: 어둡게</string>
     <!-- Saved places (Home / Work / custom favourites) -->
-    <string name="roadsense_map_saved_home">Home</string>
-    <string name="roadsense_map_saved_work">Work</string>
-    <string name="roadsense_map_saved_set_home">Set Home</string>
-    <string name="roadsense_map_saved_set_work">Set Work</string>
+    <string name="roadsense_map_saved_home">집</string>
+    <string name="roadsense_map_saved_work">직장</string>
+    <string name="roadsense_map_saved_set_home">집 설정</string>
+    <string name="roadsense_map_saved_set_work">직장 설정</string>
     <!-- Short action label for the "save as a custom favourite" button. -->
-    <string name="roadsense_map_saved_favourite">Favourite</string>
-    <string name="roadsense_map_save_place">Save place</string>
-    <string name="roadsense_map_save_as_home">Save as Home</string>
-    <string name="roadsense_map_save_as_work">Save as Work</string>
-    <string name="roadsense_map_save_as_custom">Save as favourite…</string>
-    <string name="roadsense_map_saved_added">Saved</string>
-    <string name="roadsense_map_saved_removed">Removed from saved</string>
-    <string name="roadsense_map_saved_remove">Remove</string>
-    <string name="roadsense_map_recent_remove">Remove from recents</string>
-    <string name="roadsense_map_recent_removed">Removed from recents</string>
-    <string name="roadsense_map_custom_label_hint">Label (e.g. Gym, Mum\'s)</string>
-    <string name="roadsense_map_custom_label_title">Name this place</string>
-    <string name="roadsense_map_save">Save</string>
-    <string name="roadsense_map_cancel">Cancel</string>
+    <string name="roadsense_map_saved_favourite">즐겨찾기</string>
+    <string name="roadsense_map_save_place">장소 저장</string>
+    <string name="roadsense_map_save_as_home">집으로 저장</string>
+    <string name="roadsense_map_save_as_work">직장으로 저장</string>
+    <string name="roadsense_map_save_as_custom">즐겨찾기로 저장…</string>
+    <string name="roadsense_map_saved_added">저장됨</string>
+    <string name="roadsense_map_saved_removed">저장된 목록에서 제거됨</string>
+    <string name="roadsense_map_saved_remove">제거</string>
+    <string name="roadsense_map_recent_remove">최근 목록에서 제거</string>
+    <string name="roadsense_map_recent_removed">최근 목록에서 제거됨</string>
+    <string name="roadsense_map_custom_label_hint">라벨 (예: 헬스장, 엄마 집)</string>
+    <string name="roadsense_map_custom_label_title">이 장소 이름 지정</string>
+    <string name="roadsense_map_save">저장</string>
+    <string name="roadsense_map_cancel">취소</string>
     <!-- Place-action sheet (long-press the map or a search result to save/navigate) -->
-    <string name="roadsense_map_dropped_pin">Dropped pin</string>
-    <string name="roadsense_map_navigate_here">Navigate here</string>
+    <string name="roadsense_map_dropped_pin">핀 놓기</string>
+    <string name="roadsense_map_navigate_here">여기로 안내</string>
     <!-- Shown after tapping an unset Home/Work chip: search picks the place to save. -->
-    <string name="roadsense_map_search_to_save">Search a place to set as %1$s</string>
+    <string name="roadsense_map_search_to_save">%1$s으로 설정할 장소 검색</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
-    <string name="roadsense_map_trip_restored">Trip restored</string>
+    <string name="roadsense_map_trip_restored">경로 복원됨</string>
 </resources>
