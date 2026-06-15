@@ -395,7 +395,7 @@
     <string name="update_picker_current_suffix">%1$s (installé)</string>
     <string name="update_picker_older_suffix">%1$s (ancien)</string>
     <!-- Update progress (title + per-step status; no emoji — state icon carries the cue) -->
-    <string name="update_progress_title">Mise à jour d\'Overdrive</string>
+    <string name="update_progress_title">Mise à jour de la Surcharge</string>
     <string name="update_step_downloading">Téléchargement de la mise à jour…</string>
     <string name="update_step_verifying">Verifying download…</string>
     <string name="update_step_stopping">Arrêt des démons…</string>
@@ -608,9 +608,9 @@
          notifications into one shade entry. The summary text is intentionally
          generic so it stays accurate whether all three services are running
          or only the keepalive survived an OOM respawn. -->
-    <string name="daemon_keepalive_notif_title">Overdrive actif</string>
+    <string name="daemon_keepalive_notif_title">Surcharge active</string>
     <string name="daemon_keepalive_notif_text">Surveillance des systèmes de véhicules</string>
-    <string name="overdrive_status_summary_title">Overdrive</string>
+    <string name="overdrive_status_summary_title">Surcharge</string>
     <string name="overdrive_status_summary_text">Services en arrière-plan en cours d\'exécution</string>
     <!-- ============================================================== -->
     <!-- M3 Revamp: navigation rail + settings sub-rail + theme picker  -->
@@ -986,11 +986,11 @@
     <!-- ============================================================
          RoadSense — road-hazard detection feature
          ============================================================ -->
-    <string name="rail_roadsense">RoadSense</string>
+    <string name="rail_roadsense">Sens de route</string>
     <string name="rail_hazard_map">Carte</string>
-    <string name="roadsense_title">RoadSense</string>
+    <string name="roadsense_title">Sens de route</string>
     <string name="roadsense_pill_scanning">Analyse en cours</string>
-    <string name="roadsense_pill_idle">RoadSense</string>
+    <string name="roadsense_pill_idle">Sens de route</string>
     <string name="roadsense_status_idle">Inactif</string>
     <!-- VEHICLE calibration (suspension-learning) — the green/orange/red dot. Worded
          about the car, not the route, since that's what maturity actually measures. -->
