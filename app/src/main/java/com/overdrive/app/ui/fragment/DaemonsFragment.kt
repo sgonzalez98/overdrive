@@ -145,7 +145,6 @@ class DaemonsFragment : Fragment() {
                 val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(context, R.style.Theme_Overdrive_M3_Dialog)
                     .setIcon(R.drawable.ic_link)
                     .setTitle(getString(R.string.dialog_zrok_token_title))
-                    .setMessage(getString(R.string.dialog_zrok_token_message))
                     .setView(dialogView)
                     .setPositiveButton(getString(R.string.dialog_save)) { _, _ ->
                         val token = editToken.text.toString().trim()
@@ -227,7 +226,6 @@ class DaemonsFragment : Fragment() {
             val dialog = com.google.android.material.dialog.MaterialAlertDialogBuilder(context, R.style.Theme_Overdrive_M3_Dialog)
                 .setIcon(R.drawable.ic_mqtt)
                 .setTitle(getString(R.string.dialog_tailscale_settings_title))
-                .setMessage(getString(R.string.dialog_tailscale_settings_message))
                 .setView(dialogView)
                 .setPositiveButton(getString(R.string.dialog_save)) { _, _ ->
                     val enableProxy = proxySwitch.isChecked
