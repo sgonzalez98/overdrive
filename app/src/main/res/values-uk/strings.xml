@@ -383,8 +383,46 @@
     <string name="toast_updated_to">Оновлено до %1$s</string>
     <string name="toast_update_install_failed">Помилка встановлення оновлення: %1$s</string>
     <string name="toast_checking_for_updates">Checking for updates…</string>
-    <string name="toast_app_up_to_date">Додаток є найновішим (v%1$s)</string>
+    <string name="toast_app_up_to_date">App is up to date (%1$s)</string>
     <string name="toast_update_check_failed">Помилка перевірки оновлення: %1$s</string>
+    <!-- Update dialog + version picker -->
+    <string name="update_dialog_available_title">Доступне оновлення</string>
+    <string name="update_dialog_subtitle">Нова збірка готова до встановлення</string>
+    <string name="update_dialog_current">Current: v%1$s</string>
+    <string name="update_dialog_new">New: v%1$s</string>
+    <string name="update_dialog_current_label">Встановлено</string>
+    <string name="update_dialog_new_label">Нова версія</string>
+    <string name="update_dialog_whats_new">Новинки</string>
+    <string name="update_dialog_install_now">Встановити</string>
+    <string name="update_dialog_later">Пізніше</string>
+    <string name="update_picker_title">Виберіть версію</string>
+    <string name="update_picker_subtitle">Встановити будь-яку опубліковану збірку — новішу або старшу</string>
+    <string name="update_picker_empty">Ще немає опублікованих версій.</string>
+    <string name="update_picker_current_suffix">%1$s (встановлено)</string>
+    <string name="update_picker_older_suffix">%1$s (старше)</string>
+    <!-- Update progress (title + per-step status; no emoji — state icon carries the cue) -->
+    <string name="update_progress_title">Оновлення OverDrive</string>
+    <string name="update_step_downloading">Завантажується оновлення…</string>
+    <string name="update_step_verifying">Перевірка завантаження…</string>
+    <string name="update_step_stopping">Stopping daemons…</string>
+    <string name="update_step_installing">Installing update…</string>
+    <string name="update_step_installed">Оновлення встановлено</string>
+    <string name="update_step_restarting">Restarting app…</string>
+    <string name="update_step_queued">Starting update…</string>
+    <string name="update_error_title">Оновлення не вдалося</string>
+    <string name="update_error_daemon_down">Мова камери не працює. Почніть роботу з екрану Daemon, а потім спробуйте оновити знову.</string>
+    <string name="update_error_start_failed">Не вдалося запустити оновлення: %1$s</string>
+    <string name="update_error_lost_headunit">Загубили контакт з головною одиницею перед завершенням встановлення. На тунелі? Перевірте Telegram для нового URL або використайте місцеву IP-адресу.</string>
+    <string name="update_hide">Приховати</string>
+    <!-- Update channel selector (Settings → About) -->
+    <string name="settings_update_channel_title">Канал оновлень</string>
+    <string name="settings_update_channel_alpha">Альфа</string>
+    <string name="settings_update_channel_braveheart">Хоробре серце</string>
+    <string name="settings_update_channel_alpha_desc">Стабільна версія. Кожна опублікована версія зберігається - виберіть будь-яку для встановлення (дозволені зниження). Рекомендовано для повсякденного використання.</string>
+    <string name="settings_update_channel_braveheart_desc">Bleeding-edge builds, delivered the moment they\'re published. You get new features first, but they may be unstable or buggy. If something breaks, open the Daemons screen, tap a daemon\'s log, choose \"Upload &amp; get a code\", and share the code with us on the community channels.</string>
+    <string name="settings_update_channel_save_failed">Не вдалося зберегти канал оновлення</string>
+    <string name="settings_update_channel_braveheart_toast">Переключено на Бревбентеж. Збірки можуть бути нестабільними - якщо щось ламається, надішліть журнал служби і повідомте про це у Discord/GitHub/WhatsApp.</string>
+    <!-- Community / report-a-bug links -->
     <string name="toast_storage_permission_required">Для записів потрібен дозвіл на доступ до пам\'яті</string>
     <string name="toast_url_copied_short">URL скопійовано!</string>
     <string name="toast_camera_set_to_auto">Камера встановлена у автоматичну</string>
@@ -513,6 +551,23 @@
     <string name="log_header_source">Джерело: %1$s</string>
     <string name="log_header_exported">Exported: %1$s</string>
     <string name="log_header_truncated">ПРИМІТКА: Журнал скорочено до останніх 10000 ліній (загалом: %1$d рядків)</string>
+    <!-- Braveheart log send (upload to Cloudflare or share-sheet) -->
+    <string name="logs_send_title">Надіслати журнал %1$s</string>
+    <string name="logs_send_title_plain">Надіслати журнал служби</string>
+    <string name="logs_send_subtitle">%1$s · Виберіть, як надіслати нам</string>
+    <string name="logs_send_upload">Вивантажити &amp; отримати код</string>
+    <string name="logs_send_upload_desc">Надсилайте нам журнал і дайте вам короткий код для підтримки.</string>
+    <string name="logs_send_share">Поділитися файлом…</string>
+    <string name="logs_send_share_desc">Зберегти або відправити журнал себе через спільний лист.</string>
+    <string name="logs_uploading_title">Uploading log…</string>
+    <string name="logs_uploading_subtitle">Переналаштування секретів та надсилання надійно</string>
+    <string name="logs_uploaded_title">Лог завантажено</string>
+    <string name="logs_uploaded_instructions">Поділіться з нами цим кодом та зверніть увагу на те, що ви робите коли розбиваєте. Опублікуйте це в Discord, GitHub проблеми або WhatsApp - посилання на екрані \"Про програму\".</string>
+    <string name="logs_uploaded_privacy">Секрети відновлені · Автовиконання журналу</string>
+    <string name="logs_copy_code">Копіювати код</string>
+    <string name="logs_done">Виконано</string>
+    <string name="placeholder_dash">—</string>
+    <string name="errors_network">Помилка мережі</string>
     <!-- Recording controls -->
     <!-- Recording library -->
     <string name="toast_cannot_play_video">Не вдалося відтворити відео: %1$s</string>
@@ -523,7 +578,7 @@
     <string name="toast_batch_delete_partial">%1$d видалено, %2$d не вдалося</string>
     <string name="play_with_chooser">Грати з</string>
     <!-- Setup guide -->
-    <string name="setup_version_banner">Оновлено до v%1$s — повторно підтвердити автостарт, BYD встановлює його при кожному встановленні</string>
+    <string name="setup_version_banner">Updated to %1$s — re-confirm autostart, BYD wipes it on every install</string>
     <string name="setup_overlay_already_granted">Вже надано</string>
     <!-- Setup guide — post-setup tips section -->
     <string name="setup_tips_header">Поради &amp; усунення несправностей</string>
@@ -1068,6 +1123,10 @@
     <string name="roadsense_map_poi_charging_generic">Зарядна станція</string>
     <string name="roadsense_map_poi_fuel_generic">Паливна станція</string>
     <string name="roadsense_map_route_switched">Перемкнений маршрут</string>
+    <!-- "then <next maneuver>" preview shown in the maneuver banner -->
+    <string name="roadsense_map_then">тоді</string>
+    <!-- Roundabout exit ordinal in the maneuver banner (%1$d = exit number) -->
+    <string name="roadsense_map_exit_n">вийти із %1$d</string>
     <!-- Hazards-along-route pills (%1$d = count) -->
     <string name="roadsense_map_pill_severe">%1$d важкий</string>
     <string name="roadsense_map_pill_moderate">%1$d moderate</string>
@@ -1094,4 +1153,36 @@
     <string name="roadsense_map_move_stop_down">Перемістити зупинку вниз</string>
     <!-- %1$d is the maximum number of stops allowed. -->
     <string name="roadsense_map_max_stops">Up to %1$d stops allowed</string>
+    <!-- Map day/night override (Auto → Light → Dark) -->
+    <string name="roadsense_map_theme_toggle">Тема мапи</string>
+    <string name="roadsense_map_theme_auto">Тема мапи: автоматична</string>
+    <string name="roadsense_map_theme_light">Тема мапи: світла</string>
+    <string name="roadsense_map_theme_dark">Тема мапи: темна</string>
+    <!-- Saved places (Home / Work / custom favourites) -->
+    <string name="roadsense_map_saved_home">Домашній екран</string>
+    <string name="roadsense_map_saved_work">Праця</string>
+    <string name="roadsense_map_saved_set_home">Встановити домашню сторінку</string>
+    <string name="roadsense_map_saved_set_work">Встановити роботу</string>
+    <!-- Short action label for the "save as a custom favourite" button. -->
+    <string name="roadsense_map_saved_favourite">Вибране</string>
+    <string name="roadsense_map_save_place">Зберегти місце</string>
+    <string name="roadsense_map_save_as_home">Зберегти як домашню сторінку</string>
+    <string name="roadsense_map_save_as_work">Зберегти як роботу</string>
+    <string name="roadsense_map_save_as_custom">Save as favourite…</string>
+    <string name="roadsense_map_saved_added">Збережено</string>
+    <string name="roadsense_map_saved_removed">Видалено із збережених</string>
+    <string name="roadsense_map_saved_remove">Видалити</string>
+    <string name="roadsense_map_recent_remove">Видалити з недавніх</string>
+    <string name="roadsense_map_recent_removed">Видалено з недавніх</string>
+    <string name="roadsense_map_custom_label_hint">Позначка (напр. Gym, Mum\'s)</string>
+    <string name="roadsense_map_custom_label_title">Назвати це місце</string>
+    <string name="roadsense_map_save">Зберегти</string>
+    <string name="roadsense_map_cancel">Скасувати</string>
+    <!-- Place-action sheet (long-press the map or a search result to save/navigate) -->
+    <string name="roadsense_map_dropped_pin">Скинутий контакт</string>
+    <string name="roadsense_map_navigate_here">Рухатися сюди</string>
+    <!-- Shown after tapping an unset Home/Work chip: search picks the place to save. -->
+    <string name="roadsense_map_search_to_save">Search a place to set as %1$s</string>
+    <!-- Shown when re-entering the map with a previously-set trip restored. -->
+    <string name="roadsense_map_trip_restored">Поїздку відновлено</string>
 </resources>
