@@ -565,14 +565,20 @@ public class MqttConnectionManager {
                 payload.put("odometer", raw > 1_000_000 ? raw / 10.0 : (double) raw);
             }
 
-            // soh
-            if (sohEstimator != null && sohEstimator.hasEstimate()) {
-                payload.put("soh", sohEstimator.getCurrentSoh());
+            // soh — use the DISPLAYED (capped, anchored) value so MQTT agrees with
+            // the dashboard/health card. getCurrentSoh is the internal live median
+            // and can differ from the headline; getDisplaySoh is the single number
+            // every surface shows.
+            if (sohEstimator != null && sohEstimator.hasDisplaySoh()) {
+                payload.put("soh", sohEstimator.getDisplaySoh());
             }
 
-            // capacity (remaining kWh)
-            if (vd != null && !Double.isNaN(vd.remainKwh) && vd.remainKwh > 0) {
-                payload.put("capacity", vd.remainKwh);
+            // capacity (remaining kWh) — single source of truth (SOC×nominal×SOH on
+            // PHEV; gated raw on BEV). NEVER raw vd.remainKwh, which on PHEV is the
+            // unreliable/frozen getter and would diverge ~35% from the UI.
+            double capKwh = VehicleDataMonitor.getInstance().getBatteryRemainPowerKwh();
+            if (capKwh > 0) {
+                payload.put("capacity", capKwh);
             }
 
             // gear (extra field not in ABRP — useful for MQTT consumers)

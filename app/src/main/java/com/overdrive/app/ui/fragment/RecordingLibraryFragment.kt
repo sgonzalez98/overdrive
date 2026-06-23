@@ -1,6 +1,5 @@
 package com.overdrive.app.ui.fragment
 
-import android.content.ClipData
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
@@ -175,6 +174,11 @@ class RecordingLibraryFragment : Fragment() {
      * Comparison is case-insensitive; entries stored lowercased.
      */
     private val placeFilter = mutableSetOf<String>()
+
+    // Physical-volume filter: "INTERNAL" / "SD_CARD" / "USB". Empty = all
+    // volumes (default; the daemon index already spans every storage
+    // location). Set by the parent fragment's storage chips via applyAll.
+    private val storageFilter = mutableSetOf<String>()
 
     private val dayHeaderFormat = SimpleDateFormat("MMM d, yyyy", Locale.getDefault())
 
@@ -462,7 +466,8 @@ class RecordingLibraryFragment : Fragment() {
         extraSource: RecordingFilter? = null,
         narrowToDate: Boolean = false,
         places: Set<String> = emptySet(),
-        placeContains: String? = null
+        placeContains: String? = null,
+        storages: Set<String> = emptySet()
     ) {
         currentFilter = source
         extraFilter = extraSource
@@ -472,6 +477,8 @@ class RecordingLibraryFragment : Fragment() {
         severityFilter.addAll(severity.map { it.uppercase() })
         placeFilter.clear()
         placeFilter.addAll(places.map { it.lowercase() })
+        storageFilter.clear()
+        storageFilter.addAll(storages.map { it.uppercase() })
         placeContainsQuery = placeContains?.trim()?.lowercase() ?: ""
         calendar.set(year, month, 1)
         selectedDay = day
@@ -901,7 +908,8 @@ class RecordingLibraryFragment : Fragment() {
             date = dateStr,
             classes = actorClassFilter.toSet(),  // already lowercased
             severities = severitySet,
-            place = placeStr
+            place = placeStr,
+            storages = storageFilter.toSet()  // already uppercased by applyAll
         )
     }
 
@@ -1127,10 +1135,18 @@ class RecordingLibraryFragment : Fragment() {
 
                 val recordings = if (actorClassFilter.isEmpty()
                         && severityFilter.isEmpty()
-                        && placeFilter.isEmpty()) {
+                        && placeFilter.isEmpty()
+                        && storageFilter.isEmpty()) {
                     typeFiltered
                 } else {
                     typeFiltered.filter { rec ->
+                        // Storage filter applies regardless of sidecar presence —
+                        // every clip has a derivable storageType (or null, which
+                        // never matches a non-empty filter, so an unclassifiable
+                        // clip is hidden only when the user actively narrows).
+                        val storageOk = storageFilter.isEmpty() ||
+                            (rec.storageType?.uppercase() in storageFilter)
+                        if (!storageOk) return@filter false
                         val hasSidecar = rec.peakSeverity != null ||
                             rec.actorClasses.isNotEmpty()
                         val placeOk = placeFilter.isEmpty() || run {
@@ -1282,8 +1298,6 @@ class RecordingLibraryFragment : Fragment() {
                 val intent = Intent(Intent.ACTION_VIEW).apply {
                     setDataAndType(uri, "video/mp4")
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    // Explicitly set ClipData to ensure the Chooser and target app can access the URI
-                    clipData = ClipData.newRawUri(null, uri)
                 }
                 startActivity(Intent.createChooser(intent, getString(R.string.play_with_chooser)))
             } catch (e2: Exception) {
@@ -1309,8 +1323,6 @@ class RecordingLibraryFragment : Fragment() {
                 type = "video/mp4"
                 putExtra(Intent.EXTRA_STREAM, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                // Explicitly set ClipData to ensure the Chooser and target app can access the URI
-                clipData = ClipData.newRawUri(null, uri)
             }
             startActivity(Intent.createChooser(intent, getString(R.string.action_share)))
         } catch (e: Exception) {
@@ -1342,14 +1354,6 @@ class RecordingLibraryFragment : Fragment() {
                 type = "video/mp4"
                 putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                // Set ClipData for all URIs to ensure the Chooser and target app can access them
-                if (uris.isNotEmpty()) {
-                    val cd = ClipData.newRawUri(null, uris[0])
-                    for (i in 1 until uris.size) {
-                        cd.addItem(ClipData.Item(uris[i]))
-                    }
-                    this.clipData = cd
-                }
             }
             startActivity(Intent.createChooser(intent, getString(R.string.action_share)))
             Toast.makeText(

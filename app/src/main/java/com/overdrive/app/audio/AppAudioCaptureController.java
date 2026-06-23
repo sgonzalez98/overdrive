@@ -43,14 +43,22 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *   - drain thread: pulls AAC frames, ships over TCP
  *
  * <h3>PTS</h3>
- * Stamped at PCM-read time using {@code System.nanoTime() / 1000}
- * (microseconds). On this BYD AOSP rev the camera HAL's
- * {@code Image.getTimestamp()} is also {@code CLOCK_MONOTONIC} ns,
- * so video & audio PTSs share a domain — the daemon's
- * {@code HardwareEventRecorderGpu.writeRebasedAudio} can rebase both
- * against the same {@code ptsOriginUs}. PCM-chunk granularity is
- * 20 ms which is sample-accurate enough for cabin-audio sync; the
- * encoder preserves PTSs as-is.
+ * Each emitted AAC frame is stamped from a SAMPLE-COUNT clock: AAC-LC is a
+ * fixed 1024 samples/frame, so frame N's PTS is
+ * {@code base + N*1024*1e6/SAMPLE_RATE} µs — a perfectly even,
+ * strictly-monotonic cadence. {@code base} is captured once from
+ * {@code System.nanoTime()/1000} at the first frame, so audio shares the
+ * video PTS clock domain (the GL pipeline feeds {@code System.nanoTime()} to
+ * {@code eglPresentationTimeANDROID}); the daemon's
+ * {@code HardwareEventRecorderGpu.writeRebasedAudio} rebases both against one
+ * {@code ptsOriginUs}. Stamping from sample count rather than reading
+ * wall-clock at drain time is what keeps playback smooth: drain-thread
+ * scheduling jitter (GC, encoder/Adreno contention, TCP stalls) used to make
+ * consecutive frames' timestamps bunch or spread, which played back choppy and
+ * tripped the daemon's monotonic-drop guard. A forward-only resync re-anchors
+ * the cadence clock if {@code captureLoop} drops PCM under backpressure, so
+ * audio-vs-video drift stays bounded. {@code info.presentationTimeUs} is
+ * ignored — some BYD AOSP AAC encoders rewrite it to start at 0.
  */
 public class AppAudioCaptureController {
 
@@ -101,6 +109,34 @@ public class AppAudioCaptureController {
     // ~50 Hz (20 ms AAC frames) churned ~3 KB/s through GC. Grows on the
     // rare oversized frame, never shrinks.
     private byte[] drainScratch = new byte[8192];
+
+    // ---- Sample-accurate audio PTS (drain thread only) ----------------------
+    // AAC-LC emits a FIXED 1024 samples per frame; at SAMPLE_RATE that is a
+    // constant 21.333 ms. We stamp each frame at that exact cadence instead of
+    // reading wall-clock at drain time. The old drain-time System.nanoTime()
+    // stamp inherited the drain thread's scheduling jitter (GC pauses, encoder /
+    // Adreno contention, TCP write stalls): consecutive frames that are really
+    // 21.3 ms apart got timestamps bunched together or spread out, so the muxed
+    // audio track played back choppy, and any frame whose jittered pts landed
+    // <= the previous one was DROPPED by the daemon's per-track monotonic guard
+    // (writeRebasedAudio) — an audible gap. A sample-count clock is perfectly
+    // even and strictly monotonic, eliminating both.
+    //
+    // Anchored ONCE to System.nanoTime()/1000 at the first emitted frame so the
+    // audio timeline shares the same clock domain as the video PTS
+    // (eglPresentationTimeANDROID uses System.nanoTime()), letting the daemon
+    // rebase A/V against one origin.
+    private static final int AAC_SAMPLES_PER_FRAME = 1024;
+    private long audioPtsBaseUs = -1L;   // nanoTime/1000 captured at first frame
+    private long emittedSamples = 0L;    // running total of samples emitted
+    // If the even-cadence clock falls behind real wall-clock by more than this
+    // — which happens when captureLoop drops PCM chunks under encoder
+    // backpressure, so fewer AAC frames are emitted than real time elapsed —
+    // re-anchor the cadence clock FORWARD to real time. This inserts a gap that
+    // matches the real dropped-audio gap, bounding audio-vs-video drift to this
+    // window while keeping spacing perfectly even in the common no-drop case.
+    // Forward-only, so PTS stays strictly monotonic.
+    private static final long AUDIO_PTS_RESYNC_THRESHOLD_US = 120_000L; // 120 ms
     // Mic-claim contention back-off. BYD voice-asst can grab the mic
     // mid-trip; AudioRecord then throws ERROR_INVALID_OPERATION on read.
     // We close + retry every 5 s instead of busy-looping or giving up.
@@ -157,6 +193,13 @@ public class AppAudioCaptureController {
 
             synchronized (lifecycleLock) {
                 running.set(true);
+                // Reset the sample-accurate PTS clock for this session. The
+                // drain thread captures audioPtsBaseUs from the first frame; a
+                // stale base from a prior session would back-date the new
+                // session's timeline. emittedSamples is read/written only on
+                // the single drain thread after this point.
+                audioPtsBaseUs = -1L;
+                emittedSamples = 0L;
                 executor = Executors.newFixedThreadPool(2, r -> {
                     Thread t = new Thread(r);
                     t.setPriority(Thread.NORM_PRIORITY + 1);
@@ -338,19 +381,12 @@ public class AppAudioCaptureController {
                 continue;
             }
 
-            // PTS handling: we stamp at DRAIN time (not here) using
-            // System.nanoTime() / 1000 µs at packet output. Some MediaCodec
-            // implementations (including some BYD AOSP AAC encoders) rewrite
-            // input PTSs to start at 0, which would silently break the
-            // daemon's monotonicity guard across controller restarts.
-            // Stamping at drain bypasses that hazard entirely. The encoder's
-            // internal latency is sub-frame (a few ms at 64 kbps mono); 1-2 ms
-            // of timing noise is imperceptible for cabin audio and well inside
-            // the 20 ms PCM-chunk granularity.
-            //
-            // Consequence: the queueInputBuffer PTS argument below is set to 0
-            // — the encoder doesn't need an accurate input PTS when we
-            // re-stamp at output.
+            // PTS handling: the input PTS is irrelevant here — the drain loop
+            // assigns each output frame a PTS from a sample-count clock (see
+            // the field doc on audioPtsBaseUs / the drainLoop stamp). We pass 0
+            // to queueInputBuffer because (a) some BYD AOSP AAC encoders rewrite
+            // input PTSs anyway, and (b) the output PTS is derived from the
+            // emitted-frame count, not from this value.
 
             try {
                 int inputIndex = aacEncoder.dequeueInputBuffer(20_000);
@@ -441,6 +477,37 @@ public class AppAudioCaptureController {
                 outBuf.position(info.offset);
                 outBuf.limit(info.offset + info.size);
 
+                // Sample-accurate PTS. AAC-LC = AAC_SAMPLES_PER_FRAME (1024)
+                // samples/frame = a constant 21.333 ms at SAMPLE_RATE, so we
+                // advance a sample counter rather than read wall-clock here.
+                // This makes frame spacing perfectly even and strictly
+                // monotonic, which is what fixes the choppy-audio + dropped-
+                // frame symptoms (see the field doc on audioPtsBaseUs). The
+                // base is captured once from System.nanoTime()/1000 so audio
+                // shares the video clock domain; thereafter PTS is pure
+                // arithmetic. We DELIBERATELY ignore info.presentationTimeUs —
+                // some BYD AOSP AAC encoders rewrite it to start at 0.
+                long nowUs = System.nanoTime() / 1000L;
+                if (audioPtsBaseUs < 0) {
+                    audioPtsBaseUs = nowUs;
+                    emittedSamples = 0L;
+                }
+                long ptsUs = audioPtsBaseUs
+                    + (emittedSamples * 1_000_000L) / SAMPLE_RATE;
+                // Drift guard: if captureLoop dropped PCM chunks under encoder
+                // backpressure, fewer frames were emitted than real time
+                // elapsed, so the cadence clock lags wall-clock. When the lag
+                // exceeds the threshold, jump the base FORWARD to real time so
+                // the audio gap matches the real dropped-audio gap (bounded
+                // drift) — forward-only keeps PTS monotonic.
+                long realElapsedUs = nowUs - audioPtsBaseUs;
+                long cadenceElapsedUs = (emittedSamples * 1_000_000L) / SAMPLE_RATE;
+                if (realElapsedUs - cadenceElapsedUs > AUDIO_PTS_RESYNC_THRESHOLD_US) {
+                    audioPtsBaseUs = nowUs - cadenceElapsedUs;
+                    ptsUs = audioPtsBaseUs + cadenceElapsedUs;
+                }
+                emittedSamples += AAC_SAMPLES_PER_FRAME;
+
                 // Frame format: [4 totalLength][4 msgType][8 ptsUs][N AAC bytes]
                 // totalLength counts msgType + ptsUs + AAC = 4 + 8 + N = 12 + N
                 int totalLength = 4 + 8 + info.size;
@@ -449,21 +516,7 @@ public class AppAudioCaptureController {
                     if (o == null) break;
                     o.writeInt(totalLength);
                     o.writeInt(MSG_DATA);
-                    // Stamp PTS HERE at packet output time using
-                    // System.nanoTime() / 1000 µs, NOT info.presentationTimeUs.
-                    // Some MediaCodec AAC encoders (including some BYD AOSP
-                    // builds) rewrite output PTSs to start at 0, which would
-                    // silently break the daemon's monotonicity guard across
-                    // controller restarts (a fresh start would emit
-                    // ptsUs=0 < the last shipped pts, and writeRebasedAudio
-                    // would drop most audio until time caught up). Re-stamping
-                    // at drain produces a fresh monotonic pts in the same
-                    // System.nanoTime() domain as the video encoder, which is
-                    // what the daemon's writeRebasedAudio anchors against
-                    // (ptsOriginUs). Encoder latency is sub-frame (a few ms at
-                    // 64 kbps mono); 1-2 ms of timing noise is imperceptible
-                    // for cabin audio.
-                    o.writeLong(System.nanoTime() / 1000L);
+                    o.writeLong(ptsUs);
                     // FIX H3: reuse drainScratch instead of `new byte[info.size]`.
                     // AAC frames are <1500 bytes; the scratch starts at 8 KB
                     // and only grows on the rare oversize frame.

@@ -50,6 +50,12 @@ public final class ThumbnailBuffer {
         float confidence;
         Actor.Proximity proximity;
         long wallMs;
+        // Wall-clock of the actor's PEAK-severity moment (the frame this crop
+        // depicts), as opposed to wallMs which is when the slot was last touched.
+        // Used to reject a hero whose peak predates the recorded MP4 window
+        // (the pre-record ring is bounded, so a peak captured before the clip
+        // starts was evicted and is not in the video).
+        long peakWallMs;
         Actor.ClassGroup classGroup;
         long actorId;
         int camera;
@@ -191,6 +197,7 @@ public final class ThumbnailBuffer {
             s.confidence = a.peakConfidence;
             s.proximity = a.peakProximity;
             s.wallMs = now;
+            s.peakWallMs = a.peakSeverityWallMs;
             s.classGroup = a.classGroup;
             s.actorId = a.actorId;
             s.camera = a.peakCamera;
@@ -209,16 +216,34 @@ public final class ThumbnailBuffer {
      * left with an empty buffer because the first already drained.
      */
     static Slot pickHero(List<Slot> snap) {
-        Slot hero = null;
-        long heroScore = -1L;
+        return pickHero(snap, 0L, 0L);
+    }
+
+    /**
+     * Pick the highest-score slot whose peak frame lies within the recorded
+     * window [windowStartMs, windowEndMs]. A slot whose peakWallMs predates the
+     * window depicts a moment evicted from the bounded pre-record ring — i.e. a
+     * frame the user will NOT find when scrubbing the MP4 — so it is excluded.
+     *
+     * windowStartMs<=0 disables the gate (legacy behavior). windowEndMs<=0 means
+     * "no upper bound" (open-ended, e.g. the still-growing current segment).
+     *
+     * Fallback: if NO slot is in-window (e.g. every peak predates a very short
+     * pre-record window), return the best slot anyway — a slightly-stale hero
+     * beats no hero, and the caption/sidecar still describe the event.
+     */
+    static Slot pickHero(List<Slot> snap, long windowStartMs, long windowEndMs) {
+        Slot hero = null, heroAny = null;
+        long heroScore = -1L, heroAnyScore = -1L;
         for (Slot s : snap) {
             long sc = score(s.severity, s.confidence, s.proximity, s.classGroup);
-            if (sc > heroScore) {
-                heroScore = sc;
-                hero = s;
-            }
+            if (sc > heroAnyScore) { heroAnyScore = sc; heroAny = s; }
+            boolean inWindow = windowStartMs <= 0
+                    || (s.peakWallMs >= windowStartMs
+                        && (windowEndMs <= 0 || s.peakWallMs <= windowEndMs));
+            if (inWindow && sc > heroScore) { heroScore = sc; hero = s; }
         }
-        return hero;
+        return hero != null ? hero : heroAny;
     }
 
     /**
@@ -232,10 +257,22 @@ public final class ThumbnailBuffer {
      * @return Hero JPEG file on disk, or null if no slots / write failed.
      */
     public synchronized File writeHeroFromSnapshot(List<Slot> snap, File mp4File) {
+        return writeHeroFromSnapshot(snap, mp4File, 0L, 0L);
+    }
+
+    /**
+     * Window-gated variant: only a slot whose peak frame lies within
+     * [windowStartMs, windowEndMs] is eligible as the hero (with a best-effort
+     * fallback if none qualify — see {@link #pickHero(List, long, long)}). This
+     * stops the hero JPEG from depicting a peak moment that was evicted from the
+     * bounded pre-record ring and therefore is not present anywhere in the MP4.
+     */
+    public synchronized File writeHeroFromSnapshot(List<Slot> snap, File mp4File,
+                                                   long windowStartMs, long windowEndMs) {
         if (snap == null || snap.isEmpty() || mp4File == null) return null;
         File parent = mp4File.getParentFile();
         if (parent == null) return null;
-        Slot hero = pickHero(snap);
+        Slot hero = pickHero(snap, windowStartMs, windowEndMs);
         if (hero == null) return null;
         String base = mp4File.getName();
         if (base.endsWith(".mp4")) base = base.substring(0, base.length() - 4);

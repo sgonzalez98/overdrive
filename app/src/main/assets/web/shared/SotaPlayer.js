@@ -21,8 +21,44 @@
             this.frameCount = 0;
             this.onConnected = null;
             this.onDisconnected = null;
+            // Tracks the user's intent to view (vs. transient running state), so
+            // we can suspend the stream when the tab is hidden and auto-resume
+            // when it returns — without the user re-tapping the camera.
+            this.userWantsStream = false;
+            // Auto-reconnect backoff (capped) so a dead tunnel link doesn't
+            // reconnect every 2 s forever, hammering cellular.
+            this.reconnectAttempts = 0;
             this.handleFrame = this.handleFrame.bind(this);
             this.handleError = this.handleError.bind(this);
+
+            // Suspend the H.264 stream while the tab is backgrounded. Without
+            // this, a live-view tab left open over the tunnel keeps pulling
+            // video (and reconnect-looping) over cellular 24/7 — the single
+            // largest data drain. Mirrors performance.js / road-sense.js which
+            // already stop their feeds on hide.
+            if (typeof document !== 'undefined' && document.addEventListener) {
+                this._onVisibility = () => {
+                    if (document.hidden) {
+                        if (this.running) this._suspendForHidden();
+                    } else if (this.userWantsStream && !this.running) {
+                        this.reconnectAttempts = 0;
+                        this.start();
+                    }
+                };
+                this._onPageHide = () => { if (this.running) this._suspendForHidden(); };
+                document.addEventListener('visibilitychange', this._onVisibility);
+                window.addEventListener('pagehide', this._onPageHide);
+            }
+        }
+
+        // Tear down the live socket/decoder but REMEMBER the user wanted it, so
+        // the visibilitychange handler can resume on return. Distinct from
+        // stop(), which is an explicit user stop and clears userWantsStream.
+        _suspendForHidden() {
+            this.running = false;
+            if (this.ws) { try { this.ws.close(); } catch (e) {} this.ws = null; }
+            if (this.decoder) { try { this.decoder.close(); } catch (e) {} this.decoder = null; }
+            if (this.onDisconnected) this.onDisconnected();
         }
 
         static isSupported() {
@@ -44,6 +80,7 @@
             if (this.running) { this.stop(); return; }
             if (!SotaPlayer.isSupported()) { console.error("[SotaPlayer] WebCodecs not supported!"); return; }
 
+            this.userWantsStream = true;
             this.running = true;
             this.sps = null;
             this.pps = null;
@@ -64,20 +101,32 @@
             this.ws.binaryType = "arraybuffer";
 
             this.ws.onopen = () => {
+                this.reconnectAttempts = 0;  // healthy link — reset backoff
                 this.initDecoder();
                 if (this.onConnected) this.onConnected();
             };
             this.ws.onmessage = (e) => this.ingest(new Uint8Array(e.data));
             this.ws.onclose = () => {
                 if (this.onDisconnected) this.onDisconnected();
-                // SOTA: Auto-reconnect after 2 seconds if still running
-                if (this.running) {
+                // Auto-reconnect with capped exponential backoff (2s → 30s) so a
+                // dead tunnel link doesn't reconnect every 2s forever over
+                // cellular. Skip while the tab is hidden (visibility handler owns
+                // resume). Reset on a successful onopen above.
+                if (this.running && !(typeof document !== 'undefined' && document.hidden)) {
+                    this.reconnectAttempts = (this.reconnectAttempts || 0) + 1;
+                    var backoff = Math.min(30000, 2000 * Math.pow(2, this.reconnectAttempts - 1));
                     setTimeout(() => {
-                        if (this.running) this.connectWebSocket();
-                    }, 2000);
+                        if (this.running && !(typeof document !== 'undefined' && document.hidden)) {
+                            this.connectWebSocket();
+                        }
+                    }, backoff);
                 }
             };
-            this.ws.onerror = () => { this.running = false; };
+            // Do NOT zero `running` here: a WebSocket error is always followed
+            // by a close event, and onclose owns the capped-backoff reconnect.
+            // Clearing running on error would block that reconnect and leave a
+            // stuck dead player (live-view's onDisconnected does not reconnect).
+            this.ws.onerror = () => { /* close event follows; onclose owns reconnect */ };
         }
 
         initDecoder() {
@@ -234,6 +283,10 @@
         }
 
         stop() {
+            // Explicit user stop — clear intent so a later tab-show does NOT
+            // auto-resume (only _suspendForHidden keeps userWantsStream set).
+            this.userWantsStream = false;
+            this.reconnectAttempts = 0;
             this.running = false;
             if (this.ws) { this.ws.close(); this.ws = null; }
             if (this.decoder) { try { this.decoder.close(); } catch(e) {} this.decoder = null; }
@@ -241,6 +294,13 @@
             this.sps = null;
             this.pps = null;
             this.hasReceivedKeyframe = false;
+            // Remove the visibility listeners on explicit stop so instances that
+            // are stopped+discarded don't accumulate orphan handlers. (Kept alive
+            // through _suspendForHidden, which must still resume on show.)
+            if (typeof document !== 'undefined' && document.removeEventListener) {
+                if (this._onVisibility) document.removeEventListener('visibilitychange', this._onVisibility);
+                if (this._onPageHide) window.removeEventListener('pagehide', this._onPageHide);
+            }
         }
 
         isRunning() { return this.running; }

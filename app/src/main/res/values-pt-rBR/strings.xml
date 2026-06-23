@@ -1165,12 +1165,14 @@
     <string name="roadsense_map_search_to_save">Procurar um local para definir como %1$s</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">Percurso restaurado</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">O token é armazenado com segurança e compartilhado entre os processos do aplicativo e do daemon.</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">O token é armazenado de forma criptografada e compartilhado entre o aplicativo e o processo do daemon.</string>
     <string name="cloudflared_token_hint">Insira o token do cloudflared</string>
-    <string name="cloudflare_paid_version">Versão Paga do Cloudflare</string>
-    <string name="dialog_cloudflared_settings_title">🌐 Configurações do Cloudflared</string>
-    <string name="dialog_cloudflared_settings_message">Defina se você está usando o Cloudflare pago ou o trycloudflare. Se estiver usando o Cloudflare pago, insira o seu token do túnel.</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">Se você definir para a versão paga, o token não pode estar vazio</string>
+    <string name="cloudflare_paid_version">Versão paga do Cloudflare</string>
+    <string name="dialog_cloudflared_settings_title">Configurações do Cloudflared</string>
+    <string name="dialog_cloudflared_settings_message">Defina se você está usando o Cloudflare pago ou o trycloudflare. Se estiver usando o Cloudflare pago, insira o token do seu túnel.</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">Se você definir a versão paga, o token não pode ficar vazio</string>
+    <string name="toast_cloudflared_token_invalid">Token inválido: use apenas letras, números e os caracteres . _ - =</string>
     <string name="toast_cloudflared_saved_settings">Configurações do Cloudflared salvas</string>
 </resources>

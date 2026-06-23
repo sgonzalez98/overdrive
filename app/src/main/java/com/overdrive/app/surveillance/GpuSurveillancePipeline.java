@@ -9,20 +9,20 @@ import java.io.File;
 
 /**
  * GpuSurveillancePipeline - Complete GPU Zero-Copy surveillance system.
- *
+ * 
  * Orchestrates all components of the GPU pipeline:
  * - PanoramicCameraGpu: Camera → GPU texture
  * - GpuMosaicRecorder: GPU composition → Encoder
  * - GpuDownscaler: GPU thumbnail → CPU
  * - SurveillanceEngineGpu: Motion detection & AI
  * - AdaptiveBitrateController: Quality optimization
- *
+ * 
  * Achieves <10% CPU usage through GPU zero-copy architecture.
  */
 public class GpuSurveillancePipeline {
     private static final String TAG = "GpuPipeline";
     private static final DaemonLogger logger = DaemonLogger.getInstance(TAG);
-
+    
     // Components
     // volatile: read from worker threads (IdleShutdown, yield listener,
     // applyBatchedChange holds reconfigLock — different monitor than stop()'s
@@ -38,7 +38,7 @@ public class GpuSurveillancePipeline {
     // OUTSIDE the synchronized prologue. Without volatile there's no
     // happens-before edge and a reader could see a stale/partial reference.
     private volatile AdaptiveBitrateController bitrateController;
-
+    
     // Streaming components (separate encoder - always available)
     private com.overdrive.app.streaming.GpuStreamScaler streamScaler;
     private HardwareEventRecorderGpu streamEncoder;
@@ -59,7 +59,7 @@ public class GpuSurveillancePipeline {
     // GL init completes) so a concurrent disable observes either both
     // components committed or neither.
     private final java.util.concurrent.locks.ReentrantLock streamLifecycleLock =
-            new java.util.concurrent.locks.ReentrantLock();
+        new java.util.concurrent.locks.ReentrantLock();
 
     // ── Dedicated blind-spot lane (views 7/8) — NATIVE SurfaceControl path ────
     // A SECOND, independent GpuStreamScaler fed from the same camera texture via
@@ -126,7 +126,7 @@ public class GpuSurveillancePipeline {
     private static final long BS_TURN_POLL_MS = 250L;
     private static final long BS_OFF_DEBOUNCE_MS = 800L;  // ride through blink off-phase
     private final java.util.concurrent.locks.ReentrantLock bsLifecycleLock =
-            new java.util.concurrent.locks.ReentrantLock();
+        new java.util.concurrent.locks.ReentrantLock();
     private static final int BS_WIDTH = 1280;
     private static final int BS_HEIGHT = 960;
 
@@ -140,7 +140,7 @@ public class GpuSurveillancePipeline {
     // new value — no daemon restart, no segment rotation. Held as a field so
     // release() can deregister it cleanly.
     private com.overdrive.app.config.UnifiedConfigManager.ConfigChangeListener
-            rectifyConfigListener;
+        rectifyConfigListener;
 
     // Recording composition layout (0 = standard 360 mosaic, 1 = dashcam:
     // forward view on top + 360 left/rear/right below). Persisted in
@@ -197,7 +197,7 @@ public class GpuSurveillancePipeline {
     private final int encoderHeight;
     private final File eventOutputDir;
     private GpuPipelineConfig config;
-
+    
     // State
     private boolean initialized = false;
     // volatile: idle-shutdown thread reads without taking the monitor.
@@ -225,11 +225,11 @@ public class GpuSurveillancePipeline {
     // mid-tear-down and silently no-ops, or worse, both threads tear down
     // recorder surfaces concurrently.
     private final Object reconfigLock = new Object();
-
+    
     // Saved init params — needed for re-initialization after stop/start cycle (ACC OFF→ON)
     private android.content.res.AssetManager savedAssetManager;
     private android.content.Context savedContext;
-
+    
     // Deferred recording: stored when startRecording() is called before encoder is ready
     private volatile java.io.File pendingRecordingDir = null;
     private volatile String pendingRecordingPrefix = null;
@@ -261,7 +261,7 @@ public class GpuSurveillancePipeline {
     // cycle has rotated the value out from under them — the new pipeline
     // will reschedule its own retry if it still needs one.
     private final java.util.concurrent.atomic.AtomicLong pipelineGen =
-            new java.util.concurrent.atomic.AtomicLong(0L);
+        new java.util.concurrent.atomic.AtomicLong(0L);
 
     // FIX (audit R6): cache the resolved camera profile's per-quadrant strip-X
     // offsets so reinitializeEncoder()'s defensive `new GpuMosaicRecorder()`
@@ -271,10 +271,10 @@ public class GpuSurveillancePipeline {
     // mismatch on Tang (encoderHeight=1440) that would corrupt the encoder
     // feed. Captured during init() once the camera profile resolves.
     private volatile float[] lastQuadrantStripOffsetX = null;
-
+    
     /**
      * Creates the GPU surveillance pipeline.
-     *
+     * 
      * @param cameraWidth Camera width (typically 5120)
      * @param cameraHeight Camera height (typically 960)
      * @param eventOutputDir Directory for event recordings
@@ -292,7 +292,7 @@ public class GpuSurveillancePipeline {
         this.eventOutputDir = eventOutputDir;
         this.config = new GpuPipelineConfig();
     }
-
+    
     /**
      * Gets the configuration.
      */
@@ -485,7 +485,7 @@ public class GpuSurveillancePipeline {
                     mode, userBitrate / 1_000_000, mode.bitrate / 1_000_000));
         }
     }
-
+    
     /**
      * Sets the streaming quality (HQ/LQ).
      */
@@ -504,16 +504,16 @@ public class GpuSurveillancePipeline {
         int recordingFps = encoder != null ? encoder.getFps() : 0;
         if (recordingFps > 0 && quality.fps > recordingFps) {
             logger.warn("Stream fps " + quality.fps
-                    + " > recording fps " + recordingFps
-                    + " — GL thread budget may be tight on heavy frames");
+                + " > recording fps " + recordingFps
+                + " — GL thread budget may be tight on heavy frames");
         }
     }
-
+    
     /**
      * Applies a bitrate change to the encoder.
-     *
+     * 
      * Reinitializes encoder immediately to ensure new bitrate is used.
-     *
+     * 
      * @param bitrate New bitrate in bps
      */
     public void applyBitrateChange(int bitrate) {
@@ -535,7 +535,7 @@ public class GpuSurveillancePipeline {
         // (RMM's next activation re-reads it); skip the live reconfig.
         if (!running || stopping) {
             logger.warn("Bitrate change persisted to config but skipping live apply "
-                    + "(running=" + running + ", stopping=" + stopping + ")");
+                + "(running=" + running + ", stopping=" + stopping + ")");
             return;
         }
 
@@ -621,7 +621,7 @@ public class GpuSurveillancePipeline {
                     }
                     if (restartPrefix != null) {
                         logger.info("Restarting normal recording with new bitrate (prefix="
-                                + restartPrefix + ")");
+                            + restartPrefix + ")");
                         startRecording(restartDir, restartPrefix);
                     } else {
                         logger.info("Restarting normal recording with new bitrate (no captured prefix — default 'cam')");
@@ -642,7 +642,7 @@ public class GpuSurveillancePipeline {
                     }
                     if (restartPrefix != null) {
                         logger.info("Restarting deferred recording with new bitrate (prefix="
-                                + restartPrefix + ")");
+                            + restartPrefix + ")");
                         startRecording(restartDir, restartPrefix);
                     } else {
                         logger.info("Restarting deferred recording with new bitrate (no captured prefix — default 'cam')");
@@ -663,12 +663,12 @@ public class GpuSurveillancePipeline {
             // wedging recording for the rest of the ACC=ON window. Force a
             // full pipeline.stop() so RMM's next tick rebuilds from scratch.
             logger.warn("Forcing pipeline stop after bitrate-reinit failure — "
-                    + "RMM will rebuild on next activation");
+                + "RMM will rebuild on next activation");
             try {
                 stop();
             } catch (Throwable t) {
                 logger.warn("Failed to stop pipeline after bitrate change error: "
-                        + t.getMessage());
+                    + t.getMessage());
             }
         }
     }
@@ -702,7 +702,7 @@ public class GpuSurveillancePipeline {
         // Persist to config first so reinitializeEncoder picks it up via loadTargetFps().
         try {
             org.json.JSONObject cameraCfg = com.overdrive.app.config.UnifiedConfigManager
-                    .loadConfig().optJSONObject("camera");
+                .loadConfig().optJSONObject("camera");
             if (cameraCfg == null) cameraCfg = new org.json.JSONObject();
             cameraCfg.put("targetFps", clamped);
             com.overdrive.app.config.UnifiedConfigManager.updateSection("camera", cameraCfg);
@@ -714,7 +714,7 @@ public class GpuSurveillancePipeline {
         // applyBitrateChangeLocked for the full rationale — same race window.
         if (!running || stopping) {
             logger.warn("FPS change persisted to config but skipping live apply "
-                    + "(running=" + running + ", stopping=" + stopping + ")");
+                + "(running=" + running + ", stopping=" + stopping + ")");
             return;
         }
 
@@ -768,7 +768,7 @@ public class GpuSurveillancePipeline {
                     }
                     if (restartPrefix != null) {
                         logger.info("FPS reinit: resuming normal recording (prefix="
-                                + restartPrefix + ")");
+                            + restartPrefix + ")");
                         startRecording(restartDir, restartPrefix);
                     } else {
                         logger.info("FPS reinit: resuming normal recording (no captured prefix — default 'cam')");
@@ -791,7 +791,7 @@ public class GpuSurveillancePipeline {
                     }
                     if (restartPrefix != null) {
                         logger.info("FPS reinit: resuming deferred recording (prefix="
-                                + restartPrefix + ")");
+                            + restartPrefix + ")");
                         startRecording(restartDir, restartPrefix);
                     } else {
                         logger.info("FPS reinit: resuming deferred recording (no captured prefix — default 'cam')");
@@ -806,12 +806,12 @@ public class GpuSurveillancePipeline {
             // for full reasoning. Force pipeline.stop() instead of calling
             // startRecording() against a stale-encoder recorder.
             logger.warn("Forcing pipeline stop after FPS-reinit failure — "
-                    + "RMM will rebuild on next activation");
+                + "RMM will rebuild on next activation");
             try {
                 stop();
             } catch (Throwable t) {
                 logger.warn("Failed to stop pipeline after FPS change error: "
-                        + t.getMessage());
+                    + t.getMessage());
             }
         }
     }
@@ -835,7 +835,7 @@ public class GpuSurveillancePipeline {
         // applyBitrateChangeLocked for the full rationale — same race window.
         if (!running || stopping) {
             logger.warn("Codec change persisted to config but skipping live apply "
-                    + "(running=" + running + ", stopping=" + stopping + ")");
+                + "(running=" + running + ", stopping=" + stopping + ")");
             return;
         }
 
@@ -844,7 +844,7 @@ public class GpuSurveillancePipeline {
             logger.info("Codec changed to: " + codec.displayName + " - will apply when encoder initializes");
             return;
         }
-
+        
         // Check if codec actually changed
         String currentCodec = encoder.getCodecMimeType();
         String newCodec = config.getCodecMimeType();
@@ -852,14 +852,14 @@ public class GpuSurveillancePipeline {
             logger.info("Codec already set to: " + codec.displayName);
             return;
         }
-
+        
         logger.info("Codec change requested: " + codec.displayName + " - reinitializing encoder");
 
         boolean wasSurveillance = currentMode == Mode.SURVEILLANCE;
         boolean wasNormalRecording = currentMode == Mode.NORMAL_RECORDING;
         // See applyBitrateChangeLocked for why deferred-recording counts as recording.
         boolean wasRecording = isRecording() || pendingRecordingPrefix != null || recordingMode;
-
+        
         try {
             // Stop current recording first if active
             if (wasRecording && recorder != null && recorder.isRecording()) {
@@ -868,10 +868,10 @@ public class GpuSurveillancePipeline {
                 // Wait for encoder to finish writing
                 Thread.sleep(500);
             }
-
+            
             // Reinitialize encoder with new codec
             reinitializeEncoder();
-
+            
             // Restart recording if it was active
             if (wasRecording) {
                 if (wasSurveillance) {
@@ -893,7 +893,7 @@ public class GpuSurveillancePipeline {
                     }
                     if (restartPrefix != null) {
                         logger.info("Codec reinit: resuming normal recording (prefix="
-                                + restartPrefix + ")");
+                            + restartPrefix + ")");
                         startRecording(restartDir, restartPrefix);
                     } else {
                         logger.info("Codec reinit: resuming normal recording (no captured prefix — default 'cam')");
@@ -915,7 +915,7 @@ public class GpuSurveillancePipeline {
                     }
                     if (restartPrefix != null) {
                         logger.info("Codec reinit: resuming deferred recording (prefix="
-                                + restartPrefix + ")");
+                            + restartPrefix + ")");
                         startRecording(restartDir, restartPrefix);
                     } else {
                         logger.info("Codec reinit: resuming deferred recording (no captured prefix — default 'cam')");
@@ -935,12 +935,12 @@ public class GpuSurveillancePipeline {
             // released encoder which never fires, wedging recording for the
             // rest of the ACC=ON window.
             logger.warn("Forcing pipeline stop after codec-reinit failure — "
-                    + "RMM will rebuild on next activation");
+                + "RMM will rebuild on next activation");
             try {
                 stop();
             } catch (Throwable t) {
                 logger.warn("Failed to stop pipeline after codec change error: "
-                        + t.getMessage());
+                    + t.getMessage());
             }
         }
     }
@@ -1001,7 +1001,7 @@ public class GpuSurveillancePipeline {
                 clampedFps = Math.max(10, Math.min(30, fps));
                 try {
                     org.json.JSONObject cameraCfg = com.overdrive.app.config.UnifiedConfigManager
-                            .loadConfig().optJSONObject("camera");
+                        .loadConfig().optJSONObject("camera");
                     if (cameraCfg == null) cameraCfg = new org.json.JSONObject();
                     cameraCfg.put("targetFps", clampedFps);
                     com.overdrive.app.config.UnifiedConfigManager.updateSection("camera", cameraCfg);
@@ -1017,7 +1017,7 @@ public class GpuSurveillancePipeline {
             // encoder/recorder.
             if (!running || stopping) {
                 logger.warn("Batched apply: settings persisted but skipping live apply "
-                        + "(running=" + running + ", stopping=" + stopping + ")");
+                    + "(running=" + running + ", stopping=" + stopping + ")");
                 return;
             }
 
@@ -1036,7 +1036,7 @@ public class GpuSurveillancePipeline {
                             bitrateController.setImmediateBitrate(newBitrate);
                         }
                         logger.info("Batched apply: inline bitrate "
-                                + (newBitrate / 1_000_000) + " Mbps");
+                            + (newBitrate / 1_000_000) + " Mbps");
                     } catch (Exception e) {
                         logger.warn("Batched apply: inline bitrate failed: " + e.getMessage());
                     }
@@ -1049,8 +1049,8 @@ public class GpuSurveillancePipeline {
                     // over a few seconds.
                     encoder.setTargetFps(clampedFps);
                     logger.info("Batched apply: inline FPS " + clampedFps
-                            + " (camera HAL + encoder buffer pool resized; encoder"
-                            + " KEY_FRAME_RATE remains configure-time)");
+                        + " (camera HAL + encoder buffer pool resized; encoder"
+                        + " KEY_FRAME_RATE remains configure-time)");
                 }
                 if (newBitrate <= 0 && clampedFps <= 0) {
                     logger.info("Batched apply: nothing changed");
@@ -1069,7 +1069,7 @@ public class GpuSurveillancePipeline {
             // releases old encoder, creates new one with the new MIME type
             // (and the latest bitrate/fps from config), restarts recording.
             logger.info("Batched apply: codec changed — reinitializing encoder (quality=" + quality
-                    + ", codec=" + codec + ", fps=" + (fps == null ? "n/a" : clampedFps) + ")");
+                + ", codec=" + codec + ", fps=" + (fps == null ? "n/a" : clampedFps) + ")");
 
             boolean wasSurveillance = currentMode == Mode.SURVEILLANCE;
             boolean wasNormalRecording = currentMode == Mode.NORMAL_RECORDING;
@@ -1106,7 +1106,7 @@ public class GpuSurveillancePipeline {
                         }
                         if (restartPrefix != null) {
                             logger.info("Batched apply: resuming normal recording (prefix="
-                                    + restartPrefix + ")");
+                                + restartPrefix + ")");
                             startRecording(restartDir, restartPrefix);
                         } else {
                             logger.info("Batched apply: resuming normal recording (no captured prefix — default 'cam')");
@@ -1128,7 +1128,7 @@ public class GpuSurveillancePipeline {
                         }
                         if (restartPrefix != null) {
                             logger.info("Batched apply: resuming deferred recording (prefix="
-                                    + restartPrefix + ")");
+                                + restartPrefix + ")");
                             startRecording(restartDir, restartPrefix);
                         } else {
                             logger.info("Batched apply: resuming deferred recording (no captured prefix — default 'cam')");
@@ -1144,7 +1144,7 @@ public class GpuSurveillancePipeline {
                 // recorder isn't left bound to a released encoder with a
                 // dead format-available listener.
                 logger.warn("Forcing pipeline stop after batched-reinit failure — "
-                        + "RMM will rebuild on next activation");
+                    + "RMM will rebuild on next activation");
                 try {
                     stop();
                 } catch (Throwable t) {
@@ -1179,7 +1179,7 @@ public class GpuSurveillancePipeline {
     private static int loadTargetFps() {
         try {
             org.json.JSONObject cameraConfig = com.overdrive.app.config.UnifiedConfigManager
-                    .loadConfig().optJSONObject("camera");
+                .loadConfig().optJSONObject("camera");
             if (cameraConfig != null) {
                 return cameraConfig.optInt("targetFps", 15);
             }
@@ -1195,13 +1195,13 @@ public class GpuSurveillancePipeline {
      */
     private void reinitializeEncoder() throws Exception {
         logger.info("Reinitializing encoder...");
-
+        
         // SOTA: First, release recorder's encoder surface on GL thread
         // This prevents EGL_BAD_SURFACE errors when the encoder is released
         if (camera != null && camera.getGlHandler() != null && recorder != null) {
             final Object releaseLock = new Object();
             final boolean[] releaseDone = {false};
-
+            
             camera.getGlHandler().post(() -> {
                 try {
                     // Release recorder's surface (it will be recreated after new encoder is ready)
@@ -1216,7 +1216,7 @@ public class GpuSurveillancePipeline {
                     }
                 }
             });
-
+            
             // Wait for GL thread to release surface (max 1 second)
             synchronized (releaseLock) {
                 if (!releaseDone[0]) {
@@ -1224,7 +1224,7 @@ public class GpuSurveillancePipeline {
                 }
             }
         }
-
+        
         // Now safe to release old encoder
         if (encoder != null) {
             // Wait for any pending writes to complete
@@ -1236,15 +1236,15 @@ public class GpuSurveillancePipeline {
             encoder.release();
             encoder = null;
         }
-
+        
         // Create new encoder with current config
         String codecMimeType = config.getCodecMimeType();
         int bitrate = config.getEffectiveBitrate();
         int fps = loadTargetFps();
 
         logger.info("Creating new encoder: " +
-                (codecMimeType.contains("hevc") ? "H.265" : "H.264") +
-                " @ " + fps + "fps, " + (bitrate / 1_000_000) + " Mbps");
+            (codecMimeType.contains("hevc") ? "H.265" : "H.264") +
+            " @ " + fps + "fps, " + (bitrate / 1_000_000) + " Mbps");
 
         // FIX (audit R4, Findings 1+2): on encoder allocation failure, ensure
         // both the encoder field AND the recorder's internal encoder reference
@@ -1257,7 +1257,7 @@ public class GpuSurveillancePipeline {
             encoder = new HardwareEventRecorderGpu(encoderWidth, encoderHeight, fps, bitrate, codecMimeType);
         } catch (Throwable t) {
             logger.warn("New encoder allocation failed — clearing recorder's stale "
-                    + "encoder ref so caller can stop() cleanly: " + t.getMessage());
+                + "encoder ref so caller can stop() cleanly: " + t.getMessage());
             encoder = null;
             // Best-effort: drop the recorder's internal encoder ref by releasing
             // its surface again (the prior releaseEncoderSurface() covered the
@@ -1290,11 +1290,11 @@ public class GpuSurveillancePipeline {
             // Prefer proximity's value when the active mode is proximity guard.
             try {
                 com.overdrive.app.recording.RecordingModeManager rmm =
-                        com.overdrive.app.daemon.CameraDaemon.getRecordingModeManager();
+                    com.overdrive.app.daemon.CameraDaemon.getRecordingModeManager();
                 if (rmm != null
                         && rmm.getCurrentMode() == com.overdrive.app.recording.RecordingModeManager.Mode.PROXIMITY_GUARD) {
                     org.json.JSONObject pgCfg =
-                            com.overdrive.app.config.UnifiedConfigManager.getProximityGuard();
+                        com.overdrive.app.config.UnifiedConfigManager.getProximityGuard();
                     int v = pgCfg.optInt("preRecordSeconds", -1);
                     if (v > 0) preRecordSec = v;
                 }
@@ -1333,10 +1333,10 @@ public class GpuSurveillancePipeline {
         // intent while flipping probeWired=true on the first init attempt.
         try {
             com.overdrive.app.storage.StorageManager.getInstance()
-                    .setEncoderWritingProbe(() -> {
-                        HardwareEventRecorderGpu e = this.encoder;
-                        return e != null && e.isWritingToFile();
-                    });
+                .setEncoderWritingProbe(() -> {
+                    HardwareEventRecorderGpu e = this.encoder;
+                    return e != null && e.isWritingToFile();
+                });
         } catch (Exception e) {
             logger.warn("Failed to wire encoder writing probe: " + e.getMessage());
         }
@@ -1348,7 +1348,7 @@ public class GpuSurveillancePipeline {
             final Object initLock = new Object();
             final boolean[] initDone = {false};
             final Exception[] initError = {null};
-
+            
             camera.getGlHandler().post(() -> {
                 try {
                     // Recreate recorder if needed
@@ -1363,12 +1363,12 @@ public class GpuSurveillancePipeline {
                         // this code path because reinit only runs after init).
                         if (lastQuadrantStripOffsetX != null) {
                             logger.info("Reinit: rebuilding recorder with cached profile offsets ("
-                                    + encoderWidth + "x" + encoderHeight + ")");
+                                + encoderWidth + "x" + encoderHeight + ")");
                             recorder = new GpuMosaicRecorder(
-                                    lastQuadrantStripOffsetX, encoderWidth, encoderHeight);
+                                lastQuadrantStripOffsetX, encoderWidth, encoderHeight);
                         } else {
                             logger.warn("Reinit: no cached profile offsets — falling back to no-arg "
-                                    + "GpuMosaicRecorder (Tang trims may be miss-sized)");
+                                + "GpuMosaicRecorder (Tang trims may be miss-sized)");
                             recorder = new GpuMosaicRecorder();
                         }
                         // FIX (audit R1, RESIDUAL): re-wire segment-rotated
@@ -1389,23 +1389,23 @@ public class GpuSurveillancePipeline {
                     }
                 }
             });
-
+            
             // Wait for GL thread initialization (max 3 seconds)
             synchronized (initLock) {
                 if (!initDone[0]) {
                     initLock.wait(3000);
                 }
             }
-
+            
             if (initError[0] != null) {
                 throw initError[0];
             }
-
+            
             if (!initDone[0]) {
                 throw new RuntimeException("Encoder reinitialization timed out");
             }
         }
-
+        
         // Update bitrate controller
         if (bitrateController != null) {
             bitrateController = new AdaptiveBitrateController(encoder, bitrate);
@@ -1432,32 +1432,32 @@ public class GpuSurveillancePipeline {
         }
 
         logger.info("Encoder reinitialized successfully: " +
-                (codecMimeType.contains("hevc") ? "H.265" : "H.264") +
-                " @ " + (bitrate / 1_000_000) + " Mbps");
+            (codecMimeType.contains("hevc") ? "H.265" : "H.264") +
+            " @ " + (bitrate / 1_000_000) + " Mbps");
     }
-
+    
     /**
      * Initializes the complete GPU pipeline.
-     *
+     * 
      * @throws Exception if initialization fails
      */
     public void init() throws Exception {
         init(savedAssetManager, savedContext);
     }
-
+    
     /**
      * Initializes the complete GPU pipeline with AssetManager for YOLO.
-     *
+     * 
      * @param assetManager Android AssetManager for loading YOLO model (null = skip YOLO)
      * @throws Exception if initialization fails
      */
     public void init(android.content.res.AssetManager assetManager) throws Exception {
         init(assetManager, null);
     }
-
+    
     /**
      * Initializes the complete GPU pipeline with Context for Java TFLite.
-     *
+     * 
      * @param assetManager Android AssetManager (unused, kept for compatibility)
      * @param context Android Context for TFLite initialization
      * @throws Exception if initialization fails
@@ -1467,18 +1467,18 @@ public class GpuSurveillancePipeline {
             logger.warn("Already initialized");
             return;
         }
-
+        
         // Save for re-initialization after stop/start cycle
         if (assetManager != null) this.savedAssetManager = assetManager;
         if (context != null) this.savedContext = context;
-
+        
         logger.info("Initializing GPU surveillance pipeline...");
-
+        
         // Ensure output directory exists
         if (!eventOutputDir.exists()) {
             eventOutputDir.mkdirs();
         }
-
+        
         // SOTA: Release any stuck encoder resources before creating new one
         // This helps recover from previous crashes that left encoder in bad state
         if (encoder != null) {
@@ -1490,7 +1490,7 @@ public class GpuSurveillancePipeline {
             }
             encoder = null;
         }
-
+        
         // 1. Create hardware encoder (shared by normal recording and surveillance)
         // Use config settings for bitrate, codec, and FPS. The encoder's KEY_FRAME_RATE
         // must match the camera's setCameraFps(), otherwise the encoder's PTS pacing
@@ -1500,8 +1500,8 @@ public class GpuSurveillancePipeline {
         int bitrate = config.getEffectiveBitrate();
         int fps = loadTargetFps();
         logger.info("Creating encoder with config: " +
-                (codecMimeType.contains("hevc") ? "H.265" : "H.264") +
-                " @ " + fps + "fps, " + (bitrate / 1_000_000) + " Mbps");
+            (codecMimeType.contains("hevc") ? "H.265" : "H.264") +
+            " @ " + fps + "fps, " + (bitrate / 1_000_000) + " Mbps");
         encoder = new HardwareEventRecorderGpu(encoderWidth, encoderHeight, fps, bitrate, codecMimeType);
 
         // Pre-load saved pre-record duration BEFORE encoder.init() so the
@@ -1520,11 +1520,11 @@ public class GpuSurveillancePipeline {
             // exposes the persisted mode under recording.mode.
             try {
                 org.json.JSONObject recCfg =
-                        com.overdrive.app.config.UnifiedConfigManager.getRecording();
+                    com.overdrive.app.config.UnifiedConfigManager.getRecording();
                 String persistedMode = recCfg.optString("mode", "");
                 if ("PROXIMITY_GUARD".equals(persistedMode)) {
                     org.json.JSONObject pgCfg =
-                            com.overdrive.app.config.UnifiedConfigManager.getProximityGuard();
+                        com.overdrive.app.config.UnifiedConfigManager.getProximityGuard();
                     int v = pgCfg.optInt("preRecordSeconds", -1);
                     if (v > 0) preRecordSec = v;
                 }
@@ -1559,10 +1559,10 @@ public class GpuSurveillancePipeline {
         // init attempt regardless of whether init() later throws.
         try {
             com.overdrive.app.storage.StorageManager.getInstance()
-                    .setEncoderWritingProbe(() -> {
-                        HardwareEventRecorderGpu e = this.encoder;
-                        return e != null && e.isWritingToFile();
-                    });
+                .setEncoderWritingProbe(() -> {
+                    HardwareEventRecorderGpu e = this.encoder;
+                    return e != null && e.isWritingToFile();
+                });
         } catch (Exception e) {
             logger.warn("Failed to wire encoder writing probe: " + e.getMessage());
         }
@@ -1574,7 +1574,7 @@ public class GpuSurveillancePipeline {
         // strip-X offsets. Profile inference uses the vehicle model + any
         // user-saved override in UnifiedConfigManager.camera.cameraProfile.
         com.overdrive.app.camera.ResolvedCameraConfig resolvedCamera =
-                com.overdrive.app.camera.CameraConfigResolver.resolve(getVehicleModel());
+            com.overdrive.app.camera.CameraConfigResolver.resolve(getVehicleModel());
         float[] quadrantStripOffsetX = resolvedCamera.getQuadrantStripOffsetX();
         float[] quadrantCornerOffsetsXY = resolvedCamera.getQuadrantCornerOffsetsXY();
         // FIX (audit R6): cache for reinitializeEncoder()'s recorder=null branch.
@@ -1645,19 +1645,19 @@ public class GpuSurveillancePipeline {
         } catch (Exception e) {
             logger.warn("Failed to load saved config, using defaults: " + e.getMessage());
         }
-
+        
         // 5. Create camera (this creates EGL context). Pass the profile's
         // per-quadrant offsets so the foveated cropper + camera-side mosaic
         // math agree with the recorder/downscaler/scaler.
         if (cameraWidth != resolvedCamera.getPanoWidth()
                 || cameraHeight != resolvedCamera.getPanoHeight()) {
             logger.warn("Pipeline geometry " + cameraWidth + "x" + cameraHeight
-                    + " differs from resolved camera profile "
-                    + resolvedCamera.getPanoWidth() + "x" + resolvedCamera.getPanoHeight()
-                    + " — restart the daemon to apply the new profile dimensions");
+                + " differs from resolved camera profile "
+                + resolvedCamera.getPanoWidth() + "x" + resolvedCamera.getPanoHeight()
+                + " — restart the daemon to apply the new profile dimensions");
         }
         camera = new PanoramicCameraGpu(cameraWidth, cameraHeight,
-                quadrantStripOffsetX, quadrantCornerOffsetsXY);
+            quadrantStripOffsetX, quadrantCornerOffsetsXY);
         camera.setConsumers(recorder, downscaler, sentry);
         // Apply the active layout profile's windshield-source preference to the
         // new camera (dashcam profile at startup/IDLE; the surveillance profile
@@ -1669,9 +1669,9 @@ public class GpuSurveillancePipeline {
         camera.setTargetFps(fps);
         logger.info("Camera targetFps=" + fps + " (from config)");
         logger.info("Resolved camera profile: " + resolvedCamera.getProfile().getDisplayName()
-                + " (panoCam=" + resolvedCamera.getPanoCameraId()
-                + ", size=" + resolvedCamera.getPanoWidth() + "x" + resolvedCamera.getPanoHeight()
-                + ", surfaceMode=" + resolvedCamera.getPanoSurfaceMode() + ")");
+            + " (panoCam=" + resolvedCamera.getPanoCameraId()
+            + ", size=" + resolvedCamera.getPanoWidth() + "x" + resolvedCamera.getPanoHeight()
+            + ", surfaceMode=" + resolvedCamera.getPanoSurfaceMode() + ")");
 
         // Camera selection priority:
         //   1. Validated/manual override saved in UnifiedConfigManager → use as-is.
@@ -1679,8 +1679,8 @@ public class GpuSurveillancePipeline {
         //   3. Profile default (Seal=1, Tang=2).
         if (resolvedCamera.isValidated() || resolvedCamera.isManualPanoOverride()) {
             logger.info("Using saved panoramic config: id=" + resolvedCamera.getPanoCameraId()
-                    + ", surfaceMode=" + resolvedCamera.getPanoSurfaceMode()
-                    + (resolvedCamera.isManualPanoOverride() ? " (manual)" : " (validated)"));
+                + ", surfaceMode=" + resolvedCamera.getPanoSurfaceMode()
+                + (resolvedCamera.isManualPanoOverride() ? " (manual)" : " (validated)"));
             camera.setCameraId(resolvedCamera.getPanoCameraId());
             camera.setCameraSurfaceMode(resolvedCamera.getPanoSurfaceMode());
             camera.setAutoProbeCameras(false);
@@ -1694,7 +1694,7 @@ public class GpuSurveillancePipeline {
                 camera.setCameraId(discoveredId);
             } else {
                 logger.info("Using profile default panoramic camera ID "
-                        + resolvedCamera.getPanoCameraId());
+                    + resolvedCamera.getPanoCameraId());
                 camera.setCameraId(resolvedCamera.getPanoCameraId());
             }
             camera.setCameraSurfaceMode(resolvedCamera.getPanoSurfaceMode());
@@ -1721,12 +1721,12 @@ public class GpuSurveillancePipeline {
             logger.info("Probe found working camera: id=" + cameraId + ", surfaceMode=" + surfaceMode);
             try {
                 com.overdrive.app.camera.CameraConfigResolver.persistPanoramicProbe(
-                        cameraId,
-                        surfaceMode,
-                        cameraWidth,
-                        cameraHeight,
-                        true,
-                        false);
+                    cameraId,
+                    surfaceMode,
+                    cameraWidth,
+                    cameraHeight,
+                    true,
+                    false);
                 logger.info("Saved camera config for next launch");
             } catch (Exception ex) {
                 logger.warn("Failed to save camera config: " + ex.getMessage());
@@ -1736,7 +1736,7 @@ public class GpuSurveillancePipeline {
                 checkPendingRecording();
             }, "PendingRecCheck").start();
         });
-
+        
         // esco-parity: when the camera is using the SurfaceTexture path, the
         // BYD HAL emits its final framing into the producer surface directly
         // Layout 3 = DiLink 4 (HAL emits 2x2 natively but in non-canonical
@@ -1756,30 +1756,30 @@ public class GpuSurveillancePipeline {
             // scaler both reference this so they can never silently
             // disagree.
             recorder.setProducerLayout(
-                    com.overdrive.app.camera.Dilink4Constants.CORNER_FRONT,
-                    com.overdrive.app.camera.Dilink4Constants.CORNER_RIGHT,
-                    com.overdrive.app.camera.Dilink4Constants.CORNER_REAR,
-                    com.overdrive.app.camera.Dilink4Constants.CORNER_LEFT,
-                    com.overdrive.app.camera.Dilink4Constants.FLIP_FRONT,
-                    com.overdrive.app.camera.Dilink4Constants.FLIP_RIGHT,
-                    com.overdrive.app.camera.Dilink4Constants.FLIP_REAR,
-                    com.overdrive.app.camera.Dilink4Constants.FLIP_LEFT);
+                com.overdrive.app.camera.Dilink4Constants.CORNER_FRONT,
+                com.overdrive.app.camera.Dilink4Constants.CORNER_RIGHT,
+                com.overdrive.app.camera.Dilink4Constants.CORNER_REAR,
+                com.overdrive.app.camera.Dilink4Constants.CORNER_LEFT,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_FRONT,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_RIGHT,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_REAR,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_LEFT);
             // Red-overlay mask (HAL 'calibration failed' chrome suppression).
             // Off by default; user opts in when the car is uncalibrated and
             // the chrome is in the way.
             try {
                 org.json.JSONObject camCfg = com.overdrive.app.config
-                        .UnifiedConfigManager.loadConfig().optJSONObject("camera");
+                    .UnifiedConfigManager.loadConfig().optJSONObject("camera");
                 if (camCfg != null) {
                     recorder.setRedMaskEnabled(
-                            camCfg.optBoolean("dilink4RedMask", false));
+                        camCfg.optBoolean("dilink4RedMask", false));
                     // APA center inset — esco APACropFilter parity. Default
                     // 240/2560 = 0.09375 trims the chrome-painted seams on
                     // byd_apa firmware. Only applied when cameraLayout=3
                     // because the inset uniform is gated by uApaMode>2.5.
                     if (layoutMode == 3) {
                         recorder.setApaCenterInset(
-                                (float) camCfg.optDouble("dilink4ApaCenterInset", 0.09375));
+                            (float) camCfg.optDouble("dilink4ApaCenterInset", 0.09375));
                     }
                 }
             } catch (Throwable t) {
@@ -1791,7 +1791,7 @@ public class GpuSurveillancePipeline {
             // the user's setting without a daemon restart.
             try {
                 int rectifyStrength = com.overdrive.app.config
-                        .UnifiedConfigManager.getRectifyStrength();
+                    .UnifiedConfigManager.getRectifyStrength();
                 recorder.setRectifyStrength((float) rectifyStrength);
                 // Push tile aspect (tile_height / tile_width) from the
                 // active profile so the dewarp's radial math runs in true
@@ -1823,7 +1823,7 @@ public class GpuSurveillancePipeline {
         try {
             if (rectifyConfigListener != null) {
                 com.overdrive.app.config.UnifiedConfigManager
-                        .removeListener(rectifyConfigListener);
+                    .removeListener(rectifyConfigListener);
             }
             rectifyConfigListener = (section, sectionConfig) -> {
                 if (!"recording".equals(section)) return;
@@ -1835,7 +1835,7 @@ public class GpuSurveillancePipeline {
                 activeRecorder.setRectifyStrength((float) strength);
             };
             com.overdrive.app.config.UnifiedConfigManager
-                    .addListener(rectifyConfigListener);
+                .addListener(rectifyConfigListener);
         } catch (Throwable t) {
             logger.warn("Failed to register rectify config listener: " + t.getMessage());
         }
@@ -1843,19 +1843,19 @@ public class GpuSurveillancePipeline {
         initialized = true;
         logger.info( "GPU surveillance pipeline initialized");
     }
-
+    
     /**
      * Starts the GPU pipeline.
-     *
+     * 
      * @throws Exception if start fails
      */
     public void start() throws Exception {
         start(false);
     }
-
+    
     /**
      * Starts the GPU pipeline.
-     *
+     * 
      * @param autoStartRecording If true, automatically starts recording when recorder is ready
      * @throws Exception if start fails
      */
@@ -1881,28 +1881,28 @@ public class GpuSurveillancePipeline {
                 return;
             }
             starting = true;  // Block concurrent starts; running stays false
-            // until camera open is verified.
+                              // until camera open is verified.
             // FIX (audit R5): bump generation on start so a retry scheduled
             // by a previous lifecycle that's still hanging around exits.
             long newGen = pipelineGen.incrementAndGet();
             logger.info("Pipeline generation bumped on start: " + newGen);
         }
-
+        
         try {
             // Reinitialize if stopped (encoder/recorder were released)
             if (!initialized) {
                 init();
             }
-
+            
             logger.info( "Starting GPU pipeline (autoRecord=" + autoStartRecording + ")...");
-
+            
             // Re-resolve camera config before starting — user may have changed
             // camera ID, profile, or role mappings via the app UI since init.
             // Resolver picks profile-default if no probed/manual config exists,
             // so this also covers "user cleared manual override → revert".
             try {
                 com.overdrive.app.camera.ResolvedCameraConfig refreshedCamera =
-                        com.overdrive.app.camera.CameraConfigResolver.resolve(getVehicleModel());
+                    com.overdrive.app.camera.CameraConfigResolver.resolve(getVehicleModel());
                 int targetCameraId = refreshedCamera.getPanoCameraId();
                 int targetSurfaceMode = refreshedCamera.getPanoSurfaceMode();
                 int currentId = camera.getCameraId();
@@ -1912,15 +1912,15 @@ public class GpuSurveillancePipeline {
                     camera.setCameraSurfaceMode(targetSurfaceMode);
                     camera.setAutoProbeCameras(false);
                     camera.setSkipFrameValidation(
-                            refreshedCamera.isValidated() || refreshedCamera.isManualPanoOverride());
+                        refreshedCamera.isValidated() || refreshedCamera.isManualPanoOverride());
                 }
             } catch (Exception e) {
                 logger.debug("Camera config re-read failed: " + e.getMessage());
             }
-
+            
             // Start camera (this creates EGL context and initializes downscaler)
             camera.start();
-
+            
             // SOTA: Register yield listener for recording finalization during camera yield.
             // When contention is detected and the camera must yield to the native AVM app,
             // this ensures any active recording is properly finalized (moov atom written)
@@ -1929,24 +1929,24 @@ public class GpuSurveillancePipeline {
                 @Override
                 public void onPreYield() {
                     logger.info("Pre-yield: finalizing active recording...");
-
+                    
                     // Stop any active recording to finalize the MP4 file
                     if (recorder != null && recorder.isRecording()) {
                         recorder.stopRecording();
                         logger.info("Pre-yield: recording stopped");
                     }
-
+                    
                     // Flush encoder to ensure all buffered frames are written
                     if (encoder != null && encoder.isWritingToFile()) {
                         encoder.flushAndClose();
                         logger.info("Pre-yield: encoder flushed");
                     }
                 }
-
+                
                 @Override
                 public void onPostReacquire() {
                     logger.info("Post-reacquire: resuming recording and streaming...");
-
+                    
                     // Restore streaming components if streaming was enabled.
                     // yieldCameraInternal and restartCameraAfterError call clearStreamingComponents()
                     // which nulls the camera's local refs. The pipeline still holds the actual objects.
@@ -1954,7 +1954,7 @@ public class GpuSurveillancePipeline {
                         camera.setStreamingComponents(streamScaler, streamEncoder);
                         logger.info("Post-reacquire: streaming components restored");
                     }
-
+                    
                     // Resume recording in whatever mode was active before yield
                     if (currentMode == Mode.SURVEILLANCE) {
                         // Sentry mode — re-enable surveillance (it will start recording on motion)
@@ -1981,31 +1981,31 @@ public class GpuSurveillancePipeline {
                                 resumeDir = pendingRecordingDir;
                                 resumePrefix = pendingRecordingPrefix;
                                 logger.info("Post-reacquire: resuming via pending request "
-                                        + "(prefix=" + resumePrefix + ")");
+                                    + "(prefix=" + resumePrefix + ")");
                             } else if (activeRecordingPrefix != null) {
                                 resumeDir = activeRecordingDir;
                                 resumePrefix = activeRecordingPrefix;
                                 logger.info("Post-reacquire: resuming active session "
-                                        + "(prefix=" + resumePrefix + ", dir="
-                                        + (resumeDir != null ? resumeDir.getName() : "default") + ")");
+                                    + "(prefix=" + resumePrefix + ", dir="
+                                    + (resumeDir != null ? resumeDir.getName() : "default") + ")");
                             } else {
                                 resumeDir = null;
                                 resumePrefix = "cam";
                                 logger.warn("Post-reacquire: no captured session — "
-                                        + "falling back to default (prefix=cam)");
+                                    + "falling back to default (prefix=cam)");
                             }
                             try {
                                 startRecording(resumeDir, resumePrefix);
                                 logger.info("Post-reacquire: normal recording resumed via pipeline.startRecording");
                             } catch (Throwable t) {
                                 logger.warn("Post-reacquire: pipeline.startRecording threw — "
-                                        + t.getMessage());
+                                    + t.getMessage());
                             }
                         }
                     }
                 }
             });
-
+            
             // Wait for camera to fully initialize and GL context to be ready.
             // This isn't an esco-parity concern — the sleep gives MediaCodec
             // time to consume the first encoder input frame so the
@@ -2025,11 +2025,11 @@ public class GpuSurveillancePipeline {
             // running" and skip, wedging recording for the rest of the drive.
             if (camera == null || !camera.isRunning()) {
                 logger.warn("start(): camera.isRunning() false after warmup window — "
-                        + "treating start as failed");
+                    + "treating start as failed");
                 try { if (camera != null) camera.stop(); } catch (Throwable ignored) {}
                 // running stays false; starting cleared in catch below.
                 throw new IllegalStateException(
-                        "Camera failed to reach running state within warmup window");
+                    "Camera failed to reach running state within warmup window");
             }
 
             // Camera open verified — publish running=true so isRunning() is honest.
@@ -2044,7 +2044,7 @@ public class GpuSurveillancePipeline {
                     logger.info( "Recorder ready - starting recording automatically");
                     recorder.startRecording();
                     currentMode = Mode.NORMAL_RECORDING;
-
+                    
                     // Enable overlay for auto-started recording
                     recorder.setOverlayRecordingModeAllowed(true);
                     if (telemetryCollector != null && recorder.isOverlayEnabled()) {
@@ -2055,7 +2055,7 @@ public class GpuSurveillancePipeline {
             } else {
                 recordingMode = false;
             }
-
+            
             // Initialize recorder on GL thread (CRITICAL: must be on GL thread!)
             if (camera.getEglCore() != null) {
                 camera.initRecorderOnGlThread(recorder, encoder);
@@ -2067,7 +2067,7 @@ public class GpuSurveillancePipeline {
                 // dilink4 broke recording in the field log.
                 Thread.sleep(500);
             }
-
+            
             // DON'T auto-enable streaming - enable on-demand when client requests
             // Streaming will be enabled via enableStreaming() when HTTP client connects
             // enableStreaming() already auto-starts the pipeline if not running.
@@ -2089,14 +2089,14 @@ public class GpuSurveillancePipeline {
             // (slow self-heal, may be >30s) or the caller invokes again.
             if (pendingRecordingPrefix != null && encoder != null) {
                 logger.info("start(): rebinding orphan deferred-recording request "
-                        + "to fresh encoder (prefix=" + pendingRecordingPrefix + ")");
+                    + "to fresh encoder (prefix=" + pendingRecordingPrefix + ")");
                 encoder.setFormatAvailableListener(() -> {
                     new Thread(() -> {
                         try {
                             checkPendingRecording();
                         } catch (Exception e) {
                             logger.warn("Deferred recording start (post-start rebind) failed: "
-                                    + e.getMessage());
+                                + e.getMessage());
                         }
                     }, "PendingRecKickoffStart").start();
                 });
@@ -2126,7 +2126,7 @@ public class GpuSurveillancePipeline {
                 if (com.overdrive.app.config.UnifiedConfigManager
                         .isAnyOemDashcamTriggerEnabled()) {
                     logger.info("Pano start complete — scheduling OEM Dashcam lifecycle recalc "
-                            + "(DashCam+Pano re-sync)");
+                        + "(DashCam+Pano re-sync)");
                     com.overdrive.app.server.OemDashcamApiHandler.scheduleLifecycleRecalc();
                 }
             } catch (Throwable t) {
@@ -2162,7 +2162,7 @@ public class GpuSurveillancePipeline {
             // init():894, but recorder/downscaler/sentry/camera get
             // overwritten without releasing on the retry path.
             logger.warn("start() failed — releasing partial init state for clean retry: "
-                    + e.getMessage());
+                + e.getMessage());
             try {
                 if (camera != null) {
                     try { camera.stop(); } catch (Throwable t) {
@@ -2232,9 +2232,9 @@ public class GpuSurveillancePipeline {
             if (pendingRecordingPrefix != null || activeRecordingPrefix != null
                     || recordingMode) {
                 logger.warn("start() rollback: clearing pending/active recording state "
-                        + "(pending=" + pendingRecordingPrefix
-                        + ", active=" + activeRecordingPrefix
-                        + ", recordingMode=" + recordingMode + ")");
+                    + "(pending=" + pendingRecordingPrefix
+                    + ", active=" + activeRecordingPrefix
+                    + ", recordingMode=" + recordingMode + ")");
             }
             pendingRecordingDir = null;
             pendingRecordingPrefix = null;
@@ -2252,7 +2252,7 @@ public class GpuSurveillancePipeline {
             }
         }
     }
-
+    
     /**
      * Stops the GPU pipeline.
      *
@@ -2297,6 +2297,13 @@ public class GpuSurveillancePipeline {
 
             // Reset mode so status API reflects that we're not in any active mode
             currentMode = Mode.IDLE;
+
+            // FIX (audit R3): re-arm the one-shot enable-time mount-wait for the
+            // next pipeline lifecycle. A full teardown ends the lifecycle that
+            // already consumed the wait; the next cold start's first arm should
+            // again get the bounded window to let a fresh async SD mount land
+            // before its inaugural event-dir snapshot.
+            mountWaitConsumed = false;
 
             // Stop recording first to finalize file
             try {
@@ -2349,10 +2356,10 @@ public class GpuSurveillancePipeline {
             // valid parent display.
             try {
                 com.overdrive.app.camera.OemDashcamPipeline oem =
-                        com.overdrive.app.daemon.CameraDaemon.getOemDashcamPipeline();
+                    com.overdrive.app.daemon.CameraDaemon.getOemDashcamPipeline();
                 if (oem != null && oem.isRunning()) {
                     logger.info("Stopping OEM Dashcam pipeline before pano camera tear-down "
-                            + "(shared eglDisplay)");
+                        + "(shared eglDisplay)");
                     try { oem.stopRecording(); } catch (Throwable ignored) {}
                     try { oem.stop(); } catch (Throwable ignored) {}
                     com.overdrive.app.daemon.CameraDaemon.setOemDashcamPipeline(null);
@@ -2416,7 +2423,7 @@ public class GpuSurveillancePipeline {
         if (rectifyConfigListener != null) {
             try {
                 com.overdrive.app.config.UnifiedConfigManager
-                        .removeListener(rectifyConfigListener);
+                    .removeListener(rectifyConfigListener);
             } catch (Throwable ignored) {}
             rectifyConfigListener = null;
         }
@@ -2430,26 +2437,26 @@ public class GpuSurveillancePipeline {
             recorder.release();
             recorder = null;
         }
-
+        
         if (downscaler != null) {
             downscaler.release();
             downscaler = null;
         }
-
+        
         if (sentry != null) {
             sentry.release();
             sentry = null;
         }
-
+        
         if (encoder != null) {
             encoder.release();
             encoder = null;
         }
-
+        
         initialized = false;
         logger.info( "GPU pipeline released");
     }
-
+    
     /**
      * Starts recording.
      * Stops surveillance if active (mutually exclusive).
@@ -2457,11 +2464,11 @@ public class GpuSurveillancePipeline {
     public void startRecording() {
         startRecording(null, "cam");
     }
-
+    
     /**
      * Starts recording with custom output directory and filename prefix.
      * Stops surveillance if active (mutually exclusive).
-     *
+     * 
      * @param outputDir Custom output directory (null for default recordings dir)
      * @param prefix Filename prefix (e.g., "cam", "proximity", "event")
      */
@@ -2509,9 +2516,9 @@ public class GpuSurveillancePipeline {
             boolean encReady = recReady && recorder.getEncoder() != null;
             boolean fmtReady = encReady && recorder.getEncoder().isFormatAvailable();
             logger.info("startRecording(prefix=" + prefix + ", dir="
-                    + (outputDir != null ? outputDir.getName() : "default")
-                    + "): recorder=" + recReady + " encoder=" + encReady
-                    + " formatAvailable=" + fmtReady + " currentMode=" + currentMode);
+                + (outputDir != null ? outputDir.getName() : "default")
+                + "): recorder=" + recReady + " encoder=" + encReady
+                + " formatAvailable=" + fmtReady + " currentMode=" + currentMode);
         }
 
         // Stop surveillance if active (mutually exclusive)
@@ -2582,11 +2589,12 @@ public class GpuSurveillancePipeline {
                 // which hangs this thread and defeats the isRecording()-based
                 // retry below (it never runs). Probing first lets us fail fast
                 // and defer + retry instead of hanging.
-                java.io.File probeDir = (outputDir != null) ? outputDir
-                        : StorageManager.getInstance().getRecordingsDir();
+                java.io.File probeDir = resolveProbeDirWithEnospcFallback(
+                        (outputDir != null) ? outputDir
+                                : StorageManager.getInstance().getRecordingsDir());
                 if (!isStorageWriteReady(probeDir)) {
                     logger.warn("Recordings volume not write-ready (probe failed/timed out) — "
-                            + "deferring and scheduling retry");
+                        + "deferring and scheduling retry");
                     pendingRecordingDir = outputDir;
                     pendingRecordingPrefix = prefix;
                     recordingMode = true;
@@ -2623,7 +2631,7 @@ public class GpuSurveillancePipeline {
                     // "Normal recording started" and (b) never retried.
                     // Defer + retry until storage settles.
                     logger.warn("Recording did not start — storage not write-ready "
-                            + "(USB still mounting?); deferring and scheduling retry");
+                        + "(USB still mounting?); deferring and scheduling retry");
                     pendingRecordingDir = outputDir;
                     pendingRecordingPrefix = prefix;
                     recordingMode = true;
@@ -2665,13 +2673,13 @@ public class GpuSurveillancePipeline {
             // format-available listener / checkPendingRecording() starts
             // recording once the recorder + encoder are ready.
             logger.info("Recorder not created yet — deferring recording start "
-                    + "(will begin when pipeline is ready)");
+                + "(will begin when pipeline is ready)");
             pendingRecordingDir = outputDir;
             pendingRecordingPrefix = prefix;
             recordingMode = true;
         }
     }
-
+    
     /**
      * Called when the encoder format becomes available (probe complete, first frame encoded).
      * Starts any pending recording that was deferred because the encoder wasn't ready.
@@ -2722,11 +2730,11 @@ public class GpuSurveillancePipeline {
         // / new MediaMuxer can hang). On probe failure, re-arm pending state and
         // schedule the storage-ready retry instead of pinning the
         // PendingRecKickoff thread.
-        java.io.File probeDir = (dir != null) ? dir
-                : StorageManager.getInstance().getRecordingsDir();
+        java.io.File probeDir = resolveProbeDirWithEnospcFallback(
+                (dir != null) ? dir : StorageManager.getInstance().getRecordingsDir());
         if (!isStorageWriteReady(probeDir)) {
             logger.warn("Deferred start: storage volume not write-ready (probe failed/timed out) — "
-                    + "rescheduling retry instead of issuing inner recorder.startRecording");
+                + "rescheduling retry instead of issuing inner recorder.startRecording");
             // Keep pending state intact (do not null) so retry has the args.
             pendingRecordingDir = dir;
             pendingRecordingPrefix = prefix;
@@ -2754,7 +2762,7 @@ public class GpuSurveillancePipeline {
             }
             cancelStorageReadyRetry();
             logger.info("Deferred normal recording started (dir=" +
-                    (dir != null ? dir.getName() : "default") + ", prefix=" + prefix + ")");
+                (dir != null ? dir.getName() : "default") + ", prefix=" + prefix + ")");
         } else {
             // Encoder ready but storage still not write-ready (cold-start USB
             // mount race). Re-defer and retry until the volume settles, rather
@@ -2785,6 +2793,31 @@ public class GpuSurveillancePipeline {
     private static final long STORAGE_RETRY_TIMEOUT_MS = 60_000L;
     private static final long STORAGE_SLOW_RETRY_INTERVAL_MS = 30_000L;
     private static final long STORAGE_PROBE_TIMEOUT_MS = 1500L;
+    // Boot/ACC-on mount-race: bounded window enableSurveillance() waits for the
+    // configured external volume to finish mounting before snapshotting the
+    // event dir. 4s is inside the observed 2-15s window's lower band and well
+    // below any boot-wedge concern; the watchdog handles the longer tail for
+    // subsequent events. See StorageManager.waitForConfiguredExternalMount.
+    private static final long STORAGE_MOUNT_WAIT_MS = 4000L;
+    // FIX (audit R3): one-shot gate for the enable-time mount-wait. The wait is
+    // only load-bearing on the FIRST surveillance arm of a pipeline lifecycle —
+    // that's the inaugural eventOutputDir snapshot (line ~3307) and the only one
+    // that can pin the earliest event to the internal fallback before the async
+    // SD mount lands. On any RE-arm (e.g. a lock-gate force-arm after a grace-
+    // period disarm: surveillance was armed, then UNLOCK disarmed it to
+    // currentMode=IDLE without stopping the pipeline, then a fresh LOCK re-arms),
+    // the engine's per-trigger getLiveSurveillanceDir() refresh
+    // (SurveillanceEngineGpu Site A/B) already routes a late-landing mount to SD
+    // for every event, so the enable-time wait buys nothing there — and skipping
+    // it avoids holding the CameraDaemon.class monitor for up to STORAGE_MOUNT_
+    // WAIT_MS across the force-arm block (CameraDaemon.applyLockEvent is
+    // static-synchronized on the same monitor), which would otherwise delay a
+    // concurrent owner-return UNLOCK disarm by that long. NOTE: isRunning() can
+    // NOT be used to distinguish first-arm vs re-arm — CameraDaemon.enable
+    // Surveillance() calls gpuPipeline.start() (which sets running=true) BEFORE
+    // gpuPipeline.enableSurveillance(), so running is already true on the cold
+    // first arm. Reset in stop() so a fresh pipeline lifecycle re-arms the wait.
+    private volatile boolean mountWaitConsumed = false;
 
     private synchronized void scheduleStorageReadyRetry(java.io.File outputDir, String prefix) {
         if (storageRetryThread != null && storageRetryThread.isAlive()) {
@@ -2807,7 +2840,7 @@ public class GpuSurveillancePipeline {
                 // FIX (audit R5): generation gate — bail if pipeline cycled.
                 if (pipelineGen.get() != capturedGen) {
                     logger.info("Storage-ready retry: pipeline generation rotated ("
-                            + capturedGen + "→" + pipelineGen.get() + ") — exiting");
+                        + capturedGen + "→" + pipelineGen.get() + ") — exiting");
                     return;
                 }
                 // FIX (audit R1): re-check the pipeline lifecycle on every
@@ -2832,8 +2865,16 @@ public class GpuSurveillancePipeline {
                     // writable, so a retry attempt can never itself hang inside
                     // the blocking start path on a still-half-mounted USB.
                     StorageManager.getInstance().ensureStorageReady(false);
-                    java.io.File probeDir = (outputDir != null) ? outputDir
-                            : StorageManager.getInstance().getRecordingsDir();
+                    // FIX (audit R4): route the retry-loop GATE probe through the same
+                    // ENOSPC redirect as the activation/checkPendingRecording sites. On a
+                    // mounted-but-FULL SD the raw probe ENOSPC-fails every iteration so the
+                    // gate never opens and startRecording (which DOES re-redirect per-segment
+                    // to internal) is never reached — re-wedging cold start in the unbounded
+                    // retry path. snapRec.startRecording still gets the ORIGINAL outputDir;
+                    // only the gate target is redirected (symmetric with the direct sites).
+                    java.io.File probeDir = resolveProbeDirWithEnospcFallback(
+                            (outputDir != null) ? outputDir
+                                    : StorageManager.getInstance().getRecordingsDir());
                     // FIX (audit R1): snapshot recorder + re-verify pipeline is
                     // running BEFORE startRecording so a concurrent stop() that
                     // nulled recorder/encoder mid-probe can't drop us into
@@ -2865,8 +2906,8 @@ public class GpuSurveillancePipeline {
                             pendingRecordingDir = null;
                             pendingRecordingPrefix = null;
                             logger.info("Normal recording started on storage retry #" + attempt
-                                    + " (dir=" + (outputDir != null ? outputDir.getName() : "default")
-                                    + ", prefix=" + prefix + ", active session captured)");
+                                + " (dir=" + (outputDir != null ? outputDir.getName() : "default")
+                                + ", prefix=" + prefix + ", active session captured)");
                             // FIX (audit R1): notify RMM so modeActive gets
                             // re-evaluated. Without this, RMM still has
                             // modeActive=false from the original cold-start
@@ -2875,27 +2916,27 @@ public class GpuSurveillancePipeline {
                             // → kills the recording we just started.
                             try {
                                 com.overdrive.app.recording.RecordingModeManager rmm =
-                                        com.overdrive.app.daemon.CameraDaemon.getRecordingModeManager();
+                                    com.overdrive.app.daemon.CameraDaemon.getRecordingModeManager();
                                 if (rmm != null) {
                                     rmm.resyncFromHardware("storage-retry-success");
                                     logger.info("RMM resynced after storage-retry success");
                                 }
                             } catch (Throwable t) {
                                 logger.warn("RMM resync after storage-retry failed: "
-                                        + t.getMessage());
+                                    + t.getMessage());
                             }
                             return;
                         }
                     }
                     logger.info("Storage-ready retry #" + attempt
-                            + ": still not write-ready, will retry");
+                        + ": still not write-ready, will retry");
                 } catch (Exception e) {
                     logger.warn("Storage-ready retry #" + attempt + " error: " + e.getMessage());
                 }
             }
             logger.warn("Storage retry hit " + (STORAGE_RETRY_TIMEOUT_MS / 1000)
-                    + "s timeout — switching to slow-retry every "
-                    + (STORAGE_SLOW_RETRY_INTERVAL_MS / 1000) + "s");
+                + "s timeout — switching to slow-retry every "
+                + (STORAGE_SLOW_RETRY_INTERVAL_MS / 1000) + "s");
             // Hand off to the slow-retry loop. Without this, the daemon would
             // sit in a "modeActive=true, pipeline running, NOT recording"
             // zombie state forever — pendingRecordingPrefix/recordingMode are
@@ -2946,7 +2987,7 @@ public class GpuSurveillancePipeline {
                 // FIX (audit R5): generation gate.
                 if (pipelineGen.get() != capturedGen) {
                     logger.info("Slow-retry: pipeline generation rotated ("
-                            + capturedGen + "→" + pipelineGen.get() + ") — exiting");
+                        + capturedGen + "→" + pipelineGen.get() + ") — exiting");
                     return;
                 }
                 // FIX (audit R1): re-check pipeline lifecycle on every wake.
@@ -2967,8 +3008,12 @@ public class GpuSurveillancePipeline {
                 attempt++;
                 try {
                     StorageManager.getInstance().ensureStorageReady(false);
-                    java.io.File probeDir = (outputDir != null) ? outputDir
-                            : StorageManager.getInstance().getRecordingsDir();
+                    // FIX (audit R4): same ENOSPC gate redirect as the fast loop /
+                    // direct sites — a mounted-but-full SD must not wedge the slow
+                    // retry forever. startRecording still gets the ORIGINAL outputDir.
+                    java.io.File probeDir = resolveProbeDirWithEnospcFallback(
+                            (outputDir != null) ? outputDir
+                                    : StorageManager.getInstance().getRecordingsDir());
                     // FIX (audit R1): snapshot recorder + re-verify pipeline
                     // is running before startRecording (concurrent-stop NPE
                     // / zombie-recording guard).
@@ -2999,30 +3044,30 @@ public class GpuSurveillancePipeline {
                             pendingRecordingDir = null;
                             pendingRecordingPrefix = null;
                             logger.info("Normal recording started on storage SLOW-retry #"
-                                    + attempt
-                                    + " (dir=" + (outputDir != null ? outputDir.getName() : "default")
-                                    + ", prefix=" + prefix + ", active session captured)");
+                                + attempt
+                                + " (dir=" + (outputDir != null ? outputDir.getName() : "default")
+                                + ", prefix=" + prefix + ", active session captured)");
                             // FIX (audit R1): notify RMM after slow-retry success
                             // so modeActive gets re-evaluated and the resync
                             // ticker doesn't tear down the just-started recording.
                             try {
                                 com.overdrive.app.recording.RecordingModeManager rmm =
-                                        com.overdrive.app.daemon.CameraDaemon.getRecordingModeManager();
+                                    com.overdrive.app.daemon.CameraDaemon.getRecordingModeManager();
                                 if (rmm != null) {
                                     rmm.resyncFromHardware("storage-slow-retry-success");
                                     logger.info("RMM resynced after slow-retry success");
                                 }
                             } catch (Throwable t) {
                                 logger.warn("RMM resync after slow-retry failed: "
-                                        + t.getMessage());
+                                    + t.getMessage());
                             }
                             slowRetryRunning = false;
                             return;
                         }
                     }
                     logger.info("Storage slow-retry #" + attempt
-                            + ": still not write-ready, will retry in "
-                            + (STORAGE_SLOW_RETRY_INTERVAL_MS / 1000) + "s");
+                        + ": still not write-ready, will retry in "
+                        + (STORAGE_SLOW_RETRY_INTERVAL_MS / 1000) + "s");
                 } catch (Exception e) {
                     logger.warn("Storage slow-retry #" + attempt + " error: " + e.getMessage());
                 }
@@ -3068,6 +3113,40 @@ public class GpuSurveillancePipeline {
      * does hang on a wedged volume it is harmless and reaped when the process or
      * the volume recovers.
      */
+    /**
+     * Resolve the recordings write-probe target through the ENOSPC fallback so a
+     * mounted-but-FULL external card doesn't wedge recording for the whole drive.
+     *
+     * <p>The write probe ({@link #isStorageWriteReady}) does a real {@code write()}
+     * on the target. When the configured external volume (SD/USB) is mounted but
+     * physically full, that {@code write()} ENOSPC-fails on EVERY tick while StatFs
+     * keeps reporting the volume mounted — so the probe never passes, the deferred
+     * retry re-probes the SAME dead path, and recording never starts even though
+     * internal has tens of GB free (observed: full 14-min wedge after a cold-start
+     * restart onto a full card). The running recorder already sidesteps this with
+     * a per-segment {@link StorageManager#resolveTargetWithEnospcFallback}; this
+     * applies the SAME redirect on the activation/deferred probe so the probe — and
+     * the segment it gates — lands on internal when the card is full. No-op when the
+     * target is internal, has room, or is genuinely unmounted (left to the mount
+     * watchdog). {@code trackState=false}: the recorder's own per-segment call owns
+     * the UI fallback banner; this probe must not flap the latch on a transient miss.
+     */
+    private java.io.File resolveProbeDirWithEnospcFallback(java.io.File probeDir) {
+        if (probeDir == null) return null;
+        try {
+            java.io.File enospcSafe = StorageManager.getInstance()
+                .resolveTargetWithEnospcFallback(probeDir, 100 * 1024 * 1024, false);
+            if (enospcSafe != null && enospcSafe != probeDir) {
+                logger.warn("Recordings volume full — pre-flight redirecting write probe to internal fallback: "
+                    + enospcSafe.getAbsolutePath());
+                return enospcSafe;
+            }
+        } catch (Throwable t) {
+            logger.warn("ENOSPC pre-flight resolve threw, probing configured dir: " + t.getMessage());
+        }
+        return probeDir;
+    }
+
     private boolean isStorageWriteReady(java.io.File dir) {
         if (dir == null) return false;
         final java.io.File target = dir;
@@ -3079,7 +3158,7 @@ public class GpuSurveillancePipeline {
                 }
                 if (!target.isDirectory()) return;
                 java.io.File t = new java.io.File(target,
-                        ".wrprobe_" + android.os.Process.myPid());
+                    ".wrprobe_" + android.os.Process.myPid());
                 java.io.FileOutputStream fos = new java.io.FileOutputStream(t);
                 try {
                     fos.write(0);
@@ -3146,9 +3225,9 @@ public class GpuSurveillancePipeline {
         }
         if (probe.isAlive()) {
             logger.warn("ensureStorageReady did not return within "
-                    + ENSURE_STORAGE_READY_TIMEOUT_MS + "ms (storage mount likely wedged) — "
-                    + "proceeding to bounded write probe + deferred retry instead of "
-                    + "blocking activation");
+                + ENSURE_STORAGE_READY_TIMEOUT_MS + "ms (storage mount likely wedged) — "
+                + "proceeding to bounded write probe + deferred retry instead of "
+                + "blocking activation");
             return false;
         }
         return ready[0];
@@ -3195,12 +3274,12 @@ public class GpuSurveillancePipeline {
                 telemetryCollector.setOverlayRecordingActive(false);
                 telemetryCollector.stopPolling();
             }
-
+            
             currentMode = Mode.IDLE;
             logger.info( "Normal recording stopped");
         }
     }
-
+    
     /**
      * Enables surveillance mode (motion detection + event recording).
      * Stops normal recording if active (mutually exclusive).
@@ -3214,12 +3293,48 @@ public class GpuSurveillancePipeline {
                 recorder.stopRecording();
             }
         }
-
+        
         // SOTA: Ensure storage is ready (mount SD card if needed)
         try {
             StorageManager storage = StorageManager.getInstance();
             if (!storage.ensureStorageReady(true)) {
                 logger.warn("Storage not ready for surveillance, but continuing with fallback");
+            }
+
+            // Boot/ACC-on mount-race: ensureStorageReady only ATTEMPTS the mount;
+            // the real mount may still be in flight on the background
+            // StorageMountInit thread. Give the configured external volume a short
+            // bounded window to land BEFORE we snapshot the event dir below, so the
+            // first 1-2 events don't get pinned to the internal fallback. No-op for
+            // INTERNAL config / already-mounted volume / physically-absent SD.
+            //
+            // FIRST-ARM-OF-LIFECYCLE ONLY (mountWaitConsumed one-shot): the wait is
+            // only load-bearing on the very first arm after pipeline start — the
+            // inaugural eventOutputDir snapshot below. On any re-arm (notably the
+            // lock-gate force-arm AFTER a grace-period UNLOCK disarm: surveillance
+            // was armed, then disarmed to currentMode=IDLE without stopping the
+            // pipeline, then a fresh LOCK re-arms) currentMode is IDLE / sentry is
+            // inactive again, so the mode-based guard alone would re-enter the wait.
+            // That re-entry is the audit-R3 coupling: CameraDaemon's force-arm holds
+            // the static CameraDaemon.class monitor across enableSurveillance(), and
+            // applyLockEvent() is static-synchronized on the same monitor, so a
+            // concurrent owner-return UNLOCK disarm would block for up to
+            // STORAGE_MOUNT_WAIT_MS. We skip the wait on re-arm because the engine's
+            // per-trigger getLiveSurveillanceDir() refresh (SurveillanceEngineGpu
+            // Site A/B) already routes a late-landing mount to SD on every event, so
+            // the enable-time wait buys nothing there. NOTE: isRunning() can NOT
+            // gate this — CameraDaemon.enableSurveillance() calls start()
+            // (running=true) BEFORE gpuPipeline.enableSurveillance(), so running is
+            // already true on the cold first arm. mountWaitConsumed is reset in
+            // stop() so a fresh pipeline lifecycle re-arms the wait.
+            if (!mountWaitConsumed
+                    && (currentMode != Mode.SURVEILLANCE || sentry == null || !sentry.isActive())) {
+                mountWaitConsumed = true;
+                try {
+                    storage.waitForConfiguredExternalMount(STORAGE_MOUNT_WAIT_MS);
+                } catch (Throwable ignored) {
+                    // Defensive: never let the boot-race guard break the enable path.
+                }
             }
 
             // SOTA: Update sentry's event output directory to current surveillance path
@@ -3232,7 +3347,7 @@ public class GpuSurveillancePipeline {
         } catch (Exception e) {
             logger.warn("Error checking storage readiness: " + e.getMessage());
         }
-
+        
         if (sentry != null) {
             sentry.enable();
             currentMode = Mode.SURVEILLANCE;
@@ -3240,7 +3355,7 @@ public class GpuSurveillancePipeline {
         } else {
             logger.error("Cannot enable surveillance: sentry is null!");
         }
-
+        
         // Disable overlay compositing in surveillance mode
         if (recorder != null) {
             recorder.setOverlayRecordingModeAllowed(false);
@@ -3271,11 +3386,11 @@ public class GpuSurveillancePipeline {
             applyActiveLayoutProfile();
         }
     }
-
+    
     /**
      * Called when ACC turns ON - stops surveillance recording.
      * This ensures sentry recordings are properly finalized when car starts.
-     *
+     * 
      * CRITICAL: Must synchronously close any active recording to prevent file corruption.
      */
     public void onAccOn() {
@@ -3307,7 +3422,7 @@ public class GpuSurveillancePipeline {
                 // and the segment finalizes corrupted.
                 if (recorder != null && recorder.isRecording()) {
                     logger.warn("onAccOn: surveillance re-armed recorder during stop window — "
-                            + "draining before camera reopen");
+                        + "draining before camera reopen");
                     try { recorder.stopRecording(); }
                     catch (Throwable t) { logger.warn("onAccOn: post-disable drain failed: " + t.getMessage()); }
                 }
@@ -3328,8 +3443,8 @@ public class GpuSurveillancePipeline {
             if (pendingRecordingDir != null || pendingRecordingPrefix != null
                     || recordingMode) {
                 logger.info("onAccOn: clearing residual deferred-recording state "
-                        + "(pending=" + pendingRecordingPrefix
-                        + ", recordingMode=" + recordingMode + ")");
+                    + "(pending=" + pendingRecordingPrefix
+                    + ", recordingMode=" + recordingMode + ")");
                 pendingRecordingDir = null;
                 pendingRecordingPrefix = null;
                 recordingMode = false;
@@ -3376,24 +3491,24 @@ public class GpuSurveillancePipeline {
             // do a fresh start() — better to drop a few frames than to wedge
             // recording for the rest of the drive.
             logger.error("onAccOn failed mid-transition — forcing full stop to recover: "
-                    + t.getMessage());
+                + t.getMessage());
             try { stop(); } catch (Throwable t2) {
                 logger.warn("Recovery stop also failed: " + t2.getMessage());
             }
             throw t instanceof RuntimeException ? (RuntimeException) t : new RuntimeException(t);
         }
     }
-
+    
     /**
      * Enables H.264 streaming with separate encoder.
-     *
+     * 
      * @param streamWidth Stream width (e.g., 1280)
      * @param streamHeight Stream height (e.g., 960)
      * @param streamFps Stream FPS (e.g., 10)
      * @param streamBitrate Stream bitrate (e.g., 2 Mbps)
      */
     public void enableStreaming(int streamWidth, int streamHeight, int streamFps,
-                                int streamBitrate) throws Exception {
+                               int streamBitrate) throws Exception {
         streamLifecycleLock.lock();
         try {
             if (streamingEnabled) {
@@ -3415,58 +3530,58 @@ public class GpuSurveillancePipeline {
             try {
                 enableStreamingInternal(streamWidth, streamHeight, streamFps, streamBitrate);
             } catch (Throwable t) {
-                // On any failure during init, mirror disableStreaming's
-                // teardown order:
-                //   1. clear camera-side refs FIRST so the GL render loop
-                //      stops dereferencing the about-to-be-released scaler
-                //      / encoder. enableStreamingInternal calls
-                //      camera.setStreamingComponents BEFORE wsStreamServer
-                //      starts, so by the time we reach this catch the
-                //      camera may already hold them.
-                //   2. snapshot + null pipeline fields.
-                //   3. shutdown ws server.
-                //   4. post scaler.release on the GL handler; encoder.release
-                //      goes through STREAM_ENCODER_RELEASE_EXEC so the 3s
-                //      waitForFinalizers doesn't pin the GL handler.
-                // Without #1 the camera GL render loop calls drawFrame on a
-                // released GL program after this catch returns.
-                try {
-                    if (camera != null) camera.clearStreamingComponents();
-                } catch (Throwable ignored) {}
-                final HardwareEventRecorderGpu encLocal = streamEncoder;
-                final com.overdrive.app.streaming.GpuStreamScaler scLocal = streamScaler;
-                final com.overdrive.app.streaming.WebSocketStreamServer wsLocal = wsStreamServer;
-                streamEncoder = null;
-                streamScaler = null;
-                wsStreamServer = null;
-                try { if (wsLocal != null) wsLocal.shutdown(); } catch (Throwable ignored) {}
-                android.os.Handler glH = (camera != null) ? camera.getGlHandler() : null;
-                boolean glPostAccepted = false;
-                if (glH != null && scLocal != null) {
-                    glPostAccepted = glH.post(() -> {
-                        try { scLocal.unbindOemSource(); scLocal.release(); }
-                        catch (Throwable ignored) {}
-                        // Encoder release dispatched AFTER scaler.release runs
-                        // (still on GL thread), so the BufferQueue tear-down
-                        // can't race the EGLWindowSurface destroy.
-                        if (encLocal != null) submitEncoderRelease(encLocal);
-                    });
-                }
-                if (!glPostAccepted) {
-                    // Either no GL handler available, or post() returned false
-                    // (Looper.quit() ran concurrently on a competing stop). In
-                    // either case the GL Runnable will never execute, so
-                    // scaler + encoder must be released here or both leak. The
-                    // Adreno EGLWindowSurface-destroy race the GL ordering
-                    // protects against can't trip if there's no GL thread to
-                    // race with — fall back to direct release for both.
-                    try { if (scLocal != null) { scLocal.unbindOemSource(); scLocal.release(); } }
+            // On any failure during init, mirror disableStreaming's
+            // teardown order:
+            //   1. clear camera-side refs FIRST so the GL render loop
+            //      stops dereferencing the about-to-be-released scaler
+            //      / encoder. enableStreamingInternal calls
+            //      camera.setStreamingComponents BEFORE wsStreamServer
+            //      starts, so by the time we reach this catch the
+            //      camera may already hold them.
+            //   2. snapshot + null pipeline fields.
+            //   3. shutdown ws server.
+            //   4. post scaler.release on the GL handler; encoder.release
+            //      goes through STREAM_ENCODER_RELEASE_EXEC so the 3s
+            //      waitForFinalizers doesn't pin the GL handler.
+            // Without #1 the camera GL render loop calls drawFrame on a
+            // released GL program after this catch returns.
+            try {
+                if (camera != null) camera.clearStreamingComponents();
+            } catch (Throwable ignored) {}
+            final HardwareEventRecorderGpu encLocal = streamEncoder;
+            final com.overdrive.app.streaming.GpuStreamScaler scLocal = streamScaler;
+            final com.overdrive.app.streaming.WebSocketStreamServer wsLocal = wsStreamServer;
+            streamEncoder = null;
+            streamScaler = null;
+            wsStreamServer = null;
+            try { if (wsLocal != null) wsLocal.shutdown(); } catch (Throwable ignored) {}
+            android.os.Handler glH = (camera != null) ? camera.getGlHandler() : null;
+            boolean glPostAccepted = false;
+            if (glH != null && scLocal != null) {
+                glPostAccepted = glH.post(() -> {
+                    try { scLocal.unbindOemSource(); scLocal.release(); }
                     catch (Throwable ignored) {}
+                    // Encoder release dispatched AFTER scaler.release runs
+                    // (still on GL thread), so the BufferQueue tear-down
+                    // can't race the EGLWindowSurface destroy.
                     if (encLocal != null) submitEncoderRelease(encLocal);
-                }
-                if (t instanceof Exception) throw (Exception) t;
-                throw new RuntimeException(t);
+                });
             }
+            if (!glPostAccepted) {
+                // Either no GL handler available, or post() returned false
+                // (Looper.quit() ran concurrently on a competing stop). In
+                // either case the GL Runnable will never execute, so
+                // scaler + encoder must be released here or both leak. The
+                // Adreno EGLWindowSurface-destroy race the GL ordering
+                // protects against can't trip if there's no GL thread to
+                // race with — fall back to direct release for both.
+                try { if (scLocal != null) { scLocal.unbindOemSource(); scLocal.release(); } }
+                catch (Throwable ignored) {}
+                if (encLocal != null) submitEncoderRelease(encLocal);
+            }
+            if (t instanceof Exception) throw (Exception) t;
+            throw new RuntimeException(t);
+        }
         } finally {
             streamLifecycleLock.unlock();
         }
@@ -3483,7 +3598,7 @@ public class GpuSurveillancePipeline {
 
         logger.info(String.format("Enabling H.264 streaming: %dx%d @ %dfps, %d Mbps",
                 streamWidth, streamHeight, streamFps, streamBitrate / 1_000_000));
-
+        
         // Create stream encoder
         logger.info("Creating stream encoder...");
         streamEncoder = new HardwareEventRecorderGpu(streamWidth, streamHeight, streamFps, streamBitrate);
@@ -3499,7 +3614,7 @@ public class GpuSurveillancePipeline {
         streamEncoder.setPinOperatingRate(false);
         streamEncoder.init();
         logger.info("Stream encoder initialized");
-
+        
         // Create stream scaler
         logger.info("Creating stream scaler...");
         // Stream scaler picks the same per-role offsets used by the
@@ -3507,10 +3622,10 @@ public class GpuSurveillancePipeline {
         // single-direction streaming too. We pass BOTH 4-strip offsets and
         // 2x2 corners; the shader picks based on uApaMode (cameraLayout).
         com.overdrive.app.camera.ResolvedCameraConfig streamCfg =
-                com.overdrive.app.camera.CameraConfigResolver.resolve(getVehicleModel());
+            com.overdrive.app.camera.CameraConfigResolver.resolve(getVehicleModel());
         float[] streamQuadrantStripOffsetX = streamCfg.getQuadrantStripOffsetX();
         streamScaler = new com.overdrive.app.streaming.GpuStreamScaler(
-                streamWidth, streamHeight, streamQuadrantStripOffsetX);
+            streamWidth, streamHeight, streamQuadrantStripOffsetX);
 
         try {
             android.content.Context odCtx = savedContext;
@@ -3528,7 +3643,7 @@ public class GpuSurveillancePipeline {
         // when SurfaceTexture path is active; legacy 4-cam mosaic (0)
         // otherwise.
         boolean streamUsingEscoPath =
-                (camera != null && camera.isUsingEscoSurfaceTexturePath());
+            (camera != null && camera.isUsingEscoSurfaceTexturePath());
         streamScaler.setCameraLayout(streamUsingEscoPath ? 3 : 0);
 
         // Hardcoded Variant A corner+flip constants on DiLink 4. Mirrors
@@ -3539,30 +3654,30 @@ public class GpuSurveillancePipeline {
             // so the stream scaler can never silently diverge from the
             // recorder's mosaic arrangement.
             streamScaler.setProducerLayout(
-                    com.overdrive.app.camera.Dilink4Constants.CORNER_FRONT,
-                    com.overdrive.app.camera.Dilink4Constants.CORNER_RIGHT,
-                    com.overdrive.app.camera.Dilink4Constants.CORNER_REAR,
-                    com.overdrive.app.camera.Dilink4Constants.CORNER_LEFT,
-                    com.overdrive.app.camera.Dilink4Constants.FLIP_FRONT,
-                    com.overdrive.app.camera.Dilink4Constants.FLIP_RIGHT,
-                    com.overdrive.app.camera.Dilink4Constants.FLIP_REAR,
-                    com.overdrive.app.camera.Dilink4Constants.FLIP_LEFT);
+                com.overdrive.app.camera.Dilink4Constants.CORNER_FRONT,
+                com.overdrive.app.camera.Dilink4Constants.CORNER_RIGHT,
+                com.overdrive.app.camera.Dilink4Constants.CORNER_REAR,
+                com.overdrive.app.camera.Dilink4Constants.CORNER_LEFT,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_FRONT,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_RIGHT,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_REAR,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_LEFT);
             // Red-overlay suppression follows the recorder. Read the same
             // unified-config flag so the live preview matches the MP4.
             try {
                 org.json.JSONObject camCfgStream = com.overdrive.app.config
-                        .UnifiedConfigManager.loadConfig().optJSONObject("camera");
+                    .UnifiedConfigManager.loadConfig().optJSONObject("camera");
                 if (camCfgStream != null) {
                     streamScaler.setRedMaskEnabled(
-                            camCfgStream.optBoolean("dilink4RedMask", false));
+                        camCfgStream.optBoolean("dilink4RedMask", false));
                     streamScaler.setApaCenterInset(
-                            (float) camCfgStream.optDouble("dilink4ApaCenterInset", 0.09375));
+                        (float) camCfgStream.optDouble("dilink4ApaCenterInset", 0.09375));
                 }
             } catch (Throwable t) {
                 logger.warn("Stream scaler red-mask flag read failed: " + t.getMessage());
             }
         }
-
+        
         // Initialize on GL thread and WAIT for completion.
         // Captured locals (NOT the instance fields) — so if the wait
         // times out and the catch path nulls this.streamScaler /
@@ -3634,18 +3749,18 @@ public class GpuSurveillancePipeline {
         // caller will release the just-allocated scaler+encoder.
         if (!running || camera == null || camera.getGlHandler() == null) {
             throw new IllegalStateException(
-                    "Pipeline torn down during stream init wait — abandoning enable");
+                "Pipeline torn down during stream init wait — abandoning enable");
         }
 
         // Now set components on camera (scaler is guaranteed initialized)
         logger.info("Setting streaming components on camera...");
         camera.setStreamingComponents(streamScaler, streamEncoder);
-
+        
         // Create WebSocket stream server (port 8887)
         // WebSocket has zero buffering delay vs HTTP Chunked (64KB+ buffer)
         logger.info("Starting WebSocket stream server...");
         wsStreamServer = new com.overdrive.app.streaming.WebSocketStreamServer();
-
+        
         // Set idle shutdown callback - auto-stop pipeline when no clients for
         // WebSocketStreamServer.IDLE_TIMEOUT_MS (30 seconds; was mis-documented as 15s)
         final GpuSurveillancePipeline self = this;
@@ -3664,7 +3779,7 @@ public class GpuSurveillancePipeline {
                             // tears down if no recording mode is asking for it.
                             try {
                                 com.overdrive.app.server.OemDashcamApiHandler
-                                        .scheduleLifecycleRecalc();
+                                    .scheduleLifecycleRecalc();
                             } catch (Throwable ignored) {}
                             // Snapshot every cross-thread field once. Without this, a
                             // concurrent stop() can null `recorder` between the null
@@ -3706,7 +3821,7 @@ public class GpuSurveillancePipeline {
                             boolean dilink4Persistent = false;
                             try {
                                 dilink4Persistent = com.overdrive.app.daemon.CameraDaemon
-                                        .isDilink4ModeActiveStatic();
+                                    .isDilink4ModeActiveStatic();
                             } catch (Throwable ignored) {}
                             if (dilink4Persistent) {
                                 logger.info("Pipeline kept alive (dilink4 esco-parity — never auto-stop on WS idle)");
@@ -3715,9 +3830,9 @@ public class GpuSurveillancePipeline {
                                 self.stop();
                             } else {
                                 logger.info("Pipeline kept alive (mode=" + mode
-                                        + ", recording=" + recordingActive
-                                        + ", pending=" + pendingRec
-                                        + ", keepAlive=" + keepAlive + ")");
+                                    + ", recording=" + recordingActive
+                                    + ", pending=" + pendingRec
+                                    + ", keepAlive=" + keepAlive + ")");
                             }
                         } catch (Exception e) {
                             logger.error("Error during idle shutdown", e);
@@ -3726,7 +3841,7 @@ public class GpuSurveillancePipeline {
                 }, "IdleShutdown").start();
             }
         });
-
+        
         wsStreamServer.start();
         logger.info("WebSocket server started, setting stream callback...");
         streamEncoder.setStreamCallback(wsStreamServer);
@@ -3749,7 +3864,7 @@ public class GpuSurveillancePipeline {
         // calls reconcileForExternalConsumerChange).
         fireStreamStateChanged();
     }
-
+    
     /**
      * Disables H.264 streaming and releases stream encoder.
      */
@@ -3778,18 +3893,18 @@ public class GpuSurveillancePipeline {
         // in reattachOwnStreamCallback (the flag was added precisely to
         // avoid that storm; leaving it stale survives the disable cycle).
         externalStreamSourceActive = false;
-
+        
         // CRITICAL: Clear streaming components from camera FIRST
         // This prevents render loop from using released surfaces
         if (camera != null) {
             camera.clearStreamingComponents();
         }
-
+        
         // Clear stream callback
         if (streamEncoder != null) {
             streamEncoder.clearStreamCallback();
         }
-
+        
         // Stop WebSocket server
         if (wsStreamServer != null) {
             wsStreamServer.shutdown();
@@ -3818,7 +3933,7 @@ public class GpuSurveillancePipeline {
         // touch our scaler.
         try {
             com.overdrive.app.camera.OemDashcamPipeline oem =
-                    com.overdrive.app.daemon.CameraDaemon.getOemDashcamPipeline();
+                com.overdrive.app.daemon.CameraDaemon.getOemDashcamPipeline();
             if (oem != null) oem.setStreamScalerForOemPublish(null);
         } catch (Throwable ignored) {}
 
@@ -3839,7 +3954,7 @@ public class GpuSurveillancePipeline {
         // thread (and therefore frame production) post-disable.
         if (scalerRef != null && glHandler != null) {
             final java.util.concurrent.CountDownLatch latch =
-                    new java.util.concurrent.CountDownLatch(1);
+                new java.util.concurrent.CountDownLatch(1);
             boolean posted = glHandler.post(() -> {
                 try {
                     // Belt-and-braces: a racy attach that landed between
@@ -3849,7 +3964,7 @@ public class GpuSurveillancePipeline {
                     // about-to-be-released scaler.
                     try {
                         com.overdrive.app.camera.OemDashcamPipeline oem2 =
-                                com.overdrive.app.daemon.CameraDaemon.getOemDashcamPipeline();
+                            com.overdrive.app.daemon.CameraDaemon.getOemDashcamPipeline();
                         if (oem2 != null) oem2.setStreamScalerForOemPublish(null);
                     } catch (Throwable ignored) {}
                     try { scalerRef.unbindOemSource(); } catch (Throwable ignored) {}
@@ -4023,15 +4138,18 @@ public class GpuSurveillancePipeline {
             org.json.JSONObject bs = com.overdrive.app.config.UnifiedConfigManager.getBlindSpot();
             if (bs != null && bs.length() > 0) {
                 s.setBlindSpotParams(
-                        (float) bs.optDouble("rearFov", 1.66),
-                        (float) bs.optDouble("sideFov", 1.98),
-                        (float) bs.optDouble("yaw",     1.23),
-                        (float) bs.optDouble("roll",    0.25),
-                        (float) bs.optDouble("feather", 0.38),
-                        (float) bs.optDouble("projExp", 1.0), 1.0f,
-                        (float) bs.optDouble("pitch",  -0.275),
-                        (float) bs.optDouble("rearRoll",  0.0),
-                        (float) bs.optDouble("rearPitch", 0.0));
+                    (float) bs.optDouble("rearFov", 1.66),
+                    (float) bs.optDouble("sideFov", 1.98),
+                    (float) bs.optDouble("yaw",     1.23),
+                    (float) bs.optDouble("roll",    0.25),
+                    (float) bs.optDouble("feather", 0.38),
+                    (float) bs.optDouble("projExp", 1.0), 1.0f,
+                    (float) bs.optDouble("pitch",  -0.275),
+                    (float) bs.optDouble("rearRoll",  0.0),
+                    (float) bs.optDouble("rearPitch", 0.0));
+                // Merge mode (both/side/rear) — re-applied here so it survives an
+                // enable or a side switch, same lifecycle as the stitch calibration.
+                s.setBlindSpotMergeMode(bsMergeModeCode(bs.optString("mergeMode", "both")));
             }
         } catch (Throwable t) {
             logger.warn("blindspot calib apply failed: " + t.getMessage());
@@ -4074,7 +4192,7 @@ public class GpuSurveillancePipeline {
             // disableBlindSpot() is idempotent and re-acquires this re-entrant lock.
             if (blindSpotEnabled && (bsLayer == null || !bsLayer.isCreated())) {
                 logger.warn("BS: stale blindSpotEnabled with dead layer — "
-                        + "tearing down orphan before re-arm");
+                    + "tearing down orphan before re-arm");
                 disableBlindSpot();
             }
             if (bsEnabling) {
@@ -4102,7 +4220,7 @@ public class GpuSurveillancePipeline {
             if (!running || camera == null || camera.getGlHandler() == null) {
                 logger.warn("BS: pano not running yet — enable deferred (caller must re-poll)");
                 throw new BlindSpotNotReadyException(
-                        "blind-spot lane cannot arm — pano pipeline not running yet");
+                    "blind-spot lane cannot arm — pano pipeline not running yet");
             }
             bsEnabling = true;
             try {
@@ -4119,9 +4237,9 @@ public class GpuSurveillancePipeline {
             // internal-init side). The overlay re-polls until it's genuinely live.
             if (!blindSpotEnabled) {
                 logger.warn("BS: enableBlindSpotInternal returned but lane not armed "
-                        + "(blindSpotEnabled=false) — reporting failure so caller re-polls");
+                    + "(blindSpotEnabled=false) — reporting failure so caller re-polls");
                 throw new BlindSpotNotReadyException(
-                        "blind-spot lane not running after enable attempt");
+                    "blind-spot lane not running after enable attempt");
             }
         } finally {
             bsLifecycleLock.unlock();
@@ -4130,7 +4248,7 @@ public class GpuSurveillancePipeline {
 
     private void enableBlindSpotInternal() throws Exception {
         logger.info(String.format("BS: enabling NATIVE blind-spot lane %dx%d, view=%d",
-                BS_WIDTH, BS_HEIGHT, bsViewMode));
+            BS_WIDTH, BS_HEIGHT, bsViewMode));
 
         // Own SurfaceControl layer (GPU → screen, no encoder/WS/decoder).
         bsLayer = new com.overdrive.app.surveillance.BsNativeLayer(BS_WIDTH, BS_HEIGHT);
@@ -4142,9 +4260,9 @@ public class GpuSurveillancePipeline {
         // Own scaler — same per-role offsets as the live stream so the stitch
         // matches the recorder's camera arrangement.
         com.overdrive.app.camera.ResolvedCameraConfig cfg =
-                com.overdrive.app.camera.CameraConfigResolver.resolve(getVehicleModel());
+            com.overdrive.app.camera.CameraConfigResolver.resolve(getVehicleModel());
         bsScaler = new com.overdrive.app.streaming.GpuStreamScaler(
-                BS_WIDTH, BS_HEIGHT, cfg.getQuadrantStripOffsetX());
+            BS_WIDTH, BS_HEIGHT, cfg.getQuadrantStripOffsetX());
 
         // BS-LIFECYCLE-1: from here on, bsScaler+bsLayer are assigned to the
         // instance fields and a GL EGLWindowSurface gets created wrapping the SC
@@ -4154,104 +4272,104 @@ public class GpuSurveillancePipeline {
         // and a subsequent enable overwrites the fields, orphaning the old layer +
         // dangling EGLSurface. Wrap the rest in try/catch → releasePartialBsLane.
         try {
-            // libod host-authorization (same context fallback as the stream lane).
-            try {
-                android.content.Context odCtx = savedContext;
-                if (odCtx == null) odCtx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
-                if (odCtx != null) com.overdrive.app.od.Od.authorize(odCtx);
-            } catch (Throwable t) {
-                logger.warn("BS: od init failed: " + t.getMessage());
-            }
+        // libod host-authorization (same context fallback as the stream lane).
+        try {
+            android.content.Context odCtx = savedContext;
+            if (odCtx == null) odCtx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
+            if (odCtx != null) com.overdrive.app.od.Od.authorize(odCtx);
+        } catch (Throwable t) {
+            logger.warn("BS: od init failed: " + t.getMessage());
+        }
 
-            boolean escoPath = (camera != null && camera.isUsingEscoSurfaceTexturePath());
-            bsScaler.setCameraLayout(escoPath ? 3 : 0);
-            if (escoPath) {
-                bsScaler.setProducerLayout(
-                        com.overdrive.app.camera.Dilink4Constants.CORNER_FRONT,
-                        com.overdrive.app.camera.Dilink4Constants.CORNER_RIGHT,
-                        com.overdrive.app.camera.Dilink4Constants.CORNER_REAR,
-                        com.overdrive.app.camera.Dilink4Constants.CORNER_LEFT,
-                        com.overdrive.app.camera.Dilink4Constants.FLIP_FRONT,
-                        com.overdrive.app.camera.Dilink4Constants.FLIP_RIGHT,
-                        com.overdrive.app.camera.Dilink4Constants.FLIP_REAR,
-                        com.overdrive.app.camera.Dilink4Constants.FLIP_LEFT);
-            }
+        boolean escoPath = (camera != null && camera.isUsingEscoSurfaceTexturePath());
+        bsScaler.setCameraLayout(escoPath ? 3 : 0);
+        if (escoPath) {
+            bsScaler.setProducerLayout(
+                com.overdrive.app.camera.Dilink4Constants.CORNER_FRONT,
+                com.overdrive.app.camera.Dilink4Constants.CORNER_RIGHT,
+                com.overdrive.app.camera.Dilink4Constants.CORNER_REAR,
+                com.overdrive.app.camera.Dilink4Constants.CORNER_LEFT,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_FRONT,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_RIGHT,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_REAR,
+                com.overdrive.app.camera.Dilink4Constants.FLIP_LEFT);
+        }
 
-            // GL-thread init + WAIT (captured locals, same rationale as the stream lane).
-            // The scaler renders into the SurfaceControl layer's Surface (wrapped in an
-            // EGLSurface on the GL thread) instead of an encoder input surface.
-            final com.overdrive.app.streaming.GpuStreamScaler scalerLocal = bsScaler;
-            final android.view.Surface layerSurfaceLocal = bsLayer.getSurface();
-            final com.overdrive.app.camera.EGLCore eglCoreLocal = camera.getEglCore();
-            final Object initLock = new Object();
-            final boolean[] initDone = {false};
-            final Exception[] initError = {null};
-            camera.getGlHandler().post(() -> {
-                try {
-                    scalerLocal.initWithSurface(eglCoreLocal, layerSurfaceLocal);
-                } catch (Exception e) {
-                    initError[0] = e;
-                } finally {
-                    synchronized (initLock) { initDone[0] = true; initLock.notify(); }
-                }
-            });
-            boolean lockHeld = bsLifecycleLock.isHeldByCurrentThread();
-            if (lockHeld) bsLifecycleLock.unlock();
+        // GL-thread init + WAIT (captured locals, same rationale as the stream lane).
+        // The scaler renders into the SurfaceControl layer's Surface (wrapped in an
+        // EGLSurface on the GL thread) instead of an encoder input surface.
+        final com.overdrive.app.streaming.GpuStreamScaler scalerLocal = bsScaler;
+        final android.view.Surface layerSurfaceLocal = bsLayer.getSurface();
+        final com.overdrive.app.camera.EGLCore eglCoreLocal = camera.getEglCore();
+        final Object initLock = new Object();
+        final boolean[] initDone = {false};
+        final Exception[] initError = {null};
+        camera.getGlHandler().post(() -> {
             try {
-                synchronized (initLock) { if (!initDone[0]) initLock.wait(2000); }
+                scalerLocal.initWithSurface(eglCoreLocal, layerSurfaceLocal);
+            } catch (Exception e) {
+                initError[0] = e;
             } finally {
-                if (lockHeld) bsLifecycleLock.lock();
+                synchronized (initLock) { initDone[0] = true; initLock.notify(); }
             }
-            if (!initDone[0]) throw new RuntimeException("BS: scaler init timed out");
-            if (initError[0] != null) throw new RuntimeException("BS: scaler init failed", initError[0]);
-            // Post-wait viability re-check: bsLifecycleLock was released around the
-            // GL-init wait above. The bsEnabling guard set by enableBlindSpot under the
-            // lock now bars any concurrent enableBlindSpot() from entering internal while
-            // we wait (it sees bsEnabling==true and bails), so simultaneous in-flight
-            // double-init can no longer happen. This recheck stays as belt-and-suspenders
-            // for the already-finished case: were both callers somehow inside internal,
-            // both would run setBsStreamingComponents + start a WS server (bind 8889
-            // twice) + set blindSpotEnabled. Bail idempotently on reacquire — mirrors
-            // enableStreamingInternal's post-reacquire viability re-check (3203) and the
-            // idempotency the stream lane gets from holding its lock across the wait.
-            // We do NOT release this call's scalerLocal/encoderLocal
-            // here: the two enable paths share the bsScaler/bsEncoder fields (each
-            // overwrites them at internal-top, before the winner is decided), so the
-            // first caller to reacquire may already have published whichever objects the
-            // fields last pointed at. Releasing our locals could therefore free the live,
-            // published lane (use-after-release). disableBlindSpot()/stop() release
-            // whatever the fields point at, so the conservative bail leaves teardown to
-            // the single owning lifecycle.
-            if (blindSpotEnabled) {
-                logger.info("BS: already enabled by concurrent call — skipping duplicate init");
-                return;
-            }
-            if (!running || camera == null || camera.getGlHandler() == null) {
-                throw new IllegalStateException("BS: pipeline torn down during init wait");
-            }
+        });
+        boolean lockHeld = bsLifecycleLock.isHeldByCurrentThread();
+        if (lockHeld) bsLifecycleLock.unlock();
+        try {
+            synchronized (initLock) { if (!initDone[0]) initLock.wait(2000); }
+        } finally {
+            if (lockHeld) bsLifecycleLock.lock();
+        }
+        if (!initDone[0]) throw new RuntimeException("BS: scaler init timed out");
+        if (initError[0] != null) throw new RuntimeException("BS: scaler init failed", initError[0]);
+        // Post-wait viability re-check: bsLifecycleLock was released around the
+        // GL-init wait above. The bsEnabling guard set by enableBlindSpot under the
+        // lock now bars any concurrent enableBlindSpot() from entering internal while
+        // we wait (it sees bsEnabling==true and bails), so simultaneous in-flight
+        // double-init can no longer happen. This recheck stays as belt-and-suspenders
+        // for the already-finished case: were both callers somehow inside internal,
+        // both would run setBsStreamingComponents + start a WS server (bind 8889
+        // twice) + set blindSpotEnabled. Bail idempotently on reacquire — mirrors
+        // enableStreamingInternal's post-reacquire viability re-check (3203) and the
+        // idempotency the stream lane gets from holding its lock across the wait.
+        // We do NOT release this call's scalerLocal/encoderLocal
+        // here: the two enable paths share the bsScaler/bsEncoder fields (each
+        // overwrites them at internal-top, before the winner is decided), so the
+        // first caller to reacquire may already have published whichever objects the
+        // fields last pointed at. Releasing our locals could therefore free the live,
+        // published lane (use-after-release). disableBlindSpot()/stop() release
+        // whatever the fields point at, so the conservative bail leaves teardown to
+        // the single owning lifecycle.
+        if (blindSpotEnabled) {
+            logger.info("BS: already enabled by concurrent call — skipping duplicate init");
+            return;
+        }
+        if (!running || camera == null || camera.getGlHandler() == null) {
+            throw new IllegalStateException("BS: pipeline torn down during init wait");
+        }
 
-            // Lock the scaler to the blind-spot view + apply calibration.
-            bsScaler.setViewMode(bsViewMode);
-            applyBlindSpotCalibration(bsScaler);
+        // Lock the scaler to the blind-spot view + apply calibration.
+        bsScaler.setViewMode(bsViewMode);
+        applyBlindSpotCalibration(bsScaler);
 
-            // Publish to the render loop's PASS 1C (no encoder on the native path —
-            // PASS 1C skips drainEncoder when the encoder is null).
-            camera.setBsStreamingComponents(bsScaler, null);
+        // Publish to the render loop's PASS 1C (no encoder on the native path —
+        // PASS 1C skips drainEncoder when the encoder is null).
+        camera.setBsStreamingComponents(bsScaler, null);
 
-            // Resolve on-screen geometry (config or default) and position the layer.
-            // It stays HIDDEN until the turn-trigger / debug-preview shows it.
-            // BS-ENABLE-004: position WITHOUT showing (single hidden-arm transaction)
-            // to avoid a show-then-hide one-frame flash of an unrendered SC layer.
-            resolveBsGeometry();
-            if (bsLayer != null) {
-                int[] g0 = bsGeomRect;
-                if (bsLayerVisible) bsLayer.setGeometry(g0[0], g0[1], g0[2], g0[3]);
-                else bsLayer.setGeometryHidden(g0[0], g0[1], g0[2], g0[3]);
-            }
+        // Resolve on-screen geometry (config or default) and position the layer.
+        // It stays HIDDEN until the turn-trigger / debug-preview shows it.
+        // BS-ENABLE-004: position WITHOUT showing (single hidden-arm transaction)
+        // to avoid a show-then-hide one-frame flash of an unrendered SC layer.
+        resolveBsGeometry();
+        if (bsLayer != null) {
+            int[] g0 = bsGeomRect;
+            if (bsLayerVisible) bsLayer.setGeometry(g0[0], g0[1], g0[2], g0[3]);
+            else bsLayer.setGeometryHidden(g0[0], g0[1], g0[2], g0[3]);
+        }
 
-            blindSpotEnabled = true;
-            startBsTurnLoop();   // daemon-side show/hide + side-switch (no app process)
-            logger.info("BS: NATIVE blind-spot lane enabled (SurfaceControl layer)");
+        blindSpotEnabled = true;
+        startBsTurnLoop();   // daemon-side show/hide + side-switch (no app process)
+        logger.info("BS: NATIVE blind-spot lane enabled (SurfaceControl layer)");
         } catch (Throwable t) {
             // BS-LIFECYCLE-1: release the partially-built lane in the correct
             // order (scaler.release destroys the EGLSurface on the GL thread
@@ -4275,7 +4393,7 @@ public class GpuSurveillancePipeline {
         android.os.Handler glHandler = (camera != null) ? camera.getGlHandler() : null;
         if (scalerRef != null && glHandler != null) {
             final java.util.concurrent.CountDownLatch latch =
-                    new java.util.concurrent.CountDownLatch(1);
+                new java.util.concurrent.CountDownLatch(1);
             boolean posted = glHandler.post(() -> {
                 try { scalerRef.release(); } catch (Throwable ignored) {} finally { latch.countDown(); }
             });
@@ -4307,8 +4425,8 @@ public class GpuSurveillancePipeline {
             bsTarget = (bs != null) ? bs.optString("target", "head_unit") : "head_unit";
 
             android.graphics.Point panel = (ctx != null)
-                    ? panelForTarget(ctx)
-                    : new android.graphics.Point(1920, isClusterTarget() ? 720 : 1080);
+                ? panelForTarget(ctx)
+                : new android.graphics.Point(1920, isClusterTarget() ? 720 : 1080);
             bsLastPanelW = panel.x; bsLastPanelH = panel.y;
 
             // Per-target geometry: head_unit reads the existing "geometry" key
@@ -4385,9 +4503,9 @@ public class GpuSurveillancePipeline {
             android.content.Context ctx = savedContext;
             if (ctx == null) ctx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
             android.graphics.Point panel = (ctx != null)
-                    ? (cluster ? com.overdrive.app.surveillance.BsNativeLayer.clusterDisplaySize(ctx)
-                    : com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx))
-                    : new android.graphics.Point(1920, cluster ? 720 : 1080);
+                ? (cluster ? com.overdrive.app.surveillance.BsNativeLayer.clusterDisplaySize(ctx)
+                           : com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx))
+                : new android.graphics.Point(1920, cluster ? 720 : 1080);
             int p = Math.max(15, Math.min(pct, 90));
             int w = (int) (panel.x * (p / 100.0));
             int h = (int) (w * (double) BS_HEIGHT / BS_WIDTH);
@@ -4410,7 +4528,7 @@ public class GpuSurveillancePipeline {
             org.json.JSONObject g = new org.json.JSONObject();
             g.put("sizePct", p); g.put("corner", (corner != null) ? corner : "tr");
             com.overdrive.app.config.UnifiedConfigManager.updateSection("blindspot",
-                    new org.json.JSONObject().put(geomKey, g));
+                new org.json.JSONObject().put(geomKey, g));
             // Apply live only if editing the active target; otherwise it's persisted
             // for when that target is next selected.
             if (cluster == isClusterTarget()) {
@@ -4431,8 +4549,8 @@ public class GpuSurveillancePipeline {
      *  clusterDisplaySize falls back to the fixed 1920×720. */
     private android.graphics.Point panelForTarget(android.content.Context ctx) {
         return isClusterTarget()
-                ? com.overdrive.app.surveillance.BsNativeLayer.clusterDisplaySize(ctx)
-                : com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx);
+            ? com.overdrive.app.surveillance.BsNativeLayer.clusterDisplaySize(ctx)
+            : com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx);
     }
 
     /** Recompute the px rect from the current size%/corner preset + LIVE panel.
@@ -4461,8 +4579,8 @@ public class GpuSurveillancePipeline {
             android.content.Context ctx = savedContext;
             if (ctx == null) ctx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
             android.graphics.Point panel = (ctx != null)
-                    ? panelForTarget(ctx)
-                    : new android.graphics.Point(1920, isClusterTarget() ? 720 : 1080);
+                ? panelForTarget(ctx)
+                : new android.graphics.Point(1920, isClusterTarget() ? 720 : 1080);
             w = Math.max(160, Math.min(w, panel.x));
             h = Math.max(120, Math.min(h, panel.y));
             // BS-GEO-4: keep the dest rect at the BS buffer's 4:3 ratio so the
@@ -4593,7 +4711,7 @@ public class GpuSurveillancePipeline {
                 // cheap render-gate re-arm above (volatile writes + fireBsVisibilityChanged)
                 // already ran on this tick, so the GL lane stays armed in the meantime.
                 com.overdrive.app.surveillance.ClusterProjectionController ctrl =
-                        com.overdrive.app.surveillance.ClusterProjectionController.getInstance();
+                    com.overdrive.app.surveillance.ClusterProjectionController.getInstance();
                 if (!ctrl.isOnProjThread()) {
                     ctrl.requestShowRedrive();   // I9-safe: dumpsys re-runs on projThread
                     return;
@@ -4773,7 +4891,7 @@ public class GpuSurveillancePipeline {
             return t;
         });
         bsTurnExec.scheduleWithFixedDelay(this::bsTurnTick, 0, BS_TURN_POLL_MS,
-                java.util.concurrent.TimeUnit.MILLISECONDS);
+            java.util.concurrent.TimeUnit.MILLISECONDS);
         logger.info("BS: turn-trigger loop started");
     }
 
@@ -4801,7 +4919,7 @@ public class GpuSurveillancePipeline {
                     if (ctx == null) ctx = com.overdrive.app.daemon.CameraDaemon.getAppContext();
                     if (ctx != null) {
                         android.graphics.Point panel =
-                                com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx);
+                            com.overdrive.app.surveillance.BsNativeLayer.displaySize(ctx);
                         if (panel.x != bsLastPanelW || panel.y != bsLastPanelH) {
                             resolveBsGeometry();   // updates bsGeomRect + bsLastPanel*
                             if (bsLayerVisible && bsLayer != null) {
@@ -4831,7 +4949,7 @@ public class GpuSurveillancePipeline {
                     // previewing; show only once the cluster display is present
                     // (onClusterProjectionReady also shows it on the ready edge).
                     com.overdrive.app.surveillance.ClusterProjectionController c =
-                            com.overdrive.app.surveillance.ClusterProjectionController.getInstance();
+                        com.overdrive.app.surveillance.ClusterProjectionController.getInstance();
                     c.requestOpen(); c.noteSignal(); c.requestCloseLingered();
                     bsLayerVisible = true;   // intent
                     if (c.isReady()) clusterShowWhenReady();   // desync-proof show
@@ -4865,7 +4983,7 @@ public class GpuSurveillancePipeline {
                     // open across the blink phase. Show the layer only once the cluster
                     // display is present (never composite stack-1 onto nothing).
                     com.overdrive.app.surveillance.ClusterProjectionController c =
-                            com.overdrive.app.surveillance.ClusterProjectionController.getInstance();
+                        com.overdrive.app.surveillance.ClusterProjectionController.getInstance();
                     // Belt-and-braces for the map-leak fix: if NO sustained map holds
                     // the projection, this BS open must not re-surface an orphaned
                     // parked cluster-map Activity. Dismiss it once per signal session
@@ -4889,7 +5007,7 @@ public class GpuSurveillancePipeline {
                 // signal never does, keeping the cap effective).
                 if (cluster && side == 0) {
                     com.overdrive.app.surveillance.ClusterProjectionController.getInstance()
-                            .notifySignalCleared();
+                        .notifySignalCleared();
                 }
                 if (bsLayerVisible && (now - bsLastTurnOnMs) >= BS_OFF_DEBOUNCE_MS) {
                     setBlindSpotVisible(false);
@@ -4900,7 +5018,7 @@ public class GpuSurveillancePipeline {
                         // Hide the card now; restore the gauges after the linger window
                         // (rides brief blink gaps without re-paying the open latency).
                         com.overdrive.app.surveillance.ClusterProjectionController.getInstance()
-                                .requestCloseLingered();
+                            .requestCloseLingered();
                     }
                 }
             }
@@ -4947,16 +5065,16 @@ public class GpuSurveillancePipeline {
             // a released object. Bounded so a wedged GL thread can't hang the
             // disable caller (the watchdog handles a truly dead GL thread).
             android.os.Handler renderQuiesceHandler =
-                    (camera != null) ? camera.getGlHandler() : null;
+                (camera != null) ? camera.getGlHandler() : null;
             if (renderQuiesceHandler != null) {
                 final java.util.concurrent.CountDownLatch quiesceLatch =
-                        new java.util.concurrent.CountDownLatch(1);
+                    new java.util.concurrent.CountDownLatch(1);
                 boolean quiescePosted = renderQuiesceHandler.post(quiesceLatch::countDown);
                 if (quiescePosted) {
                     try {
                         if (!quiesceLatch.await(1000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
                             logger.warn("BS: render-loop quiesce barrier did not "
-                                    + "complete within 1000ms — proceeding with release");
+                                + "complete within 1000ms — proceeding with release");
                         }
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
@@ -4982,7 +5100,7 @@ public class GpuSurveillancePipeline {
             android.os.Handler glHandler = (camera != null) ? camera.getGlHandler() : null;
             if (scalerRef != null && glHandler != null) {
                 final java.util.concurrent.CountDownLatch latch =
-                        new java.util.concurrent.CountDownLatch(1);
+                    new java.util.concurrent.CountDownLatch(1);
                 boolean posted = glHandler.post(() -> {
                     try {
                         try { scalerRef.release(); } catch (Throwable t) {
@@ -5032,7 +5150,7 @@ public class GpuSurveillancePipeline {
             STREAM_ENCODER_RELEASE_EXEC.submit(() -> {
                 try { encoderRef.release(); } catch (Throwable t) {
                     DaemonLogger.getInstance(TAG).warn(
-                            "streamEncoder release on offload thread: " + t.getMessage());
+                        "streamEncoder release on offload thread: " + t.getMessage());
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException re) {
@@ -5062,18 +5180,18 @@ public class GpuSurveillancePipeline {
         try {
             STREAM_ENCODER_RELEASE_EXEC.shutdown();
             drained = STREAM_ENCODER_RELEASE_EXEC.awaitTermination(
-                    awaitMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+                awaitMs, java.util.concurrent.TimeUnit.MILLISECONDS);
             if (!drained) {
                 DaemonLogger.getInstance(TAG).warn(
-                        "streamEncoder release exec did not drain in " + awaitMs
-                                + "ms; forcing shutdownNow + inline-draining queued releases");
+                    "streamEncoder release exec did not drain in " + awaitMs
+                    + "ms; forcing shutdownNow + inline-draining queued releases");
                 for (Runnable r : STREAM_ENCODER_RELEASE_EXEC.shutdownNow()) {
                     try { r.run(); } catch (Throwable ignored) {}
                 }
             }
         } catch (InterruptedException ie) {
             DaemonLogger.getInstance(TAG).warn(
-                    "shutdownStreamEncoderReleaseExec interrupted; forcing shutdownNow");
+                "shutdownStreamEncoderReleaseExec interrupted; forcing shutdownNow");
             try {
                 for (Runnable r : STREAM_ENCODER_RELEASE_EXEC.shutdownNow()) {
                     try { r.run(); } catch (Throwable ignored) {}
@@ -5088,12 +5206,12 @@ public class GpuSurveillancePipeline {
     // because two concurrent native-codec releases on Adreno occasionally
     // trip a HAL refcount bug. Daemon thread so it doesn't block JVM exit.
     private static final java.util.concurrent.ExecutorService STREAM_ENCODER_RELEASE_EXEC =
-            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r, "StreamEncoderRelease");
-                t.setDaemon(true);
-                return t;
-            });
-
+        java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "StreamEncoderRelease");
+            t.setDaemon(true);
+            return t;
+        });
+    
     /**
      * Checks if streaming is enabled.
      */
@@ -5134,24 +5252,24 @@ public class GpuSurveillancePipeline {
     public com.overdrive.app.streaming.GpuStreamScaler getStreamScaler() {
         return streamScaler;
     }
-
+    
     /**
      * Gets the stream encoder component.
      */
     public HardwareEventRecorderGpu getStreamEncoder() {
         return streamEncoder;
     }
-
+    
     /**
      * Gets the WebSocket stream server.
      */
     public com.overdrive.app.streaming.WebSocketStreamServer getWebSocketServer() {
         return wsStreamServer;
     }
-
+    
     /**
      * Sets the stream view mode (which camera to show).
-     *
+     * 
      * @param mode 0=Mosaic (2x2 grid), 1=Front, 2=Right, 3=Rear, 4=Left
      */
     public void setStreamViewMode(int mode) {
@@ -5167,7 +5285,7 @@ public class GpuSurveillancePipeline {
     public void setBlindSpotParams(float hfov, float sideHFov, float yaw, float roll,
                                    float feather, float projExp, float vscale, float pitch) {
         setBlindSpotParams(hfov, sideHFov, yaw, roll, feather, projExp, vscale, pitch,
-                0.0f, 0.0f);
+                           0.0f, 0.0f);
     }
 
     /** POC blind-spot (view 7/8) panorama-stitch tuning pass-through. No-op if streaming off. */
@@ -5181,12 +5299,12 @@ public class GpuSurveillancePipeline {
         com.overdrive.app.streaming.GpuStreamScaler ss = streamScaler;
         if (ss != null) {
             ss.setBlindSpotParams(hfov, sideHFov, yaw, roll, feather, projExp, vscale, pitch,
-                    rearRoll, rearPitch);
+                                  rearRoll, rearPitch);
         }
         com.overdrive.app.streaming.GpuStreamScaler bs = bsScaler;
         if (bs != null) {
             bs.setBlindSpotParams(hfov, sideHFov, yaw, roll, feather, projExp, vscale, pitch,
-                    rearRoll, rearPitch);
+                                  rearRoll, rearPitch);
         }
         logger.info("Blind-spot params: hfov=" + hfov + " sideHFov=" + sideHFov
                 + " yaw=" + yaw + " roll=" + roll + " feather=" + feather
@@ -5194,19 +5312,40 @@ public class GpuSurveillancePipeline {
                 + " rearRoll=" + rearRoll + " rearPitch=" + rearPitch);
     }
 
+    /**
+     * Blind-spot merge mode (views 7/8): 0 = both (rear+side stitch, default),
+     * 1 = side camera only, 2 = rear camera only. Pushes to BOTH the shared
+     * stream scaler (browser preview) and the dedicated BS lane's scaler (what
+     * the overlay renders), same as {@link #setBlindSpotParams}. No-op-safe.
+     */
+    public void setBlindSpotMergeMode(int mode) {
+        com.overdrive.app.streaming.GpuStreamScaler ss = streamScaler;
+        if (ss != null) ss.setBlindSpotMergeMode(mode);
+        com.overdrive.app.streaming.GpuStreamScaler bs = bsScaler;
+        if (bs != null) bs.setBlindSpotMergeMode(mode);
+        logger.info("Blind-spot merge mode set to " + mode);
+    }
 
+    /** Map the persisted string merge mode to the scaler's int code. */
+    private static int bsMergeModeCode(String mode) {
+        if ("side".equals(mode)) return 1;
+        if ("rear".equals(mode)) return 2;
+        return 0;   // "both" / null / unknown
+    }
+
+    
     /**
      * Gets the current stream view mode.
-     *
+     * 
      * @return 0=Mosaic, 1-4=Single camera, -1 if streaming not enabled
      */
     public int getStreamViewMode() {
         return streamScaler != null ? streamScaler.getViewMode() : -1;
     }
-
+    
     /**
      * Checks if currently recording.
-     *
+     * 
      * @return true if recording, false otherwise
      */
     public boolean isRecording() {
@@ -5242,12 +5381,12 @@ public class GpuSurveillancePipeline {
     public boolean isInitialized() {
         return initialized;
     }
-
+    
     private static String getVehicleModel() {
         try {
             return (String) Class.forName("android.os.SystemProperties")
-                    .getMethod("get", String.class, String.class)
-                    .invoke(null, "ro.product.model", "unknown");
+                .getMethod("get", String.class, String.class)
+                .invoke(null, "ro.product.model", "unknown");
         } catch (Exception e) {
             return "unknown";
         }
@@ -5255,7 +5394,7 @@ public class GpuSurveillancePipeline {
 
     /**
      * Checks if running.
-     *
+     * 
      * @return true if running
      */
     public boolean isRunning() {
@@ -5336,13 +5475,13 @@ public class GpuSurveillancePipeline {
 
     /**
      * Gets the camera component.
-     *
+     * 
      * @return PanoramicCameraGpu instance
      */
     public PanoramicCameraGpu getCamera() {
         return camera;
     }
-
+    
     /**
      * Gets the surveillance engine.
      *
@@ -5387,25 +5526,25 @@ public class GpuSurveillancePipeline {
 
     /**
      * Gets the adaptive bitrate controller.
-     *
+     * 
      * @return AdaptiveBitrateController instance
      */
     public AdaptiveBitrateController getBitrateController() {
         return bitrateController;
     }
-
+    
     /**
      * Checks if surveillance mode is active.
-     *
+     * 
      * @return true if in surveillance mode
      */
     public boolean isSurveillanceMode() {
         return currentMode == Mode.SURVEILLANCE;
     }
-
+    
     /**
      * Checks if normal recording mode is active.
-     *
+     * 
      * @return true if in normal recording mode
      */
     public boolean isNormalRecordingMode() {
@@ -5452,7 +5591,7 @@ public class GpuSurveillancePipeline {
             recorder.setTelemetryCollector(collector);
         }
     }
-
+    
     /**
      * Switch the WebSocket stream sink from this pano pipeline's stream
      * encoder to the OEM Dashcam pipeline's encoder. Called via reflection
@@ -5529,7 +5668,7 @@ public class GpuSurveillancePipeline {
             oemPipeline.setStreamScalerForOemPublish(liveScaler);
         } catch (Throwable t) {
             logger.warn("attachExternalStreamCallback: streamScaler.bindOemSource failed: "
-                    + t.getMessage());
+                + t.getMessage());
             return false;
         }
         externalStreamSourceActive = true;
@@ -5580,7 +5719,7 @@ public class GpuSurveillancePipeline {
             // work.
             try {
                 com.overdrive.app.camera.OemDashcamPipeline oem =
-                        com.overdrive.app.daemon.CameraDaemon.getOemDashcamPipeline();
+                    com.overdrive.app.daemon.CameraDaemon.getOemDashcamPipeline();
                 if (oem != null) oem.setStreamScalerForOemPublish(null);
             } catch (Throwable ignored) {}
             logger.info("Stream source: OEM → AVM mosaic");
@@ -5662,7 +5801,7 @@ public class GpuSurveillancePipeline {
         boolean surveillance = currentMode == Mode.SURVEILLANCE;
         int layout = surveillance ? surveillanceLayoutConfig : recordingLayoutConfig;
         boolean useWindshield = surveillance
-                ? surveillanceUseWindshieldConfig : dashcamUseWindshieldConfig;
+            ? surveillanceUseWindshieldConfig : dashcamUseWindshieldConfig;
         if (recorder != null) {
             // GpuMosaicRecorder.setRecordingLayout early-returns when unchanged.
             recorder.setRecordingLayout(layout);
@@ -5686,14 +5825,14 @@ public class GpuSurveillancePipeline {
         int windshieldCameraId = -1;
         try {
             windshieldCameraId = com.overdrive.app.camera.CameraConfigResolver
-                    .resolve(getVehicleModel())
-                    .getDirectCameraIdForRole(com.overdrive.app.camera.CameraRole.WINDSHIELD);
+                .resolve(getVehicleModel())
+                .getDirectCameraIdForRole(com.overdrive.app.camera.CameraRole.WINDSHIELD);
         } catch (Throwable t) {
             windshieldCameraId = -1;
         }
         this.windshieldCameraIdConfig = windshieldCameraId;
         cam.setDashcamWindshieldCamera(
-                useWindshield && windshieldCameraId >= 0, windshieldCameraId);
+            useWindshield && windshieldCameraId >= 0, windshieldCameraId);
     }
 
     /**

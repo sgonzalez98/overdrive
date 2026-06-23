@@ -61,6 +61,23 @@ public class SohEstimator {
     private static final int LIVE_HISTORY_SIZE = 10;
     private final java.util.ArrayDeque<Double> liveHistory = new java.util.ArrayDeque<>(LIVE_HISTORY_SIZE);
 
+    // SOH bounds. A battery's State of Health is, by definition, capacity
+    // relative to a NEW pack — it CANNOT exceed 100%. Earlier code railed at
+    // 110% to allow measurement slop, but that 10% headroom let a BMS that
+    // reads slightly above the user-entered nominal at full charge (e.g. 22.4
+    // kWh measured vs 21.5 entered → 104%, or a stale full-charge getter held
+    // while SOC dropped → railed 110%) report >100% SOH. That impossible value
+    // then multiplied into BOTH the SOH display AND the synthesized remaining
+    // kWh / per-trip consumption (computedKwh = SOC × nominal × SOH/100),
+    // inflating every downstream number by up to 10%. Capping at 100% is the
+    // physically-correct ceiling and removes that inflation: a healthy pack
+    // reads exactly 100%, a degraded one reads below. The 60% floor stays —
+    // genuine degradation lives below nominal. Values above the cap are clamped
+    // to 100, not discarded, so a slightly-high reading still yields a usable
+    // (healthy) estimate instead of none.
+    private static final double MAX_SOH = 100.0;
+    private static final double MIN_SOH = 60.0;
+
     private double currentSoh = -1;
     private double calibrationSoh = -1;
     private long calibrationTimestampMs = 0;
@@ -885,21 +902,23 @@ public class SohEstimator {
         double absSoc = scaleDisplaySoc(socPercent, scale);
         double impliedTotalCap = remainKwh / (absSoc / 100.0);
         double rawSoh = (impliedTotalCap / nominalCapacityKwh) * 100.0;
-        boolean saturated = (rawSoh < 60.0 || rawSoh > 110.0);
+        boolean saturated = (rawSoh < MIN_SOH || rawSoh > MAX_SOH);
         if (saturated) {
             saturationStreak++;
             if (saturationStreak == 1 || saturationStreak % SATURATION_WARN_PERIOD == 0) {
-                logger.warn("SOH saturated at " + (rawSoh < 60.0 ? "60%" : "110%")
+                logger.warn("SOH saturated at " + (rawSoh < MIN_SOH ? "60%" : "100%")
                     + " rail (raw=" + String.format("%.1f", rawSoh)
                     + "%, nominal=" + String.format("%.1f", nominalCapacityKwh) + " kWh"
                     + ", source=" + nominalSource + ", streak=" + saturationStreak
-                    + ") — likely wrong nominal capacity selected");
+                    + (rawSoh > MAX_SOH
+                        ? ") — BMS reads above nominal (impossible SOH>100%); nominal may be set too low"
+                        : ") — likely wrong nominal capacity selected"));
             }
         } else {
             saturationStreak = 0;
         }
-        if (rawSoh < 60.0) return 60.0;
-        if (rawSoh > 110.0) return 110.0;
+        if (rawSoh < MIN_SOH) return MIN_SOH;
+        if (rawSoh > MAX_SOH) return MAX_SOH;
         return rawSoh;
     }
 
@@ -918,19 +937,27 @@ public class SohEstimator {
             // getBatteryRemainPowerKwh() — the helper synthesizes from
             // currentSoh on PHEV / bad-BMS paths and would loop SOH back
             // into itself, locking the estimate at the seed value forever.
+            // PHEV: skip the energy-based seed entirely — the raw getter can't be
+            // trusted for SOH (half/stale/frame-ambiguous), so we seed at the
+            // honest 100% default (tail below) and let only the independent
+            // capacity-Ah / calibration anchors lower it. BEV seeds from energy.
+            boolean isPhevForSeed = false;
+            try {
+                com.overdrive.app.byd.BydDataCollector col =
+                    com.overdrive.app.byd.BydDataCollector.getInstance();
+                if (col != null && col.isInitialized()) isPhevForSeed = col.isPhevPublic();
+            } catch (Throwable ignored) {}
+
             boolean energySeedFired = false;
-            if (vd != null && !Double.isNaN(vd.remainKwh) && vd.remainKwh > 0
+            if (!isPhevForSeed
+                    && vd != null && !Double.isNaN(vd.remainKwh) && vd.remainKwh > 0
                     && socData != null
                     && socData.socPercent >= 10 && socData.socPercent <= 100) {
                 double rawRemainKwh = vd.remainKwh;
                 double impliedCap = rawRemainKwh / (socData.socPercent / 100.0);
                 double ratio = impliedCap / nominalCapacityKwh;
-                // Refuse junk BMS readings (ratio outside 50-150% of nominal).
-                // On PHEVs hit by the SOC-as-kWh firmware bug this is the
-                // common reject path even AFTER BydDataCollector's mimic
-                // guard, because we may have seeded mid-cycle before the
-                // PHEV-native getBatteryPowerHEV path filled vd.remainKwh.
-                if (ratio >= 0.5 && ratio <= 1.5) {
+                // Refuse junk BMS readings (ratio outside plausible band).
+                if (ratio >= 0.5 && ratio <= 1.12) {
                     double highCellV = Double.isNaN(vd.highCellVoltage) ? Double.NaN : vd.highCellVoltage;
                     double soh = computeLiveSoh(rawRemainKwh, socData.socPercent, highCellV);
                     if (soh > 0) {
@@ -1063,11 +1090,15 @@ public class SohEstimator {
             String sohStr = props.getProperty(PROP_SOH_PERCENT);
             if (sohStr != null) {
                 double persistedSoh = Double.parseDouble(sohStr);
-                if (persistedSoh >= 60 && persistedSoh <= 110) {
-                    currentSoh = persistedSoh;
-                    logger.info("Restored SOH: " + currentSoh + "%");
+                // Accept up to the old 110 rail (older builds persisted up to 110),
+                // but re-cap to MAX_SOH (100) on restore so a value written under
+                // the old >100% behaviour doesn't keep inflating the display.
+                if (persistedSoh >= MIN_SOH && persistedSoh <= 110) {
+                    currentSoh = Math.min(persistedSoh, MAX_SOH);
+                    logger.info("Restored SOH: " + currentSoh + "%"
+                        + (persistedSoh > MAX_SOH ? " (capped from " + persistedSoh + "%)" : ""));
                 } else {
-                    logger.info("Discarding persisted SOH " + persistedSoh + " — out of valid range 60-110");
+                    logger.info("Discarding persisted SOH " + persistedSoh + " — out of valid range " + MIN_SOH + "-110");
                     sohFile.delete();
                 }
             }
@@ -1075,8 +1106,8 @@ public class SohEstimator {
             String calStr = props.getProperty(PROP_CALIBRATION_SOH);
             if (calStr != null) {
                 double cal = Double.parseDouble(calStr);
-                if (cal >= 60 && cal <= 110) {
-                    calibrationSoh = cal;
+                if (cal >= MIN_SOH && cal <= 110) {
+                    calibrationSoh = Math.min(cal, MAX_SOH);
                 }
             }
             String calTsStr = props.getProperty(PROP_CALIBRATION_TIMESTAMP);
@@ -1090,7 +1121,7 @@ public class SohEstimator {
             if (capAhStr != null) {
                 try {
                     double cah = Double.parseDouble(capAhStr);
-                    if (cah >= 60 && cah <= 110) capacityAhSoh = cah;
+                    if (cah >= MIN_SOH && cah <= 110) capacityAhSoh = Math.min(cah, MAX_SOH);
                 } catch (NumberFormatException ignored) {}
             }
             String capAhTsStr = props.getProperty(PROP_CAPACITY_AH_TIMESTAMP);
@@ -1115,7 +1146,10 @@ public class SohEstimator {
                     for (String p : parts) {
                         String trimmed = p.trim();
                         if (trimmed.isEmpty()) continue;
-                        liveHistory.addLast(Double.parseDouble(trimmed));
+                        // Re-cap on restore: a pre-cap (≤110) properties file could
+                        // otherwise reintroduce >100 samples into the median.
+                        double v = Double.parseDouble(trimmed);
+                        if (v >= MIN_SOH && v <= 110) liveHistory.addLast(Math.min(v, MAX_SOH));
                     }
                     while (liveHistory.size() > LIVE_HISTORY_SIZE) {
                         liveHistory.pollFirst();
@@ -1254,10 +1288,13 @@ public class SohEstimator {
             double actualCapacity = energyEnteredBatteryKwh / (absSocDelta / 100.0);
             double calibratedSoh = (actualCapacity / nominalCapacityKwh) * 100.0;
 
-            if (calibratedSoh < 60.0 || calibratedSoh > 110.0) {
+            // Reject genuinely-implausible calibrations; clamp a slightly-high one
+            // to the 100% ceiling (a full charge can measure a touch above nominal).
+            if (calibratedSoh < MIN_SOH || calibratedSoh > 130.0) {
                 logger.warn("Calibration SOH out of range: " + String.format("%.1f", calibratedSoh) + "% — rejected");
                 return;
             }
+            if (calibratedSoh > MAX_SOH) calibratedSoh = MAX_SOH;
 
             // Anchor only — never blends into currentSoh.
             calibrationSoh = calibratedSoh;
@@ -1406,12 +1443,17 @@ public class SohEstimator {
             lastCapacityAhReading = bmsReportedAh;
 
             double soh = (bmsReportedAh / nominalAh) * 100.0;
-            if (soh < 60.0 || soh > 110.0) {
+            // Reject only genuinely-implausible reads (gross frame error). A
+            // reading a little above nominal (BMS Ah slightly > factory rating, or
+            // nominal entered a touch low) is clamped to the 100% ceiling, not
+            // discarded — SOH cannot exceed 100%, but the pack is clearly healthy.
+            if (soh < MIN_SOH || soh > 130.0) {
                 logger.debug("Capacity-Ah anchor rejected: " + String.format("%.1f", soh)
-                    + "% outside 60-110 range (reported=" + String.format("%.1f", bmsReportedAh)
+                    + "% outside " + MIN_SOH + "-130 range (reported=" + String.format("%.1f", bmsReportedAh)
                     + " Ah, nominal=" + String.format("%.1f", nominalAh) + " Ah)");
                 return;
             }
+            if (soh > MAX_SOH) soh = MAX_SOH;
 
             capacityAhSoh = soh;
             capacityAhTimestampMs = System.currentTimeMillis();
@@ -1550,8 +1592,8 @@ public class SohEstimator {
         if (peakRemainKwhAtFull <= 0 || nominalCapacityKwh <= 0) return -1;
         if (peakRemainKwhSamples < PEAK_REMAIN_KWH_REQUIRED_SAMPLES) return -1;
         double soh = (peakRemainKwhAtFull / nominalCapacityKwh) * 100.0;
-        if (soh < 60.0) return 60.0;
-        if (soh > 110.0) return 110.0;
+        if (soh < MIN_SOH) return MIN_SOH;
+        if (soh > MAX_SOH) return MAX_SOH;
         return soh;
     }
 
@@ -1624,8 +1666,8 @@ public class SohEstimator {
         if (peakRemainKwhAtFull <= 0 || nominalCapacityKwh <= 0) return -1;
         if (peakRemainKwhSamples < PEAK_REMAIN_KWH_REQUIRED_SAMPLES) return -1;
         double soh = (peakRemainKwhAtFull / nominalCapacityKwh) * 100.0;
-        if (soh < 60.0) return 60.0;
-        if (soh > 110.0) return 110.0;
+        if (soh < MIN_SOH) return MIN_SOH;
+        if (soh > MAX_SOH) return MAX_SOH;
         return soh;
     }
 
@@ -1642,8 +1684,14 @@ public class SohEstimator {
     public boolean hasEstimate() { return currentSoh > 0; }
 
     public double getEstimatedCapacityKwh() {
-        if (!hasEstimate()) return -1;
-        return (currentSoh / 100.0) * nominalCapacityKwh;
+        if (nominalCapacityKwh <= 0) return -1;
+        // Use the DISPLAYED SOH (capped, anchored) so the estimated-capacity kWh
+        // on the health card agrees with the SOH percent shown right beside it —
+        // previously this used currentSoh (live median) while the percent used
+        // getDisplaySoh, so the card could read "100% / 20.0 kWh of 21.5" (=93%).
+        double s = hasDisplaySoh() ? getDisplaySoh() : currentSoh;
+        if (s <= 0) return -1;
+        return (s / 100.0) * nominalCapacityKwh;
     }
 
     // ==================== RESET ====================

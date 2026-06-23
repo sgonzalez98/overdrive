@@ -326,9 +326,9 @@ public class AbrpTelemetryService {
                 payload.put("odometer", raw > 1_000_000 ? raw / 10.0 : (double) raw);
             }
 
-            // soh
-            if (sohEstimator.hasEstimate()) {
-                payload.put("soh", sohEstimator.getCurrentSoh());
+            // soh — displayed (capped, anchored) value so ABRP agrees with the UI.
+            if (sohEstimator.hasDisplaySoh()) {
+                payload.put("soh", sohEstimator.getDisplaySoh());
             }
 
             // capacity payload uses the synthesized helper (UI-friendly), but
@@ -339,13 +339,19 @@ public class AbrpTelemetryService {
             if (remainingKwh > 0 && soc > 0) {
                 payload.put("capacity", remainingKwh / (soc / 100.0));
             }
+            // Feed the live SOH formula ONLY on BEV. On PHEV the raw getter is
+            // unreliable (half/stale/frame-ambiguous), so SOH is driven solely by
+            // the independent capacity-Ah + calibration anchors (see SocHistoryDatabase).
+            // Feeding it here too would reintroduce the noisy/railed PHEV SOH.
             double rawRemainKwh = (vd != null && !Double.isNaN(vd.remainKwh)) ? vd.remainKwh : Double.NaN;
             double highCellV = (vd != null && !Double.isNaN(vd.highCellVoltage))
                 ? vd.highCellVoltage : Double.NaN;
-            if (rawRemainKwh > 0 && soc > 0 && sohEstimator.getNominalCapacityKwh() > 0) {
+            boolean isPhevForSoh = false;
+            try { isPhevForSoh = vehicleDataMonitor.isPhev(); } catch (Throwable ignored) {}
+            if (!isPhevForSoh && rawRemainKwh > 0 && soc > 0 && sohEstimator.getNominalCapacityKwh() > 0) {
                 double impliedCap = rawRemainKwh / (soc / 100.0);
                 double ratio = impliedCap / sohEstimator.getNominalCapacityKwh();
-                if (ratio >= 0.5 && ratio <= 1.5) {
+                if (ratio >= 0.5 && ratio <= 1.12) {
                     sohEstimator.updateFromEnergy(rawRemainKwh, soc, highCellV, false);
                 }
             }

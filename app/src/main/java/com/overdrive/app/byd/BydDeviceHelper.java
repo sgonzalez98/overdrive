@@ -730,6 +730,70 @@ public final class BydDeviceHelper {
         return false;
     }
 
+    /**
+     * Register a typed instrument listener. The instrument device's real
+     * signals — most importantly {@code onExternalChargingPowerChanged(double)}
+     * (live AC/DC charging power in kW) — are CONCRETE methods on the
+     * {@code AbsBYDAutoInstrumentListener} abstract class, NOT on the
+     * {@code IBYDAutoListener} base interface (which is an empty marker). The
+     * generic {@link #registerListener(Object, ListenerCallback)} path builds a
+     * dynamic {@code Proxy} of {@code IBYDAutoListener}; a Proxy can only
+     * implement interface methods, so it can NEVER receive
+     * {@code onExternalChargingPowerChanged} — the HAL keeps a separate typed
+     * {@code List<AbsBYDAutoInstrumentListener>} and dispatches that callback
+     * only to it. Result: charging power never arrives via the listener and the
+     * UI falls back to a nominal estimate. Mirrors {@link #registerChargingListener}.
+     *
+     * Registers both the 2-arg (empty int[] = subscribe-all) and 1-arg typed
+     * overloads where present; both succeed additively where supported.
+     */
+    public static boolean registerInstrumentListener(Object device, ListenerCallback callback) {
+        if (device == null) return false;
+        try {
+            android.hardware.bydauto.instrument.AbsBYDAutoInstrumentListener listener =
+                new android.hardware.bydauto.instrument.AbsBYDAutoInstrumentListener() {
+                    @Override
+                    public void onExternalChargingPowerChanged(double power) {
+                        invokeCallback(callback, "onExternalChargingPowerChanged", new Object[]{power});
+                    }
+                    @Override
+                    public void onSafetyBeltStatusChanged(int seat, int state) {
+                        invokeCallback(callback, "onSafetyBeltStatusChanged", new Object[]{seat, state});
+                    }
+                };
+
+            // Strategy 1: 2-arg with empty int[] (subscribe-all). Some firmware
+            // only delivers events through the filtered overload.
+            Method registerWithIds = findRegisterMethodWithIds(device.getClass(),
+                android.hardware.bydauto.instrument.AbsBYDAutoInstrumentListener.class);
+            boolean twoArgRegistered = false;
+            if (registerWithIds != null) {
+                try {
+                    registerWithIds.invoke(device, listener, new int[0]);
+                    twoArgRegistered = true;
+                } catch (Exception e) {
+                    logger.debug("Instrument 2-arg registration failed: " + e.getMessage());
+                }
+            }
+
+            // Strategy 2: 1-arg typed.
+            Method register = findRegisterMethod(device.getClass(),
+                android.hardware.bydauto.instrument.AbsBYDAutoInstrumentListener.class);
+            if (register != null) {
+                register.invoke(device, listener);
+                return true;
+            }
+            if (twoArgRegistered) return true;
+            logger.debug("registerInstrumentListener: no registerListener method on "
+                + device.getClass().getName());
+        } catch (NoClassDefFoundError e) {
+            logger.debug("registerInstrumentListener: class not available on this firmware");
+        } catch (Exception e) {
+            logger.debug("registerInstrumentListener failed: " + e.getMessage());
+        }
+        return false;
+    }
+
     private static void invokeCallback(ListenerCallback callback, String method, Object[] args) {
         try {
             callback.onCallback(method, args);
@@ -856,7 +920,20 @@ public final class BydDeviceHelper {
      * Falls back to callSetSingle if BYDAutoEventValue is not available.
      */
     public static boolean sendSetCommand(Object device, int featureId, int value) {
-        if (device == null) return false;
+        int code = sendSetCommandRaw(device, featureId, value);
+        return code >= 0;
+    }
+
+    /**
+     * Same as {@link #sendSetCommand} but returns the RAW SDK result code
+     * instead of a boolean, so callers can distinguish e.g.
+     * BYDAUTO_COMMAND_RESULT_FAILED (-2147482648) from other negatives.
+     * Returns {@link Integer#MIN_VALUE} only when the call threw before
+     * producing a code (so it's distinguishable from the real -2147482648).
+     * A Boolean SDK result maps to 0 (true) / -1 (false).
+     */
+    public static int sendSetCommandRaw(Object device, int featureId, int value) {
+        if (device == null) return Integer.MIN_VALUE;
         try {
             Class<?> eventValueClass = Class.forName("android.hardware.bydauto.BYDAutoEventValue");
             Object eventValue = eventValueClass.getConstructor(new Class[0]).newInstance(new Object[0]);
@@ -864,18 +941,18 @@ public final class BydDeviceHelper {
             Method setMethod = device.getClass().getMethod("set", int[].class, eventValueClass);
             Object result = setMethod.invoke(device, new int[]{featureId}, eventValue);
             if (result instanceof Integer) {
-                return ((Integer) result).intValue() >= 0;
+                return ((Integer) result).intValue();
             } else if (result instanceof Boolean) {
-                return ((Boolean) result).booleanValue();
+                return ((Boolean) result).booleanValue() ? 0 : -1;
             }
-            return true; // non-null result, assume success
+            return 0; // non-null result, assume success
         } catch (ClassNotFoundException e) {
             // BYDAutoEventValue not available, fall back to base class set()
             logger.debug("BYDAutoEventValue not found, falling back to callSetSingle");
-            return callSetSingle(device, featureId, value) >= 0;
+            return callSetSingle(device, featureId, value);
         } catch (Exception e) {
-            logger.debug("sendSetCommand failed for featureId=0x" + Integer.toHexString(featureId) + ": " + e.getMessage());
-            return false;
+            logger.debug("sendSetCommandRaw failed for featureId=0x" + Integer.toHexString(featureId) + ": " + e.getMessage());
+            return Integer.MIN_VALUE;
         }
     }
 

@@ -1,6 +1,7 @@
 package com.overdrive.app.byd.cloud;
 
 import com.overdrive.app.byd.cloud.crypto.CredentialCipher;
+import com.overdrive.app.byd.cloud.crypto.CredentialUpgrade;
 import com.overdrive.app.config.UnifiedConfigManager;
 import com.overdrive.app.logging.DaemonLogger;
 
@@ -109,6 +110,13 @@ public final class BydCloudConfig {
         // Migrate legacy plaintext to protected form on first read
         if (!storedRawPassword.isEmpty() && !CredentialCipher.isEncrypted(storedRawPassword)) {
             migrateRawPassword(bydCloud, rawPassword);
+        } else {
+            // Upgrade a legacy firmware-fingerprint-bound ciphertext to the
+            // stable device-id-only key so a future OTA can't strand it (same
+            // OTA-invalidation class as the Telegram token). No-op once stable.
+            // Single-key-delta + CAS so a concurrent clear/rotate of other
+            // bydCloud keys (or the password itself) isn't resurrected.
+            CredentialUpgrade.reEncryptKeyIfLegacy("bydCloud", "rawPassword");
         }
 
         return new BydCloudConfig(
@@ -133,8 +141,14 @@ public final class BydCloudConfig {
     private static void migrateRawPassword(JSONObject bydCloud, String plainPassword) {
         try {
             String encrypted = CredentialCipher.encrypt(plainPassword);
-            bydCloud.put("rawPassword", encrypted);
-            UnifiedConfigManager.updateSection("bydCloud", bydCloud);
+            if (!CredentialCipher.isEncrypted(encrypted)) return;  // fail-open guard: never write plaintext back
+            // Single-key delta, NOT the whole (read-earlier, now-stale) section:
+            // updateSection merges per-key under its file lock, so writing only
+            // rawPassword preserves a concurrent clearCredentials()/saveCredentials()
+            // on other keys (no resurrect of a just-cleared enabled/username).
+            JSONObject delta = new JSONObject();
+            delta.put("rawPassword", encrypted);
+            UnifiedConfigManager.updateSection("bydCloud", delta);
         } catch (Exception e) {
             // Best-effort — plaintext still works, will migrate on next save
         }
@@ -202,7 +216,18 @@ public final class BydCloudConfig {
             bydCloud.put("loginKey", loginKey);
             bydCloud.put("signPassword", signPassword);
             bydCloud.put("commandPwd", commandPwd);
-            bydCloud.put("rawPassword", CredentialCipher.encrypt(rawPassword));
+            String encPw = CredentialCipher.encrypt(rawPassword);
+            // Never persist a non-empty password in cleartext (encrypt() is
+            // fail-open on a JCE error). An empty password legitimately stays
+            // "" (encrypt passes empties through), so only abort when a real
+            // secret failed to encrypt. Void method → skip the write entirely
+            // (losing the save beats writing a bare password to the 0666 store).
+            if (rawPassword != null && !rawPassword.isEmpty()
+                    && !CredentialCipher.isEncrypted(encPw)) {
+                logger.warn("Credential encryption failed; aborting BYD-cloud save (not persisting plaintext)");
+                return;
+            }
+            bydCloud.put("rawPassword", encPw);
             bydCloud.put("vin", vin);
             String normalizedCountryCode = BydCloudRegionCatalog.normalizeCountryCode(countryCode);
             if (!BydCloudRegionCatalog.isSupportedCountryCode(normalizedCountryCode)) {

@@ -50,6 +50,18 @@ public final class ActorTracker {
     private static final int STATIC_FRAMES_NEEDED = 8;
 
     /**
+     * Minimum observations before a track may latch a peak severity above NOTICE.
+     * A track seen only 1-2 frames is almost always a YOLO flicker or a one-frame
+     * misclassification (e.g. a parked car momentarily boxed as a person). Because
+     * peakSeverity is a monotone lifetime latch AND classGroup is final, a single
+     * such frame would otherwise pin ALERT/CRITICAL + a (possibly wrong) class for
+     * the whole event, dominating both the caption and the hero thumbnail. A
+     * genuine actor accrues frames at ~10 FPS, so a real threat is delayed by at
+     * most ~(N-1)*100ms (~300ms here) before it can escalate — imperceptible.
+     */
+    private static final int MIN_ESCALATION_FRAMES = 3;
+
+    /**
      * Vehicles get a much shorter static window. The classic failure to prevent:
      * a parked car that DetectionBaseline missed (e.g. arrived between event-end
      * baseline updates) reaches the Actor layer with a fresh track. With
@@ -387,6 +399,18 @@ public final class ActorTracker {
             Severity sev = SeverityClassifier.classify(classGroup, prox, peakProximity,
                     computeTrend(), stableFrames >= staticThreshold, dwellMs);
 
+            // FLICKER / MISCLASSIFICATION GUARD: don't let a track escalate above
+            // NOTICE until it has been confirmed across MIN_ESCALATION_FRAMES
+            // observations. A 1-2 frame track is almost always a YOLO flicker or a
+            // one-frame false class (parked car boxed as a person); since peak
+            // severity is a monotone lifetime latch and classGroup is final, a
+            // single such frame would otherwise pin ALERT/CRITICAL + a wrong class
+            // for the whole event. historyCount was incremented above, so it is the
+            // observation count INCLUDING this frame.
+            if (historyCount < MIN_ESCALATION_FRAMES && sev.ordinal() > Severity.NOTICE.ordinal()) {
+                sev = Severity.NOTICE;
+            }
+
             // Track peak severity moment for thumbnail capture
             boolean upgradeSev = sev.ordinal() > peakSeverity.ordinal();
             boolean tieBetterConf = sev == peakSeverity && d.getConfidence() > peakConfidence;
@@ -456,7 +480,8 @@ public final class ActorTracker {
                     peakConfidence,
                     peakBboxX, peakBboxY, peakBboxW, peakBboxH,
                     peakBboxQuadW, peakBboxQuadH, peakCamera,
-                    lastX, lastY, lastW, lastH);
+                    lastX, lastY, lastW, lastH,
+                    quadrant);
         }
     }
 }

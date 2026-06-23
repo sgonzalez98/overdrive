@@ -246,6 +246,26 @@ public class VehicleDataMonitor {
         }
         return null;
     }
+
+    /**
+     * PHEV cumulative liquid-fuel consumption counter, in litres, straight from
+     * the BYD statistic HAL ({@code getTotalFuelConValue}). This is the vehicle's
+     * own metered lifetime fuel-burned accumulator — a delta between two reads
+     * gives the true litres consumed over an interval, independent of tank size
+     * and free of the 1%-resolution gauge quantisation.
+     *
+     * <p>Intentionally NOT routed through {@link #getDrivingRange()}: that helper
+     * returns null whenever {@code elecRangeKm} is momentarily unavailable, which
+     * would silently drop the fuel snapshot. Trip code reads this directly so the
+     * accumulator capture is decoupled from the elec-range gate.
+     *
+     * @return cumulative litres consumed, or {@code NaN} when the HAL doesn't
+     *         report it (pure BEV, or trim without the accumulator).
+     */
+    public double getTotalFuelCon() {
+        BydVehicleData vd = getVd();
+        return vd != null ? vd.totalFuelCon : Double.NaN;
+    }
     
     public BatteryThermalData getBatteryThermal() {
         BydVehicleData vd = getVd();
@@ -272,35 +292,41 @@ public class VehicleDataMonitor {
                 com.overdrive.app.monitor.SocHistoryDatabase.getInstance().getSohEstimator();
             if (soh != null && soh.getNominalCapacityKwh() > 0 && soc > 0) {
                 double nominal = soh.getNominalCapacityKwh();
-                double sohPercent = soh.hasEstimate() ? soh.getCurrentSoh() : 100.0;
+                // SINGLE SOURCE OF TRUTH for remaining energy. SOH is the
+                // displayed (capped ≤100, independently-anchored) value so this
+                // number always agrees with the SOH chip/card. Default 100 until
+                // a real measurement exists.
+                double sohPercent = soh.hasDisplaySoh() ? soh.getDisplaySoh() : 100.0;
+                if (sohPercent <= 0) sohPercent = 100.0;
                 double computedKwh = (soc / 100.0) * nominal * (sohPercent / 100.0);
 
-                // Validate raw BMS value: if implied capacity is wildly off
-                // from nominal, the BMS is returning garbage. Use computed.
-                // The same gate applies to BEV and PHEV — PHEVs that suffered
-                // the SOC-as-kWh firmware bug fail this ratio check (rawKwh
-                // ≈ socPercent → impliedCap ≈ 100 vs PHEV nominal 18.3 →
-                // ratio ≈ 5.5, way outside 0.5-1.5). Validate whenever both
-                // inputs are present — a previous soc>5 floor let SOC-mimic
-                // values at very low SOC slip through unvalidated (rawKwh≈3
-                // at soc=3 on an 18.3 kWh pack would otherwise be returned
-                // as a real 3 kWh reading even though it's the bug pattern).
-                if (rawKwh > 0 && soc > 0) {
-                    double impliedCap = rawKwh / (soc / 100.0);
-                    double ratio = impliedCap / nominal;
-                    if (ratio < 0.5 || ratio > 1.5) {
-                        return computedKwh;
-                    }
+                // PHEV: the BYD HAL remaining-energy getters are unreliable —
+                // half-scale on some firmwares, STALE/FROZEN when the ICE is
+                // running, and frame-ambiguous (no single sample can tell half
+                // from gross). We therefore do NOT trust the raw getter for
+                // display or accounting on PHEV: remaining is ALWAYS synthesized
+                // from the reliable SOC + the user's nominal + the capped SOH.
+                // This is the one value every surface (dash, MQTT, ABRP, trips,
+                // history) reads, so they agree by construction and it tracks SOC
+                // live — eliminating the frozen / doubled / halved / divergent
+                // symptoms at the root. (The raw getter still feeds the INDEPENDENT
+                // SOH anchors — capacity-Ah coulomb count, calibration — never this
+                // display path, so there is no self-reference loop.)
+                if (isPhev()) {
+                    return computedKwh;
                 }
 
-                // Trust raw BMS reading on both PHEV and BEV when it passes
-                // the ratio gate. Previously PHEVs were forced down the
-                // computed-from-SOC path even when their getBatteryPowerHEV
-                // returned a healthy value — that broke per-trip kWh
-                // accounting (kwhStart-kwhEnd was just socDelta × usableKwh,
-                // discarded the BMS's actual remaining-energy measurement,
-                // and missed all engine-driven HEV charging during the trip).
-                if (rawKwh > 0) return rawKwh;
+                // BEV: getBatteryRemainPowerEV is authoritative. Trust it within a
+                // plausible band (a pack can't exceed nameplate → 1.12 ceiling;
+                // a degraded pack reads below → 0.5 floor); else synthesize.
+                if (rawKwh > 0) {
+                    double impliedCap = rawKwh / (soc / 100.0);
+                    double ratio = impliedCap / nominal;
+                    if (ratio < 0.5 || ratio > 1.12) {
+                        return computedKwh;
+                    }
+                    return rawKwh;
+                }
 
                 // No raw reading: synthesize from SOC × nominal × SOH.
                 return computedKwh;

@@ -1165,12 +1165,14 @@
     <string name="roadsense_map_search_to_save">%1$s olarak ayarlamak için bir yer arayın</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">Yolculuk geri yüklendi</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">Belirteç güvenli bir şekilde saklanır ve uygulama ile daemon süreçleri arasında paylaşılır.</string>
-    <string name="cloudflared_token_hint">cloudflared belirtecini girin</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">Token şifrelenmiş olarak saklanır ve uygulama ile daemon süreçleri arasında paylaşılır.</string>
+    <string name="cloudflared_token_hint">cloudflared token\'ını girin</string>
     <string name="cloudflare_paid_version">Cloudflare Ücretli Sürüm</string>
-    <string name="dialog_cloudflared_settings_title">🌐 Cloudflared Ayarları</string>
-    <string name="dialog_cloudflared_settings_message">Ücretli Cloudflare mı yoksa trycloudflare mı kullandığınızı tanımlayın. Ücretli Cloudflare kullanıyorsanız, tünel belirtecinizi girin.</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">Ücretli sürüme ayarlandığında belirteç boş olamaz</string>
+    <string name="dialog_cloudflared_settings_title">Cloudflared Ayarları</string>
+    <string name="dialog_cloudflared_settings_message">Ücretli Cloudflare mi yoksa trycloudflare mi kullandığınızı belirleyin. Ücretli Cloudflare kullanıyorsanız tünel token\'ınızı girin.</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">Ücretli sürümü ayarlarsanız token boş olamaz</string>
+    <string name="toast_cloudflared_token_invalid">Geçersiz token: yalnızca harf, rakam ve . _ - = karakterlerini kullanın</string>
     <string name="toast_cloudflared_saved_settings">Cloudflared ayarları kaydedildi</string>
 </resources>

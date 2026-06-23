@@ -22,7 +22,16 @@ public interface CommandContext {
      * Send a video to the chat.
      */
     boolean sendVideo(long chatId, String videoPath, String caption);
-    
+
+    /**
+     * Send a file to the chat as a document (e.g. an exported settings backup).
+     * Default impl returns false so existing contexts that don't support
+     * documents degrade gracefully rather than failing to compile.
+     */
+    default boolean sendDocument(long chatId, String filePath, String caption) {
+        return false;
+    }
+
     /**
      * Send an IPC command to a local service.
      */

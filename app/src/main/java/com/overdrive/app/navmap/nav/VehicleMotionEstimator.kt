@@ -50,6 +50,9 @@ class VehicleMotionEstimator {
     private var prevTruth: Motion? = null
     /** Timestamp of the last truth fix we ACCEPTED — to drop identical re-polls. */
     private var lastAcceptedTs: Long = 0L
+    /** Last CAN brake-pedal position (0..100) from a truth fix, or null if the CAN bus
+     *  didn't report it. Drives the dead-reckon deceleration model in [estimate]. */
+    private var lastBrakePercent: Int? = null
 
     /** True once a first fix has been accepted (so callers can gate rendering). */
     fun hasFix(): Boolean = filtered != null
@@ -59,6 +62,7 @@ class VehicleMotionEstimator {
         filtered = null
         prevTruth = null
         lastAcceptedTs = 0L
+        lastBrakePercent = null
     }
 
     /**
@@ -70,9 +74,13 @@ class VehicleMotionEstimator {
     fun onTruthPoint(
         lat: Double, lng: Double, speedMps: Double,
         rawBearingDeg: Double?, accuracyM: Double?, tsMs: Long,
+        brakePercent: Int? = null,
     ): Motion {
         val acc = accuracyM ?: DEFAULT_ACCURACY_M
         val cur = filtered
+        // Remember the latest CAN brake position for the dead-reckon decel model.
+        // Held across re-polls (a duplicate fix returns early below without clearing it).
+        if (brakePercent != null) lastBrakePercent = brakePercent
 
         // First fix → seed directly.
         if (cur == null) {
@@ -156,7 +164,23 @@ class VehicleMotionEstimator {
         if (m.speedMps < STATIONARY_SPEED_MPS) return m.copy(timestampMs = nowMs)
         val dtS = ((nowMs - m.timestampMs).coerceAtLeast(0L) / 1000.0).coerceAtMost(MAX_DEAD_RECKON_S)
         if (dtS <= 0.0) return m
-        val dist = m.speedMps * dtS
+        // Brake-aware dead-reckoning: at constant speed the puck over-travels when the
+        // driver is braking (the next fix lands SHORTER than predicted → the puck
+        // snaps back). When the CAN bus reports the brake pedal pressed, shed predicted
+        // speed over the window with a constant-decel model so the puck eases toward a
+        // stop. The decel rate scales with pedal travel up to BRAKE_MAX_DECEL_MPS2
+        // (a firm-but-not-emergency stop); a light/zero brake leaves motion unchanged.
+        // dist = integral of v(t) over [0,dtS] with v(t)=v0 - a*t, clamped at the stop.
+        val brake = lastBrakePercent ?: 0
+        val dist: Double
+        if (brake > BRAKE_MIN_PERCENT) {
+            val a = BRAKE_MAX_DECEL_MPS2 * (brake.coerceAtMost(100) / 100.0)
+            val tStop = m.speedMps / a                       // time to reach 0 speed
+            val tEff = minOf(dtS, tStop)                     // don't integrate past the stop
+            dist = m.speedMps * tEff - 0.5 * a * tEff * tEff // ∫(v0 - a t) dt
+        } else {
+            dist = m.speedMps * dtS
+        }
         val (plat, plng) = destinationPoint(m.lat, m.lng, m.bearingDeg, dist)
         return m.copy(lat = plat, lng = plng, timestampMs = nowMs)
     }
@@ -213,5 +237,13 @@ class VehicleMotionEstimator {
         // while still bounding a fully-dropped fix to ~3s of travel.
         private const val MAX_DEAD_RECKON_S = 3.0
         private const val STATIONARY_SPEED_MPS = 1.4
+        // Brake-anticipation dead-reckon (CAN brakePercent). Below BRAKE_MIN_PERCENT the
+        // pedal is effectively released (sensor noise / light coast) → constant-speed
+        // extrapolation. At full travel the model decelerates at BRAKE_MAX_DECEL_MPS2
+        // (~3 m/s² — a firm comfortable stop, well under an ABS emergency ~8 m/s²), so a
+        // hard brake eases the puck to a halt over the ~1-2s inter-fix gap instead of
+        // sailing past the stop line and snapping back when the next fix lands short.
+        private const val BRAKE_MIN_PERCENT = 8
+        private const val BRAKE_MAX_DECEL_MPS2 = 3.0
     }
 }

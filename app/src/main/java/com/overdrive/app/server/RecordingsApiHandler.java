@@ -165,9 +165,12 @@ public class RecordingsApiHandler {
             String placeContains = params.get("placeContains");
             // Country narrowing — ISO 3166-1 alpha-2 lowercased.
             String country = params.get("country");
+            // Storage-volume narrowing — comma-separated INTERNAL/SD_CARD/USB.
+            // Missing = all volumes (the index already spans every location).
+            String storage = params.get("storage");
             listRecordings(out, type, date, page, pageSize,
                     classes, severities, proximities, place,
-                    placeContains, country);
+                    placeContains, country, storage);
             return true;
         }
 
@@ -188,8 +191,9 @@ public class RecordingsApiHandler {
             String proximities = params.get("proximity");
             String placeContains = params.get("placeContains");
             String country = params.get("country");
+            String storage = params.get("storage");
             listPlaces(out, type, date, classes, severities, proximities,
-                    placeContains, country);
+                    placeContains, country, storage);
             return true;
         }
 
@@ -643,7 +647,7 @@ public class RecordingsApiHandler {
     private static void listRecordings(OutputStream out, String typeFilter, String dateFilter,
                                        int page, int pageSize) throws Exception {
         listRecordings(out, typeFilter, dateFilter, page, pageSize,
-                null, null, null, null, null, null);
+                null, null, null, null, null, null, null);
     }
 
     /**
@@ -665,7 +669,8 @@ public class RecordingsApiHandler {
                                        String proximityFilter,
                                        String placeFilter,
                                        String placeContainsFilter,
-                                       String countryFilter) throws Exception {
+                                       String countryFilter,
+                                       String storageFilter) throws Exception {
         RecordingsIndex idx = RecordingsIndex.getInstance();
         RecordingsIndex.WarmupSnapshot snap = idx.warmupState();
         if (!snap.complete && snap.total > 0) {
@@ -690,7 +695,7 @@ public class RecordingsApiHandler {
 
         RecordingsIndex.Filter f = buildFilter(typeFilter, dateFilter,
                 classFilter, severityFilter, proximityFilter, placeFilter,
-                placeContainsFilter, countryFilter);
+                placeContainsFilter, countryFilter, storageFilter);
 
         int totalCount = idx.queryCount(f);
         int totalPages = (int) Math.ceil((double) totalCount / pageSize);
@@ -741,7 +746,8 @@ public class RecordingsApiHandler {
                                                       String classFilter, String severityFilter,
                                                       String proximityFilter, String placeFilter,
                                                       String placeContainsFilter,
-                                                      String countryFilter) {
+                                                      String countryFilter,
+                                                      String storageFilter) {
         RecordingsIndex.Filter f = new RecordingsIndex.Filter();
         // Multi-type CSV is the native-fragment path (Dashcam segment
         // wants NORMAL + OEM_DASHCAM + PROXIMITY together). Single-type
@@ -779,6 +785,10 @@ public class RecordingsApiHandler {
                 ? placeContainsFilter.toLowerCase(Locale.US) : null;
         f.country = (countryFilter != null && !countryFilter.isEmpty())
                 ? countryFilter.toLowerCase(Locale.US) : null;
+        // Storage-volume filter: comma-separated INTERNAL / SD_CARD / USB,
+        // upper-cased to match the stored column tokens. Empty/missing = all
+        // volumes (the index already spans internal + SD + USB).
+        f.storages = splitCsvUpper(storageFilter);
         return f;
     }
 
@@ -855,13 +865,14 @@ public class RecordingsApiHandler {
                                    String classFilter, String severityFilter,
                                    String proximityFilter,
                                    String placeContainsFilter,
-                                   String countryFilter) throws Exception {
+                                   String countryFilter,
+                                   String storageFilter) throws Exception {
         // Indexed GROUP BY query — replaces the prior in-memory bucket
         // walk over the full filtered set. Same response shape, ~10-100x
         // faster on a 1000-clip library.
         RecordingsIndex.Filter f = buildFilter(typeFilter, dateFilter,
                 classFilter, severityFilter, proximityFilter,
-                /* placeFilter */ null, placeContainsFilter, countryFilter);
+                /* placeFilter */ null, placeContainsFilter, countryFilter, storageFilter);
         List<RecordingsIndex.PlaceBucket> buckets =
                 RecordingsIndex.getInstance().queryPlaces(f, PLACES_LIMIT);
 

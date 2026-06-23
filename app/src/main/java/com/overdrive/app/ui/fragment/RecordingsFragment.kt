@@ -65,6 +65,11 @@ class RecordingsFragment : Fragment() {
     // -------- Filter state owned at this level --------
     private val actorClassFilter = mutableSetOf<String>()  // lowercase
     private val severityFilter = mutableSetOf<String>()    // upper
+    // Physical-volume filter: "INTERNAL" / "SD_CARD" / "USB". Empty = all
+    // volumes (default). Applies to BOTH Dashcam and Surveillance segments —
+    // the daemon index already spans every storage location, so this just
+    // narrows the view to where each clip physically landed.
+    private val storageFilter = mutableSetOf<String>()
     /**
      * Dashcam-only: narrow visible list to a specific type. "NORMAL" =
      * continuous-record cam_* clips, "PROXIMITY" = radar-triggered clips.
@@ -195,6 +200,7 @@ class RecordingsFragment : Fragment() {
             state.getStringArray(KEY_SEVERITY)?.let { severityFilter.addAll(it) }
             state.getStringArray(KEY_DASHCAM_TYPES)?.let { dashcamTypes.addAll(it) }
             state.getStringArray(KEY_PLACES)?.let { placeFilter.addAll(it) }
+            state.getStringArray(KEY_STORAGE)?.let { storageFilter.addAll(it) }
             val y = state.getInt(KEY_DATE_Y, -1)
             val m = state.getInt(KEY_DATE_M, -1)
             val d = state.getInt(KEY_DATE_D, -1)
@@ -264,6 +270,7 @@ class RecordingsFragment : Fragment() {
         outState.putStringArray(KEY_SEVERITY, severityFilter.toTypedArray())
         outState.putStringArray(KEY_DASHCAM_TYPES, dashcamTypes.toTypedArray())
         outState.putStringArray(KEY_PLACES, placeFilter.toTypedArray())
+        outState.putStringArray(KEY_STORAGE, storageFilter.toTypedArray())
         outState.putInt(KEY_DATE_Y, calendar.get(Calendar.YEAR))
         outState.putInt(KEY_DATE_M, calendar.get(Calendar.MONTH))
         outState.putInt(KEY_DATE_D, selectedDay)
@@ -419,7 +426,8 @@ class RecordingsFragment : Fragment() {
             extraSource = extra,
             narrowToDate = dateNarrowed,
             places = placeFilter.toSet(),
-            placeContains = placeContainsQuery.takeIf { it.isNotEmpty() }
+            placeContains = placeContainsQuery.takeIf { it.isNotEmpty() },
+            storages = storageFilter.toSet()
         )
     }
 
@@ -749,6 +757,28 @@ class RecordingsFragment : Fragment() {
             }
         }
 
+        // STORAGE — multi-select toggle, "Any" clears the row. Shown in both
+        // segments; narrows the (already cross-volume) library to one physical
+        // location.
+        view.findViewById<Chip>(R.id.chipStorageAny)?.setOnClickListener {
+            storageFilter.clear()
+            syncChipChecks(view)
+            onFiltersChanged(view)
+        }
+        val mapStorage = mapOf(
+            view.findViewById<Chip>(R.id.chipStorageInternal) to "INTERNAL",
+            view.findViewById<Chip>(R.id.chipStorageSd) to "SD_CARD",
+            view.findViewById<Chip>(R.id.chipStorageUsb) to "USB"
+        )
+        for ((chip, name) in mapStorage) {
+            chip?.setOnClickListener {
+                if (storageFilter.contains(name)) storageFilter.remove(name)
+                else storageFilter.add(name)
+                syncChipChecks(view)
+                onFiltersChanged(view)
+            }
+        }
+
         syncChipChecks(view)
     }
 
@@ -763,6 +793,10 @@ class RecordingsFragment : Fragment() {
         view.findViewById<Chip>(R.id.chipSevCritical)?.isChecked = severityFilter.contains("CRITICAL")
         view.findViewById<Chip>(R.id.chipTypeNormal)?.isChecked = dashcamTypes.contains("NORMAL")
         view.findViewById<Chip>(R.id.chipTypeProximity)?.isChecked = dashcamTypes.contains("PROXIMITY")
+        view.findViewById<Chip>(R.id.chipStorageAny)?.isChecked = storageFilter.isEmpty()
+        view.findViewById<Chip>(R.id.chipStorageInternal)?.isChecked = storageFilter.contains("INTERNAL")
+        view.findViewById<Chip>(R.id.chipStorageSd)?.isChecked = storageFilter.contains("SD_CARD")
+        view.findViewById<Chip>(R.id.chipStorageUsb)?.isChecked = storageFilter.contains("USB")
     }
 
     private fun setupResetButton(view: View) {
@@ -775,6 +809,7 @@ class RecordingsFragment : Fragment() {
             severityFilter.clear()
             dashcamTypes.clear()
             placeFilter.clear()
+            storageFilter.clear()
             placeContainsQuery = ""
             syncChipChecks(view)
             renderPlaceChips(view)
@@ -857,7 +892,10 @@ class RecordingsFragment : Fragment() {
 
     private fun renderActiveFilterAffordances(view: View) {
         val searchActive = placeContainsQuery.isNotEmpty()
-        val chipsActive = when (currentSource) {
+        // Storage applies in BOTH segments, so it contributes to the
+        // active-filter affordance regardless of the current source.
+        val storageActive = storageFilter.isNotEmpty()
+        val chipsActive = storageActive || when (currentSource) {
             Source.DASHCAM -> dashcamTypes.isNotEmpty() || placeFilter.isNotEmpty() || searchActive
             Source.SURVEILLANCE -> actorClassFilter.isNotEmpty()
                 || severityFilter.isNotEmpty()
@@ -1356,6 +1394,7 @@ class RecordingsFragment : Fragment() {
         private const val KEY_SEVERITY = "recordings_severity"
         private const val KEY_DASHCAM_TYPES = "recordings_dashcam_types"
         private const val KEY_PLACES = "recordings_places"
+        private const val KEY_STORAGE = "recordings_storage"
         private const val KEY_DATE_Y = "recordings_date_year"
         private const val KEY_DATE_M = "recordings_date_month"
         private const val KEY_DATE_D = "recordings_date_day"

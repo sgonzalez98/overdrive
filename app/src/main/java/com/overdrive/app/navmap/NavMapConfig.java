@@ -1,6 +1,7 @@
 package com.overdrive.app.navmap;
 
 import com.overdrive.app.byd.cloud.crypto.CredentialCipher;
+import com.overdrive.app.byd.cloud.crypto.CredentialUpgrade;
 import com.overdrive.app.config.UnifiedConfigManager;
 import com.overdrive.app.logging.DaemonLogger;
 
@@ -67,6 +68,12 @@ public final class NavMapConfig {
         // Migrate legacy plaintext to protected form on first read (best-effort).
         if (!storedKey.isEmpty() && !CredentialCipher.isEncrypted(storedKey)) {
             migrateRoutingKey(navMap, routingApiKey);
+        } else {
+            // Upgrade a legacy firmware-fingerprint-bound ciphertext to the
+            // stable key so an OTA can't strand it (same fix as the Telegram
+            // token + BYD-cloud password). Single-key-delta + CAS so a
+            // concurrent clearRouting()/saveRouting() isn't resurrected.
+            CredentialUpgrade.reEncryptKeyIfLegacy(SECTION, "routingApiKey");
         }
 
         return new NavMapConfig(
@@ -79,8 +86,13 @@ public final class NavMapConfig {
     /** Migrate a legacy plaintext routing key to protected form. */
     private static void migrateRoutingKey(JSONObject navMap, String plainKey) {
         try {
-            navMap.put("routingApiKey", CredentialCipher.encrypt(plainKey));
-            UnifiedConfigManager.updateSection(SECTION, navMap);
+            String encrypted = CredentialCipher.encrypt(plainKey);
+            if (!CredentialCipher.isEncrypted(encrypted)) return;  // fail-open guard: never write plaintext back
+            // Single-key delta (not the whole stale section) so a concurrent
+            // clearRouting()/saveRouting() on other navMap keys isn't resurrected.
+            JSONObject delta = new JSONObject();
+            delta.put("routingApiKey", encrypted);
+            UnifiedConfigManager.updateSection(SECTION, delta);
         } catch (Exception e) {
             // Best-effort — plaintext still works, will migrate on next save.
         }
@@ -103,7 +115,16 @@ public final class NavMapConfig {
                     (routingEndpoint != null && !routingEndpoint.trim().isEmpty())
                             ? routingEndpoint.trim()
                             : DEFAULT_ROUTING_ENDPOINT);
-            navMap.put("routingApiKey", CredentialCipher.encrypt(routingApiKey));
+            String encKey = CredentialCipher.encrypt(routingApiKey);
+            // Never persist a non-empty key in cleartext (encrypt() is fail-open
+            // on a JCE error). Empty key legitimately stays "". On failure skip
+            // the write rather than write a bare key to the 0666 store.
+            if (routingApiKey != null && !routingApiKey.isEmpty()
+                    && !CredentialCipher.isEncrypted(encKey)) {
+                logger.warn("Credential encryption failed; aborting navMap save (not persisting plaintext)");
+                return;
+            }
+            navMap.put("routingApiKey", encKey);
         } catch (Exception e) {
             throw new RuntimeException("Failed to build navMap config JSON", e);
         }

@@ -439,34 +439,35 @@ public class SocHistoryDatabase {
                         }
                     } catch (Exception ignored) { /* leave NaN */ }
 
-                    if (rawRemainKwh > 0 && soc > 0
+                    // Drivetrain gate: the live `remainKwh / SOC` SOH formula and
+                    // the peak-charge frame anchor BOTH consume the raw BYD getter,
+                    // which on PHEV is unreliable (half-scale / stale-when-ICE-runs /
+                    // frame-ambiguous — a single sample cannot tell half from gross).
+                    // Feeding them on PHEV produced the noisy 92-99% SOH and the
+                    // frozen-22.4 → 110% rail. So on PHEV we drive SOH ONLY from the
+                    // independent anchors below (capacity-Ah coulomb count + the
+                    // calibration charge-cycle integration); currentSoh stays at its
+                    // honest 100% default until one of those proves real degradation.
+                    // BEV keeps the live formula — its getBatteryRemainPowerEV is
+                    // authoritative.
+                    boolean isPhevForSoh = false;
+                    try {
+                        com.overdrive.app.byd.BydDataCollector pcol =
+                            com.overdrive.app.byd.BydDataCollector.getInstance();
+                        isPhevForSoh = pcol != null && pcol.isInitialized() && pcol.isPhevPublic();
+                    } catch (Throwable ignored) {}
+
+                    if (!isPhevForSoh && rawRemainKwh > 0 && soc > 0
                             && sohEst.getNominalCapacityKwh() > 0) {
                         double impliedCap = rawRemainKwh / (soc / 100.0);
                         double nominal = sohEst.getNominalCapacityKwh();
                         double ratio = impliedCap / nominal;
-                        // Skip when raw BMS reads outside 50-150% of nominal —
-                        // those are firmware-junk values, not real degradation.
-                        if (ratio >= 0.5 && ratio <= 1.5) {
+                        // BEV: trust the raw reading within a plausible band (pack
+                        // can't exceed nameplate → 1.12; degraded reads below → 0.5).
+                        if (ratio >= 0.5 && ratio <= 1.12) {
                             boolean atRest = isVehicleAtRest();
                             sohEst.updateFromEnergy(rawRemainKwh, soc, highCellV, atRest);
                         }
-
-                        // PHEV-only: feed the peak-charge frame anchor. The
-                        // estimator gates on isPhev internally and on
-                        // SOC≥99%, so we can call unconditionally. We feed
-                        // the raw BMS reading even when it failed the
-                        // 50-150% nominal-ratio gate above — the whole
-                        // point of the frame anchor is to catch the case
-                        // where the user-entered nominal is in a different
-                        // unit frame than remainKwh, which inherently
-                        // produces a low ratio. observePeakAtFullCharge has
-                        // its own SOC-as-kWh-bug guard.
-                        try {
-                            com.overdrive.app.byd.BydDataCollector pcol =
-                                com.overdrive.app.byd.BydDataCollector.getInstance();
-                            boolean isPhev = pcol != null && pcol.isInitialized() && pcol.isPhevPublic();
-                            sohEst.observePeakAtFullCharge(rawRemainKwh, soc, isPhev);
-                        } catch (Throwable ignored) { /* best-effort */ }
                     }
 
                     // PHEV-only secondary anchor from the BMS Ah counter.
@@ -539,8 +540,10 @@ public class SocHistoryDatabase {
             double sohPercent = -999;
             try {
                 com.overdrive.app.abrp.SohEstimator sohEst = getSohEstimator();
-                if (sohEst != null && sohEst.hasEstimate()) {
-                    sohPercent = sohEst.getCurrentSoh();
+                if (sohEst != null && sohEst.hasDisplaySoh()) {
+                    // Displayed (capped, anchored) SOH so stored history agrees with
+                    // every live surface.
+                    sohPercent = sohEst.getDisplaySoh();
                     logger.debug("SOH from estimator: " + String.format("%.1f", sohPercent) + "%");
                 } else {
                     // Fallback: read from persisted file
@@ -1024,19 +1027,32 @@ public class SocHistoryDatabase {
     public void fixStaleRemainingKwh(double nominalCapacityKwh) {
         if (!isInitialized || connection == null || nominalCapacityKwh <= 0) return;
         try {
-            // Update records where remaining_kwh deviates >30% from SOC-derived value
-            String sql = "UPDATE " + TABLE_SOC + 
+            // Effective per-row energy uses the SAME frame as the live store and
+            // display: (soc/100) × nominal × (SOH/100). Including the SOH factor
+            // (was omitted) means a migrated row and a freshly-written row for the
+            // same SOC match once SOH<100, removing the ~8% step at the boundary.
+            double sohFrac = 1.0;
+            try {
+                if (sohEstimator != null && sohEstimator.hasDisplaySoh()) {
+                    sohFrac = sohEstimator.getDisplaySoh() / 100.0;
+                }
+            } catch (Throwable ignored) {}
+            double effPerSoc = nominalCapacityKwh * sohFrac;   // kWh per 100% SOC
+            // Rewrite rows deviating >12% from the SOC-derived value (matches the
+            // display gate's tolerance; was a looser 30%).
+            String sql = "UPDATE " + TABLE_SOC +
                 " SET remaining_kwh = (soc_percent / 100.0) * ? " +
                 "WHERE soc_percent > 0 AND remaining_kwh > 0 " +
-                "AND ABS(remaining_kwh - (soc_percent / 100.0) * ?) / ((soc_percent / 100.0) * ?) > 0.30";
+                "AND ABS(remaining_kwh - (soc_percent / 100.0) * ?) / ((soc_percent / 100.0) * ?) > 0.12";
             try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
-                pstmt.setDouble(1, nominalCapacityKwh);
-                pstmt.setDouble(2, nominalCapacityKwh);
-                pstmt.setDouble(3, nominalCapacityKwh);
+                pstmt.setDouble(1, effPerSoc);
+                pstmt.setDouble(2, effPerSoc);
+                pstmt.setDouble(3, effPerSoc);
                 int updated = pstmt.executeUpdate();
                 if (updated > 0) {
-                    logger.info("Fixed " + updated + " stale remaining_kwh records (nominal=" + 
-                        String.format("%.1f", nominalCapacityKwh) + " kWh)");
+                    logger.info("Fixed " + updated + " stale remaining_kwh records (nominal=" +
+                        String.format("%.1f", nominalCapacityKwh) + " kWh, SOH="
+                        + String.format("%.0f", sohFrac * 100) + "%)");
                 }
             }
         } catch (Exception e) {
@@ -1462,8 +1478,14 @@ public class SocHistoryDatabase {
                 if (!Double.isNaN(data.socPercent) && data.socPercent >= 0 && data.socPercent <= 100) {
                     socPercent = data.socPercent;
                 }
-                if (!Double.isNaN(data.remainKwh) && data.remainKwh > 0) {
-                    remainingKwh = data.remainKwh;
+                // Single source of truth — NOT raw data.remainKwh (unreliable/frozen
+                // on PHEV). Keeps acc-event deltas in the same frame as the live
+                // store + display, so parked-delta math can't surface a phantom.
+                try {
+                    double k = VehicleDataMonitor.getInstance().getBatteryRemainPowerKwh();
+                    if (k > 0) remainingKwh = k;
+                } catch (Throwable ignored) {
+                    if (!Double.isNaN(data.remainKwh) && data.remainKwh > 0) remainingKwh = data.remainKwh;
                 }
                 if (!Double.isNaN(data.voltage12v) && data.voltage12v > 0) {
                     voltageV = data.voltage12v;

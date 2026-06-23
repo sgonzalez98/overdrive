@@ -42,7 +42,16 @@ public class MotionPipelineV2 {
     // Old result: brightnessSuppressed(1) + 3 padding = ends at same offset
     // New result: brightnessSuppressed(1) + shadowFiltered(1) + 2 padding
     private boolean nativeHasShadowFilter = false;
-    
+
+    // True when the loaded native library includes the flow-coherence stage
+    // (Phase 2). Detected from the config struct size growing by the 3 new
+    // coherence params (12 bytes) past the shadow-filter layout. When false,
+    // processFrame leaves QuadrantResult.flowCoherence/netDriftBlocks at -1
+    // and the Java trust gate falls back to tracker-only — i.e. a partial or
+    // older .so degrades to the pre-coherence behaviour, never crashes on a
+    // size/offset mismatch.
+    private boolean nativeHasCoherence = false;
+
     // Pre-allocated direct ByteBuffers for JNI (zero GC)
     private ByteBuffer configBuffer;
     private ByteBuffer resultBuffer;
@@ -66,6 +75,20 @@ public class MotionPipelineV2 {
         public float meanLuma;
         public boolean brightnessSuppressed;
         public boolean shadowFiltered;
+        // Motion DIRECTIONALITY signals (native Phase 2 — flow coherence).
+        // flowCoherence = |net flow| / |gross flow| over the largest connected
+        // component's blocks: ~1.0 = rigid coherent translation (real intruder),
+        // ~0.0 = in-place oscillation (flag / foliage / sweeping shadow whose
+        // per-block vectors cancel). netDriftBlocks = magnitude of the windowed
+        // cumulative net displacement of the component centroid (a real walker
+        // accumulates drift; a flag random-walks near zero).
+        //
+        // Default -1 = "native did not compute this" (old .so, or this build).
+        // Consumers MUST treat <0 as "unavailable" and fall back to other trust
+        // signals — never read a negative value as low coherence. Only populated
+        // when {@link #isNativeCoherenceSupported()} is true.
+        public float flowCoherence = -1f;
+        public float netDriftBlocks = -1f;
         public float[] blockConfidence = new float[TOTAL_BLOCKS];
     }
     
@@ -119,7 +142,28 @@ public class MotionPipelineV2 {
         public float shadowPixelFraction = 0.6f;
         // Oscillation transitions threshold (in 10-frame window)
         public int oscillationThreshold = 3;
-        
+
+        // ---- Motion directionality / flow-coherence (native Phase 2) ----
+        // A near-stationary connected-component centroid is classified as
+        // loitering (THREAT_HIGH) on geometry alone, which a waving flag /
+        // sweeping shadow trivially satisfies. These gate the native demotion
+        // of an INCOHERENT stationary loiter (flag/foliage/shadow) down to
+        // THREAT_MEDIUM so it must clear the YOLO confirmation gate, while a
+        // COHERENTLY translating approach keeps the fast THREAT_HIGH path.
+        // Only consumed by a coherence-capable native build
+        // ({@link #isNativeCoherenceSupported()}); ignored by older .so.
+        //
+        // coherenceRatioMin: below this |net|/|gross| ratio the component's
+        //   flow is "incoherent" (oscillating in place). 0.35 default.
+        // coherenceNetMin: windowed cumulative net drift (in blocks) above
+        //   which the motion counts as coherent translation regardless of the
+        //   instantaneous ratio (slow but steady real approach). 1.5 default.
+        // coherenceMinFrames: flow history required before the signal is
+        //   trusted; until then flowCoherence is reported as -1 (fail-open).
+        public float coherenceRatioMin = 0.35f;
+        public float coherenceNetMin = 1.5f;
+        public int coherenceMinFrames = 12;
+
         /**
          * Java-side gate values for a sensitivity level. Used by per-quadrant
          * post-filtering: the native pipeline runs once with the most-permissive
@@ -415,11 +459,27 @@ public class MotionPipelineV2 {
             // Also accept >= 76 in case future fields are added after shadow fields.
             final int BASE_CONFIG_SIZE = 60;
             final int SHADOW_FIELDS_SIZE = 16;  // 4 fields × 4 bytes each
+            final int COHERENCE_FIELDS_SIZE = 12;  // coherenceRatioMin + coherenceNetMin + coherenceMinFrames
             nativeHasShadowFilter = (configStructSize >= BASE_CONFIG_SIZE + SHADOW_FIELDS_SIZE);
-            
-            logger.info(String.format("V2 struct sizes: config=%d, result=%d (total result=%d), shadowFilter=%s",
+            // Phase 2 coherence stage: config struct grew by the 3 coherence
+            // params past the shadow layout. Mirrors the shadow-fields probe.
+            nativeHasCoherence = (configStructSize >= BASE_CONFIG_SIZE + SHADOW_FIELDS_SIZE + COHERENCE_FIELDS_SIZE);
+
+            // Result-struct sanity: the deserializer reads a fixed field layout
+            // then TOTAL_BLOCKS floats. If the native result size doesn't match
+            // what we expect for the detected capability tier, disable coherence
+            // parsing so we never read past / short of the struct (torn floats).
+            int expectedResultBase = resultStructSize - TOTAL_BLOCKS * 4;
+            if (nativeHasCoherence && expectedResultBase < 0) {
+                logger.warn("V2 result struct too small for coherence layout (result=" + resultStructSize
+                        + ", blocks=" + (TOTAL_BLOCKS * 4) + ") — disabling coherence parse");
+                nativeHasCoherence = false;
+            }
+
+            logger.info(String.format("V2 struct sizes: config=%d, result=%d (total result=%d), shadowFilter=%s, coherence=%s",
                     configStructSize, resultStructSize, resultStructSize * NUM_QUADRANTS,
-                    nativeHasShadowFilter ? "supported" : "NOT supported (old native)"));
+                    nativeHasShadowFilter ? "supported" : "NOT supported (old native)",
+                    nativeHasCoherence ? "supported" : "NOT supported (Phase-1 native)"));
             
             // Allocate direct ByteBuffers
             configBuffer = ByteBuffer.allocateDirect(configStructSize);
@@ -499,7 +559,15 @@ public class MotionPipelineV2 {
             configBuffer.putFloat(config.shadowPixelFraction);
             configBuffer.putInt(config.oscillationThreshold);
         }
-        
+
+        // Flow-coherence parameters (only if native supports them — Phase 2).
+        // Must come AFTER the shadow fields to match the C struct layout.
+        if (nativeHasCoherence) {
+            configBuffer.putFloat(config.coherenceRatioMin);
+            configBuffer.putFloat(config.coherenceNetMin);
+            configBuffer.putInt(config.coherenceMinFrames);
+        }
+
         configBuffer.flip();
     }
     
@@ -554,8 +622,20 @@ public class MotionPipelineV2 {
             result.shadowFiltered = false;
             buf.get(); buf.get(); buf.get();  // 3 bytes padding
         }
-        
-        // Block confidence array (70 floats)
+
+        // Flow-coherence floats (Phase 2). These are declared in the C struct
+        // BEFORE the blockConfidence[] array, so they MUST be read here, before
+        // the 70-float loop below — otherwise both reads tear. When the native
+        // build predates coherence, leave the -1 sentinel and don't advance.
+        if (nativeHasCoherence) {
+            result.flowCoherence = buf.getFloat();
+            result.netDriftBlocks = buf.getFloat();
+        } else {
+            result.flowCoherence = -1f;
+            result.netDriftBlocks = -1f;
+        }
+
+        // Block confidence array (70 floats) — always the trailing field.
         for (int i = 0; i < TOTAL_BLOCKS; i++) {
             result.blockConfidence[i] = buf.getFloat();
         }
@@ -625,6 +705,15 @@ public class MotionPipelineV2 {
      */
     public boolean isNativeShadowFilterSupported() {
         return nativeHasShadowFilter;
+    }
+
+    /**
+     * Check if the loaded native library computes flow-coherence (Phase 2).
+     * When false, {@link QuadrantResult#flowCoherence} stays at -1 and callers
+     * must fall back to other trust signals (e.g. the person tracker).
+     */
+    public boolean isNativeCoherenceSupported() {
+        return nativeHasCoherence;
     }
     
     public QuadrantResult[] getResults() {

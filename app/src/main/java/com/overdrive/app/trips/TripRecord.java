@@ -33,6 +33,12 @@ public class TripRecord {
     public boolean isPhev;             // Drivetrain at trip end
     public double fuelPctStart = -1;   // 0-100, -1 = unavailable
     public double fuelPctEnd = -1;     // 0-100, -1 = unavailable
+    // Cumulative HAL fuel-consumption accumulator (litres) snapshotted at
+    // trip start/end. The delta (end-start) is the vehicle's own metered
+    // litres burned — preferred over the lossy fuelPct×tank estimate. -1 =
+    // unavailable (BEV, or trim without the accumulator) → fall back to pct.
+    public double fuelConStart = -1;
+    public double fuelConEnd = -1;
     public double litresUsed;          // Computed litres burned this trip
     public double fuelPricePerL;       // Price snapshot at trip end
     public double fuelCost;            // litresUsed × fuelPricePerL
@@ -169,6 +175,8 @@ public class TripRecord {
             json.put("isPhev", isPhev);
             if (fuelPctStart >= 0) json.put("fuelPctStart", fuelPctStart);
             if (fuelPctEnd >= 0) json.put("fuelPctEnd", fuelPctEnd);
+            if (fuelConStart >= 0) json.put("fuelConStart", fuelConStart);
+            if (fuelConEnd >= 0) json.put("fuelConEnd", fuelConEnd);
             json.put("litresUsed", litresUsed);
             json.put("fuelPricePerL", fuelPricePerL);
             json.put("fuelCost", fuelCost);
@@ -224,6 +232,8 @@ public class TripRecord {
             json.put("isPhev", isPhev);
             if (fuelPctStart >= 0) json.put("fuelPctStart", fuelPctStart);
             if (fuelPctEnd >= 0) json.put("fuelPctEnd", fuelPctEnd);
+            if (fuelConStart >= 0) json.put("fuelConStart", fuelConStart);
+            if (fuelConEnd >= 0) json.put("fuelConEnd", fuelConEnd);
             json.put("litresUsed", litresUsed);
             json.put("fuelPricePerL", fuelPricePerL);
             json.put("fuelCost", fuelCost);

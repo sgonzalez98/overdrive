@@ -314,10 +314,13 @@ BYD.pip = {
         };
         this.sotaPlayer.onDisconnected = () => {
             document.getElementById('pipDot').classList.remove('live');
-            // Reconnect if still visible and streaming
-            if (this.isVisible && this.streamStarted) {
+            // Reconnect if still visible and streaming — but NOT while the tab
+            // is hidden. SotaPlayer suspends itself on hide and auto-resumes on
+            // show; re-driving start() here would re-open /ws over the tunnel
+            // while hidden, defeating the background data-saving suspend.
+            if (this.isVisible && this.streamStarted && !document.hidden) {
                 setTimeout(() => {
-                    if (this.isVisible && this.streamStarted) {
+                    if (this.isVisible && this.streamStarted && !document.hidden) {
                         if (this.sotaPlayer) this.sotaPlayer.start();
                     }
                 }, 2000);
@@ -483,9 +486,10 @@ BYD.pip = {
             this.ws.onclose = () => {
                 this.ws = null;
                 document.getElementById('pipDot').classList.remove('live');
-                
-                // Reconnect if still visible and streaming
-                if (this.isVisible && this.streamStarted) {
+
+                // Reconnect if still visible and streaming — not while hidden
+                // (don't re-open the stream over the tunnel in the background).
+                if (this.isVisible && this.streamStarted && !document.hidden) {
                     setTimeout(() => this.connectLegacyWebSocket(), 2000);
                 }
             };

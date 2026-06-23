@@ -1165,12 +1165,14 @@
     <string name="roadsense_map_search_to_save">%1$s के रूप में सेट करने के लिए कोई जगह खोजें</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">यात्रा बहाल की गई</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">टोकन सुरक्षित रूप से संग्रहीत है और ऐप और डेमन प्रक्रियाओं के बीच साझा किया जाता है।</string>
-    <string name="cloudflared_token_hint">क्लाउडफ्लेयर्ड टोकन दर्ज करें</string>
-    <string name="cloudflare_paid_version">क्लाउडफ्लेयर सशुल्क संस्करण</string>
-    <string name="dialog_cloudflared_settings_title">🌐 क्लाउडफ्लेयर्ड सेटिंग्स</string>
-    <string name="dialog_cloudflared_settings_message">परिभाषित करें कि आप भुगतान किए गए क्लाउडफ्लेयर या trycloudflare का उपयोग कर रहे हैं। यदि आप भुगतान किए गए क्लाउडफ्लेयर का उपयोग कर रहे हैं, तो अपना टनल टोकन दर्ज करें।</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">यदि सशुल्क संस्करण पर सेट किया गया है तो टोकन खाली नहीं हो सकता</string>
-    <string name="toast_cloudflared_saved_settings">क्लाउडफ्लेयर्ड सेटिंग्स सहेजी गईं</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">टोकन एन्क्रिप्टेड रूप में संग्रहीत होता है और ऐप तथा डेमॉन प्रक्रियाओं के बीच साझा किया जाता है।</string>
+    <string name="cloudflared_token_hint">cloudflared टोकन दर्ज करें</string>
+    <string name="cloudflare_paid_version">Cloudflare सशुल्क संस्करण</string>
+    <string name="dialog_cloudflared_settings_title">Cloudflared सेटिंग्स</string>
+    <string name="dialog_cloudflared_settings_message">तय करें कि आप सशुल्क Cloudflare का उपयोग कर रहे हैं या trycloudflare का। यदि आप सशुल्क Cloudflare का उपयोग कर रहे हैं, तो अपना टनल टोकन दर्ज करें।</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">यदि आप सशुल्क संस्करण सेट करते हैं तो टोकन खाली नहीं हो सकता</string>
+    <string name="toast_cloudflared_token_invalid">अमान्य टोकन: केवल अक्षर, अंक और . _ - = वर्णों का उपयोग करें</string>
+    <string name="toast_cloudflared_saved_settings">Cloudflared सेटिंग्स सहेजी गईं</string>
 </resources>

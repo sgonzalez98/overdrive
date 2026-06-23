@@ -33,7 +33,7 @@
         ];
     </script>
     <script src="../shared/app-tabs.js"></script>
-    <link rel="stylesheet" href="../shared/styles.css?v=15">
+    <link rel="stylesheet" href="../shared/styles.css?v=16">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
     <style>
@@ -130,13 +130,16 @@
                         </div>
                         <div class="setting-hint" id="accOffModeHint" data-i18n="surveillance.accoff_hint_smart">Motion + AI gating. Recordings begin only when something moves and AI confirms a person, vehicle, or other relevant object.</div>
 
-                        <!-- Keep USB ports powered while parked. Default ON. Off lets
-                             ONLY the USB rail sleep on the next ACC-OFF cycle to save
-                             battery. Cameras / parked surveillance are unaffected. -->
+                        <!-- Keep USB ports powered while parked. Default ON. Off lets the
+                             head unit sleep on the next ACC-OFF cycle to save the 12V
+                             battery. IMPORTANT: the SD-card slot shares the USB power
+                             domain on this platform, so turning USB power off also powers
+                             down the SD card while parked — surveillance must then record
+                             to Internal storage. The toggle/confirm flow enforces this. -->
                         <div class="setting-row">
                             <div class="setting-info">
                                 <div class="setting-name" data-i18n="surveillance.keep_usb_power">Keep USB powered while parked</div>
-                                <div class="setting-desc" data-i18n="surveillance.keep_usb_power_desc">Keeps the USB ports powered after the car is switched off (for example to charge a phone or power an accessory). Turn off to let the USB ports sleep and save the 12V battery. This does not affect the cameras — parked surveillance keeps running either way. Takes effect the next time the car is switched off.</div>
+                                <div class="setting-desc" data-i18n="surveillance.keep_usb_power_desc">Keeps the USB ports powered after the car is switched off (for example to charge a phone or power an accessory). Turn off to let the head unit sleep and save the 12V battery. Note: the SD-card slot shares the USB power rail, so turning this off also powers down the SD card while parked — surveillance will record to Internal storage instead. Takes effect the next time the car is switched off.</div>
                             </div>
                             <div class="setting-control">
                                 <label class="toggle-switch">
@@ -144,6 +147,14 @@
                                     <span class="toggle-slider"></span>
                                 </label>
                             </div>
+                        </div>
+
+                        <!-- Shown only while USB power is OFF: SD card is unpowered while
+                             parked, so surveillance records to Internal. Visibility driven
+                             by SurvSettings.updateUsbPowerStorageNotice(). -->
+                        <div class="info-box-warning" id="survUsbPowerStorageNotice" style="display:none;margin-top:12px;">
+                            <svg class="info-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                            <div class="info-note" data-i18n="surveillance.usb_off_storage_notice">USB power is off, so the SD card is unpowered while parked. Surveillance records to Internal storage until USB power is turned back on.</div>
                         </div>
 
                         <div class="info-box">
@@ -295,6 +306,21 @@
                             </div>
                         </div>
                         <div class="setting-hint" id="loiteringTimeHint" data-i18n="surveillance.loitering_time_hint">Higher values ignore people just walking past. Lower values are more responsive.</div>
+
+                        <!-- Approach Trigger -->
+                        <div class="setting-row">
+                            <div class="setting-info">
+                                <div class="setting-name" data-i18n="surveillance.approach_trigger">Approach Trigger</div>
+                                <div class="setting-desc" data-i18n="surveillance.approach_trigger_desc">Record sooner when the camera AI confirms a real person or vehicle approaching — without waiting out the full loitering time</div>
+                            </div>
+                            <div class="setting-control">
+                                <div class="slider-control">
+                                    <span class="slider-value" id="approachTriggerValue">2s</span>
+                                    <input type="range" class="slider" id="approachTriggerSlider" min="0" max="10" value="2" oninput="SurvSettings.updateApproachTrigger(this.value)">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="setting-hint" id="approachTriggerHint" data-i18n="surveillance.approach_trigger_hint">Set to Off to require the full loitering time for every event. Lower values record walk-ups faster (only fires when the AI sees a real person/vehicle).</div>
 
                         <!-- Shadow Filter -->
                         <div class="setting-row">
@@ -1129,6 +1155,11 @@
                             <div class="setting-info">
                                 <div class="setting-name" data-i18n="surveillance.storage_usage">Storage Usage</div>
                                 <div class="setting-desc" id="survStoragePath" data-i18n="surveillance.events_saved_to_default">Events saved to Overdrive/surveillance</div>
+                                <!-- Fallback warning: configured external volume (SD/USB) isn't
+                                     mounted (often because USB power is off and the SD rides that
+                                     rail) or is full, so clips silently land on internal storage.
+                                     Shown by surveillance.js updateStorageTypeUI; hidden otherwise. -->
+                                <div class="setting-desc storage-fallback-warning" id="survStorageFallbackWarning" style="display:none"></div>
                             </div>
                         </div>
                         <div class="storage-bar">
@@ -1267,7 +1298,7 @@
     <script src="../shared/pwa-init.js?v=index1"></script>
     <script src="../shared/core.js"></script>
     <script src="../shared/update-flow.js"></script>
-    <script src="../shared/surveillance.js?v=index1"></script>
+    <script src="../shared/surveillance.js?v=storagefilter1"></script>
     <script src="../shared/safe-locations.js"></script>
     <script src="../shared/roi-schedule.js"></script>
     <script>

@@ -32,12 +32,41 @@ public class SurveillanceEngineGpu {
     // For THREAT_HIGH (loitering confirmed), this is the only delay needed.
     // For THREAT_MEDIUM (approaching), the loitering time setting adds additional delay.
     private static final long SUSTAINED_MOTION_BASE_MS = 500;
-    
+
+    // FLAG / SHADOW FALSE-POSITIVE GUARD.
+    // A waving flag (or a sweeping cast shadow) is genuine, spatially-anchored
+    // pixel motion: its connected-component centroid barely drifts, so the
+    // native Stage-5 classifies it as THREAT_HIGH "loiter" — which historically
+    // bypassed the YOLO confirmation gate and fired a recording after only
+    // SUSTAINED_MOTION_BASE_MS. The discriminator is motion DIRECTIONALITY: a
+    // real intruder TRANSLATES (per-block flow accumulates a coherent net
+    // displacement, coherence ratio → 1); a flag/foliage/shadow OSCILLATES in
+    // place (vectors cancel, ratio → 0, cumulative net drift ≈ 0).
+    //
+    // A THREAT_HIGH is "trusted" (keeps the fast 500ms, YOLO-exempt path) only
+    // when an in-zone PERSON tracker holds it OR the native flow-coherence
+    // signal says the motion is coherently translating. An untrusted HIGH
+    // (flag/shadow) is DOWNGRADED to a YOLO-gated MEDIUM — it still records via
+    // the existing YOLO-confirm / 2s-timeout / no-YOLO fallbacks, just on the
+    // same evidence bar as MEDIUM, so a flag (never a YOLO person/car) stops
+    // self-triggering. Tuning lives in MotionPipelineV2.Config.coherence*.
+    private static final float COHERENCE_RATIO_MIN = 0.35f;
+    private static final float COHERENCE_NET_MIN = 1.5f;
+
     // Loitering time in ms — derived from user setting (1-10 seconds).
     // THREAT_MEDIUM must persist for this duration before triggering recording.
     // THREAT_HIGH triggers after SUSTAINED_MOTION_BASE_MS (loitering already confirmed by native pipeline).
     private long loiteringTimeMs = 3000;  // Default 3 seconds
-    
+
+    // APPROACH FAST-PATH: sustained-motion ms required to record a MEDIUM(approach)
+    // event ONCE YOLO has confirmed a real in-zone object during the sequence.
+    // Short and responsive (default 2s) so someone walking up to / past the car is
+    // recorded without waiting out the full loiter dwell. 0 disables it (every
+    // MEDIUM then needs loiteringTimeMs, the legacy behavior). Motion with NO AI
+    // confirmation always uses loiteringTimeMs regardless, so this can't lower the
+    // bar for lighting artifacts / flags / shadows (they never yield a YOLO object).
+    private long approachTriggerMs = 2000;
+
     // MOTION THROTTLING: Process motion at 10 FPS max (saves 66% CPU vs 30 FPS)
     private static final long MOTION_PROCESS_INTERVAL_MS = 100;  // 10 FPS
     private long lastMotionProcessTime = 0;
@@ -420,6 +449,52 @@ public class SurveillanceEngineGpu {
     // Snapshot of the most recent Actor list, for callers that read state.
     // CopyOnWrite to keep reads lock-free for UI / API threads.
     private volatile java.util.List<Actor> lastActors = java.util.Collections.emptyList();
+
+    // Event-level peak severity, latched across the WHOLE recording. The two
+    // Telegram stages (start ping + final photo/video) must gate on the same
+    // value, otherwise a threat that escalated after the start snapshot drops
+    // the opening ping, and one that receded (its actor TTL-pruned from
+    // lastActors before stop) drops the closing photo+video — both gating on
+    // an instantaneous lastActors snapshot that no longer reflects the event's
+    // peak. null = "no severity observed yet this event" (fail-open, like the
+    // rest of the notification system treats null). Reset at trigger, advanced
+    // wherever lastActors is written.
+    private volatile Actor.Severity eventPeakSeverity = null;
+
+    // Filename of the last event whose FINAL notification was emitted. Guards
+    // against a double final-send when stopRecording() is entered twice for one
+    // event (disable() on the control thread racing the engine's post-record
+    // stop). AtomicReference so the claim is a single atomic getAndSet — a plain
+    // volatile check-then-set still lets both threads pass before either writes.
+    // Reset is unnecessary — event filenames are unique (timestamped to the
+    // second + the recorder refuses a same-name re-trigger), so a stale value
+    // never false-blocks a new event.
+    private final java.util.concurrent.atomic.AtomicReference<String> lastFinalNotifiedEvent =
+            new java.util.concurrent.atomic.AtomicReference<>(null);
+
+    /** Latch the event peak from a fresh actor snapshot (non-static actors only). */
+    private void updateEventPeakSeverity(java.util.List<Actor> snapshot) {
+        if (snapshot == null || snapshot.isEmpty()) return;
+        Actor.Severity max = eventPeakSeverity;
+        for (Actor a : snapshot) {
+            // Skip non-person statics (parked cars — SeverityClassifier forces
+            // them to NOTICE anyway) but KEEP a static PERSON: a loiterer who
+            // stood still is the threat, and the gate already treats it CRITICAL.
+            if (a.isStatic && a.classGroup != Actor.ClassGroup.PERSON) continue;
+            if (a.peakSeverity != null
+                    && (max == null || a.peakSeverity.ordinal() > max.ordinal())) {
+                max = a.peakSeverity;
+            }
+        }
+        eventPeakSeverity = max;
+    }
+
+    /** Higher of two severities; null is treated as "no opinion" (lowest). */
+    private static Actor.Severity maxOf(Actor.Severity a, Actor.Severity b) {
+        if (a == null) return b;
+        if (b == null) return a;
+        return a.ordinal() >= b.ordinal() ? a : b;
+    }
 
     // Thumbnail capture buffer (Block C). Field declared here so the wiring point
     // in runAiOnQuadrant compiles even before Block C lands. Constructed/reset by
@@ -1069,7 +1144,25 @@ public class SurveillanceEngineGpu {
      */
     // Track peak threat level during a motion sequence (reset when sequence ends)
     private int peakThreatDuringSequence = 0;
-    
+
+    // Whether the current sequence's THREAT_HIGH is "trusted" (coherent
+    // translation OR an in-zone person tracker), latched at motion-start and
+    // refreshed each qualifying frame. Read by the async YOLO decision matrix
+    // (which runs on the aiExecutor thread and can't safely re-read the live
+    // pipeline result) so both the synchronous gate and the matrix encode the
+    // same "untrusted HIGH = flag/shadow → YOLO-gate it" invariant. volatile
+    // for cross-thread visibility. Reset to false wherever firstMotionTime is
+    // cleared. See COHERENCE_RATIO_MIN.
+    private volatile boolean cachedHighIsTrusted = false;
+
+    // Latched true when the native flow-coherence signal POSITIVELY reported an
+    // incoherent in-place loiter (a confirmed flag / foliage / sweeping shadow)
+    // during this sequence and no coherent/tracked frame ever appeared. Extends
+    // the YOLO-confirmation timeout so a relentlessly-waving flag can't leak a
+    // recording through the 2s fallback. NOT set on the fail-open (coherence
+    // unavailable) path. Reset with cachedHighIsTrusted at each sequence start.
+    private volatile boolean cachedIncoherentLoiter = false;
+
     // Previous frame sample for Java-side motion diff check (independent of native pipeline)
     private int[] prevFrameSamples = null;
     private int[] prevDenseHash = null;
@@ -1492,6 +1585,14 @@ public class SurveillanceEngineGpu {
             if (firstMotionTime == 0) {
                 firstMotionTime = now;
                 peakThreatDuringSequence = maxThreat;
+                // New sequence: clear the latched HIGH-trust flag. It is
+                // re-evaluated and re-latched below (and each subsequent frame)
+                // from the live coherence/tracker signal for THIS sequence, so a
+                // flag's untrusted HIGH can't inherit trust from a prior real
+                // loiterer. Reset here (the single sequence-start point) rather
+                // than at the 5 scattered sequence-end sites.
+                cachedHighIsTrusted = false;
+                cachedIncoherentLoiter = false;
                 int bestQ = pipelineV2.getHighestThreatQuadrant();
                 MotionPipelineV2.QuadrantResult bestR = bestQ >= 0 ? results[bestQ] : null;
                 // SOTA proximity: bbox-height (post-YOLO) or tier+trend (pre-YOLO).
@@ -1503,25 +1604,81 @@ public class SurveillanceEngineGpu {
                         : DistanceEstimator.ProximityEstimate.tierOnly(
                                 DistanceEstimator.Tier.UNKNOWN, DistanceEstimator.Trend.UNKNOWN);
                 String threatStr = maxThreat >= MotionPipelineV2.THREAT_HIGH ? "HIGH(loiter)" : "MEDIUM(approach)";
-                long needed = maxThreat >= MotionPipelineV2.THREAT_HIGH ? SUSTAINED_MOTION_BASE_MS : loiteringTimeMs;
-                logger.info(String.format("Motion started: %s camera, threat=%s, prox=%s, need %.1fs sustained...",
+                // Trust probe at motion-start (re-latched each frame below). Tells
+                // us up-front whether a HIGH is a real loiterer or a flag/shadow.
+                boolean startTrusted = (maxThreat >= MotionPipelineV2.THREAT_HIGH)
+                        && highThreatIsTrusted(bestQ, bestR);
+                long needed = (maxThreat >= MotionPipelineV2.THREAT_HIGH && startTrusted)
+                        ? SUSTAINED_MOTION_BASE_MS : loiteringTimeMs;
+                logger.info(String.format("Motion started: %s camera, threat=%s, prox=%s, %s, need %.1fs sustained...",
                         bestQ >= 0 ? MotionPipelineV2.QUADRANT_NAMES[bestQ] : "?",
-                        threatStr, prox.describe(), needed / 1000.0));
+                        threatStr, prox.describe(), describeHighTrust(maxThreat, startTrusted, bestR),
+                        needed / 1000.0));
             }
             
             long motionDuration = now - firstMotionTime;
-            
+
             // Use peak threat for duration requirement (not just current frame).
             // This prevents a brief MEDIUM→NONE→MEDIUM flicker from resetting the clock.
             int effectiveThreat = peakThreatDuringSequence;
-            
+
+            // FLAG/SHADOW GUARD: is this THREAT_HIGH a real loiterer (coherent
+            // translation or an in-zone person tracker) or an in-place oscillator
+            // (waving flag / sweeping shadow)? Evaluated against the current
+            // best-threat quadrant. Latched into cachedHighIsTrusted for the
+            // async YOLO matrix. Only meaningful at HIGH; harmless at MEDIUM.
+            int trustQ = pipelineV2.getHighestThreatQuadrant();
+            boolean highIsTrusted = (effectiveThreat >= MotionPipelineV2.THREAT_HIGH)
+                    && highThreatIsTrusted(trustQ, trustQ >= 0 ? results[trustQ] : null);
+            // Once trusted in a sequence, stay trusted (a real loiterer who goes
+            // briefly still mid-sequence shouldn't be downgraded to a flag).
+            if (highIsTrusted) cachedHighIsTrusted = true;
+
+            // POSITIVE incoherence evidence for the timeout extension below.
+            // Distinct from "untrusted": untrusted includes the fail-open
+            // (coherence unavailable) case, whereas this requires the native
+            // signal to have actually FIRED and reported incoherent flow — i.e.
+            // a confirmed flag/foliage/shadow oscillation, not just "no signal".
+            // Latched for the whole sequence and never set when a coherent or
+            // tracked frame appeared (cachedHighIsTrusted), so a real approach
+            // that briefly stalls can't arm the flag-extension.
+            if (trustQ >= 0 && !cachedHighIsTrusted) {
+                MotionPipelineV2.QuadrantResult tr = results[trustQ];
+                if (tr != null && tr.flowCoherence >= 0f
+                        && tr.flowCoherence < COHERENCE_RATIO_MIN
+                        && tr.netDriftBlocks < COHERENCE_NET_MIN) {
+                    cachedIncoherentLoiter = true;
+                }
+            }
+
             // Determine required sustained motion based on threat level:
-            // - THREAT_HIGH (loitering): Only need base delay (500ms).
-            // - THREAT_MEDIUM (approaching): Require loitering time setting.
-            long requiredDuration = (effectiveThreat >= MotionPipelineV2.THREAT_HIGH)
-                    ? SUSTAINED_MOTION_BASE_MS
-                    : loiteringTimeMs;
-            
+            // - THREAT_HIGH, TRUSTED (coherent/tracked loiter): base delay 500ms.
+            // - THREAT_HIGH, UNTRUSTED (flag/shadow): treated like MEDIUM —
+            //   require the full loitering time so it must clear the YOLO gate.
+            // - THREAT_MEDIUM (approaching) + YOLO-confirmed in-zone object:
+            //   the short approachTriggerMs fast-path (records a walk-up/walk-past
+            //   without waiting out the full loiter dwell).
+            // - THREAT_MEDIUM, motion-only (no AI confirmation yet): the full
+            //   loitering time, so lighting artifacts / flags / shadows (which
+            //   never yield a YOLO object) can't take the fast path.
+            long requiredDuration;
+            if (effectiveThreat >= MotionPipelineV2.THREAT_HIGH && cachedHighIsTrusted) {
+                requiredDuration = SUSTAINED_MOTION_BASE_MS;
+            } else {
+                requiredDuration = loiteringTimeMs;
+                // Approach fast-path: enabled (approachTriggerMs>0), AI confirmed a
+                // real object during THIS sequence, and the fast bar is shorter than
+                // the loiter bar. firstMotionTime>0 guards against a stale prior-
+                // sequence confirmation leaking in (lastAiConfirmationTimeMs is reset
+                // on enable()/sequence handling).
+                if (approachTriggerMs > 0
+                        && firstMotionTime > 0
+                        && lastAiConfirmationTimeMs >= firstMotionTime
+                        && approachTriggerMs < requiredDuration) {
+                    requiredDuration = approachTriggerMs;
+                }
+            }
+
             // --- Diagnostic: Log sustained motion progress ---
             if (motionDuration > 0 && motionDuration < requiredDuration) {
                 // Log every second while waiting
@@ -1632,7 +1789,19 @@ public class SurveillanceEngineGpu {
                             break;
                         }
                     }
-                    long timeoutMs = brightnessEventDuringSequence ? DETERRENT_SUPPRESSION_MS : 2000;
+                    // Extend the YOLO-confirm timeout when EITHER a brightness
+                    // event occurred (lighting artifact) OR the native signal
+                    // positively confirmed an incoherent in-place loiter (a
+                    // relentlessly-waving flag / sweeping shadow). Both are
+                    // motion sources that persist indefinitely, so the short 2s
+                    // fallback would otherwise leak one recording. A real person
+                    // is confirmed by YOLO well within this window; if YOLO
+                    // genuinely can't see them, the extended timeout still fires
+                    // (downgrade, not drop). cachedIncoherentLoiter is never set
+                    // once a coherent/tracked frame appeared, so a real approach
+                    // that briefly stalls is unaffected.
+                    long timeoutMs = (brightnessEventDuringSequence || cachedIncoherentLoiter)
+                            ? DETERRENT_SUPPRESSION_MS : 2000;
                     boolean timeoutExpired = timePastRequired > timeoutMs;
                     
                     boolean shouldSuppress = false;
@@ -1642,6 +1811,15 @@ public class SurveillanceEngineGpu {
                             shouldSuppress = true;
                         } else if (deterrentActive) {
                             // HIGH during deterrent: require AI confirmation (deterrent mimics loitering)
+                            shouldSuppress = true;
+                        } else if (!cachedHighIsTrusted) {
+                            // HIGH but UNTRUSTED (flag/shadow: incoherent in-place
+                            // oscillation, no in-zone person tracker) → require AI
+                            // confirmation exactly like MEDIUM. A real loiterer is
+                            // either coherently translating or tracker-held, so this
+                            // only gates the waving-flag / sweeping-shadow case. Still
+                            // records via the 2s timeout fallback / no-YOLO paths, so
+                            // a genuinely YOLO-invisible loiterer is delayed, not lost.
                             shouldSuppress = true;
                         }
                     }
@@ -1761,11 +1939,12 @@ public class SurveillanceEngineGpu {
 
                         logger.info(String.format(
                             ">>> RECORDING TRIGGERED <<<\n" +
-                            "  Camera: %s | Threat: %s | Proximity: %s | Sustained: %.1fs | Source: %s\n" +
+                            "  Camera: %s | Threat: %s | Proximity: %s | Sustained: %.1fs | Source: %s | %s\n" +
                             "  Blocks: active=%d, confirmed=%d, component=%d\n" +
                             "  Settings: sensitivity=%d, zone=%s (limit %s), loiterTime=%ds\n" +
                             "  Why: threat %s >= MEDIUM ✓, duration %.1fs >= %.1fs ✓, proximity %s within zone ✓",
                             qName, threatNames[maxThreat], proxStr, motionDuration / 1000.0, triggerSource,
+                            describeHighTrust(maxThreat, cachedHighIsTrusted, bestResult),
                             bestResult != null ? bestResult.activeBlocks : 0,
                             bestResult != null ? bestResult.confirmedBlocks : 0,
                             bestResult != null ? bestResult.componentSize : 0,
@@ -1778,13 +1957,22 @@ public class SurveillanceEngineGpu {
                         recordingStopTime = now + postRecordMs;
                         recordingTriggerStartMs = now;
                         startRecording();
-                        
-                        try {
-                            String videoFilename = currentEventFile != null ? currentEventFile.getName() : null;
-                            sendRichMotionNotifications(videoFilename);
-                            publishMotionNotification(videoFilename);
-                        } catch (Exception e) {
-                            logger.warn("Failed to send motion notification: " + e.getMessage());
+
+                        // Only fire the start-stage notifications when a recording
+                        // is actually active. startRecording() can refuse (encoder
+                        // savedFormat barrier on cold boot) and leave recording=false
+                        // — without this guard a "Recording in progress" Telegram
+                        // ping + push banner would fire for an event that never
+                        // started and whose final-stage replacement never comes,
+                        // leaving a dangling never-resolved notification.
+                        if (recording) {
+                            try {
+                                String videoFilename = currentEventFile != null ? currentEventFile.getName() : null;
+                                sendRichMotionNotifications(videoFilename);
+                                publishMotionNotification(videoFilename);
+                            } catch (Exception e) {
+                                logger.warn("Failed to send motion notification: " + e.getMessage());
+                            }
                         }
 
                         // SOTA: Fire deterrents (cloud + screen). Both run on
@@ -1909,8 +2097,20 @@ public class SurveillanceEngineGpu {
                 // even though all conditions were met.
                 if (firstMotionTime != 0 && !recording && aiConfirmedDuringSequence) {
                     long motionDuration = lastMotionTime - firstMotionTime;
-                    long requiredMs = (peakThreatDuringSequence >= MotionPipelineV2.THREAT_HIGH)
-                            ? SUSTAINED_MOTION_BASE_MS : loiteringTimeMs;
+                    // Mirror the inline requiredDuration logic EXACTLY: only a
+                    // TRUSTED HIGH (coherent/tracked loiter) gets the 500ms base —
+                    // an untrusted HIGH (flag/shadow) is treated like MEDIUM. Else
+                    // the loiter bar, shortened to approachTriggerMs because YOLO has
+                    // confirmed a real object during this sequence (the gate above).
+                    long requiredMs;
+                    if (peakThreatDuringSequence >= MotionPipelineV2.THREAT_HIGH && cachedHighIsTrusted) {
+                        requiredMs = SUSTAINED_MOTION_BASE_MS;
+                    } else {
+                        requiredMs = loiteringTimeMs;
+                        if (approachTriggerMs > 0 && approachTriggerMs < requiredMs) {
+                            requiredMs = approachTriggerMs;
+                        }
+                    }
                     if (motionDuration >= requiredMs && peakThreatDuringSequence >= MotionPipelineV2.THREAT_MEDIUM) {
                         // All conditions met: duration exceeded, threat was MEDIUM+, YOLO confirmed person
                         logger.info(String.format("DEFERRED TRIGGER: motion=%.1fs >= %.1fs, AI confirmed, triggering from gap phase",
@@ -1930,12 +2130,16 @@ public class SurveillanceEngineGpu {
                         recordingStopTime = now + postRecordMs;
                         recordingTriggerStartMs = now;
                         startRecording();
-                        try {
-                            String videoFilename = currentEventFile != null ? currentEventFile.getName() : null;
-                            sendRichMotionNotifications(videoFilename);
-                            publishMotionNotification(videoFilename);
-                        } catch (Exception e) {
-                            logger.warn("Failed to send motion notification: " + e.getMessage());
+                        // Guard on recording (see the other trigger site): no
+                        // start-stage notification when startRecording() refused.
+                        if (recording) {
+                            try {
+                                String videoFilename = currentEventFile != null ? currentEventFile.getName() : null;
+                                sendRichMotionNotifications(videoFilename);
+                                publishMotionNotification(videoFilename);
+                            } catch (Exception e) {
+                                logger.warn("Failed to send motion notification: " + e.getMessage());
+                            }
                         }
                         try {
                             com.overdrive.app.byd.cloud.BydCloudDeterrent.getInstance().onMotionDetected();
@@ -2632,22 +2836,29 @@ public class SurveillanceEngineGpu {
                         //                Stage 5 classifies as "approaching" because the centroid
                         //                drifts slightly as shadows shift.
                         //
-                        // THREAT_HIGH:   Always record — loitering is confirmed by centroid analysis
-                        //                over loiteringFrames (10+ seconds). If something physically
-                        //                moves in the same spot for that long, it's real regardless
-                        //                of what YOLO thinks. YOLO at 320×240 can miss small/dark
-                        //                targets that the motion pipeline detects fine.
+                        // THREAT_HIGH:   Auto-record ONLY when the loiter is TRUSTED — i.e. the
+                        //                motion is coherently translating (native flow coherence)
+                        //                or an in-zone person tracker holds it. An UNTRUSTED HIGH
+                        //                (a waving flag / sweeping shadow whose stationary centroid
+                        //                merely looks like loitering) is gated exactly like MEDIUM:
+                        //                it must yield a non-baseline YOLO object, otherwise suppress.
+                        //                A flag never produces a person/car box, so it stops here.
                         //
                         // Safety: The motion pipeline already queues YOLO at the START of motion
                         // (early AI init, line ~752). By the time MEDIUM's 3-second sustained
                         // timer expires, YOLO has had 2.7+ seconds to run. If baselineFiltered
                         // is empty, it means YOLO ran and found nothing real — the "motion" is
-                        // a lighting artifact.
+                        // a lighting artifact. cachedHighIsTrusted is latched on the main thread
+                        // at motion-start/per-frame; read here on the aiExecutor thread (volatile).
                         int currentThreat = pipelineV2 != null ? pipelineV2.getMaxThreatLevel() : MotionPipelineV2.THREAT_MEDIUM;
-                        if (currentThreat <= MotionPipelineV2.THREAT_MEDIUM && baselineFiltered.isEmpty()) {
-                            // THREAT_LOW or MEDIUM + all detections are known static objects → suppress
+                        boolean untrustedHigh = (currentThreat >= MotionPipelineV2.THREAT_HIGH) && !cachedHighIsTrusted;
+                        if ((currentThreat <= MotionPipelineV2.THREAT_MEDIUM || untrustedHigh) && baselineFiltered.isEmpty()) {
+                            // LOW/MEDIUM, or an UNTRUSTED HIGH (flag/shadow), + all detections are
+                            // known static objects (or none) → suppress.
                             String[] tNames = {"NONE", "LOW", "MEDIUM", "HIGH"};
-                            logger.info("AI gate: " + tNames[currentThreat] + " + no new objects → suppressing for Q" + qIdx);
+                            logger.info("AI gate: " + tNames[currentThreat]
+                                    + (untrustedHigh ? "(untrusted loiter)" : "")
+                                    + " + no new objects → suppressing for Q" + qIdx);
                             relevantCount = 0;
                             motionFilteredCount = 0;
                         } else {
@@ -2755,6 +2966,11 @@ public class SurveillanceEngineGpu {
                                     recordingStartWall,
                                     System.currentTimeMillis());
                             lastActors = actorSnapshot;
+                            // Latch the event-level peak severity so the two
+                            // Telegram stages gate on the worst the event ever
+                            // reached, not whatever happens to be in lastActors
+                            // at stop time (which TTL-prunes departed actors).
+                            updateEventPeakSeverity(actorSnapshot);
                             // Forward to thumbnail buffer so it can capture the peak-severity frame.
                             // Block C wires this; safe no-op if buffer not yet attached.
                             if (thumbnailBuffer != null && cropData != null) {
@@ -3082,6 +3298,8 @@ public class SurveillanceEngineGpu {
         
         // Sync loitering time for Java-side sustained motion enforcement
         this.loiteringTimeMs = config.getLoiteringTimeSeconds() * 1000L;
+        // Sync the approach fast-path bar (0 = disabled).
+        this.approachTriggerMs = config.getApproachTriggerSeconds() * 1000L;
         
         // Update frame dimensions in config for distance estimation
         config.setResolution(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT);
@@ -3371,6 +3589,75 @@ public class SurveillanceEngineGpu {
      *         {@code trackerHasActiveTrack} check). Returns false only
      *         when an active tracker lock is OUTSIDE the configured zone.
      */
+    /**
+     * Whether a THREAT_HIGH (loiter) in the given quadrant is "trusted" enough
+     * to keep the fast, YOLO-exempt 500ms recording path — i.e. it is a real
+     * loiterer, not a waving flag / sweeping shadow whose stationary centroid
+     * merely looks like loitering.
+     *
+     * Trusted iff EITHER:
+     *   (a) an in-zone PERSON tracker holds the quadrant (classId==0 +
+     *       trackerInZone) — a person who walked up and stopped; or
+     *   (b) the native flow-coherence signal says the motion is coherently
+     *       translating: flowCoherence >= COHERENCE_RATIO_MIN, OR the windowed
+     *       cumulative net drift >= COHERENCE_NET_MIN blocks (a slow but steady
+     *       approach with low per-frame coherence still accumulates net drift).
+     *
+     * FAIL-OPEN on the native signal: when the loaded .so doesn't compute
+     * coherence (flowCoherence < 0, the pre-Phase-2 state), this method does
+     * NOT treat that as "incoherent" — it simply relies on the tracker test
+     * (a). The net effect pre-Phase-2 is that an unconfirmed HIGH with no
+     * in-zone person tracker is YOLO-gated like MEDIUM, which is exactly the
+     * flag-rejection behaviour we want, with the tracker preserving genuine
+     * standing-person loiter.
+     *
+     * @param quadrant best-threat quadrant; if &lt; 0 (e.g. only the
+     *                 headlight-immunity branch bumped maxThreat) returns false
+     *                 so the caller falls through to its tracker-fallback path.
+     */
+    private boolean highThreatIsTrusted(int quadrant,
+                                        MotionPipelineV2.QuadrantResult result) {
+        // (a) In-zone person tracker — genuine standing loiterer keeps fast path.
+        if (quadrant >= 0) {
+            try {
+                if (NativeMotion.trackerHasActiveTrack(quadrant)) {
+                    float[] trackBox = NativeMotion.trackerGetTrackBox(quadrant);
+                    if (trackBox != null && trackBox.length >= 7
+                            && (int) trackBox[5] == 0  // person
+                            && trackerInZone(quadrant)) {
+                        return true;
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+        // (b) Native flow coherence (Phase 2). Negative = unavailable → fail
+        // open to the tracker test above (don't demote on a missing signal).
+        if (result != null && result.flowCoherence >= 0f) {
+            if (result.flowCoherence >= COHERENCE_RATIO_MIN
+                    || result.netDriftBlocks >= COHERENCE_NET_MIN) {
+                return true;
+            }
+            return false;  // coherence computed AND incoherent → flag/shadow
+        }
+        // No coherence signal and no in-zone person tracker → not trusted.
+        return false;
+    }
+
+    /**
+     * Human-readable trust label for the trigger logs. Surfaces WHY a HIGH was
+     * (or wasn't) granted the fast path so an on-device debug round can see the
+     * flag/shadow demotion without a rebuild. Prints the native coherence values
+     * when available, or "n/a" pre-Phase-2.
+     */
+    private String describeHighTrust(int threat, boolean trusted,
+                                     MotionPipelineV2.QuadrantResult r) {
+        if (threat < MotionPipelineV2.THREAT_HIGH) return "trust=n/a(<HIGH)";
+        String coh = (r != null && r.flowCoherence >= 0f)
+                ? String.format("coherence=%.2f netDrift=%.1f", r.flowCoherence, r.netDriftBlocks)
+                : "coherence=n/a";
+        return String.format("trust=%s(%s)", trusted ? "YES" : "NO→YOLO-gated", coh);
+    }
+
     private boolean trackerInZone(int quadrant) {
         if (config == null) return true;  // no config → no gate
         // Resolve the per-quadrant effective zone (per-quadrant override
@@ -3779,8 +4066,17 @@ public class SurveillanceEngineGpu {
         Actor.Proximity closest = null;
         String detectionLabel = "motion";
         Actor threat = null;
+        long nowMs = System.currentTimeMillis();
         for (Actor a : snap) {
-            if (a.isStatic) continue;
+            // FRESHNESS GATE: the tracker retains actors for TRACK_TTL_MS (5s)
+            // after they leave; a caption must describe the LIVE scene, so skip
+            // any actor not observed within ACTOR_CAPTION_FRESHNESS_MS. Without
+            // this, a person who crossed and left keeps captioning the event as
+            // the threat for up to 5s ("Person at front" when none is there).
+            if (!isActorFresh(a, nowMs)) continue;
+            // Keep a static PERSON (loiterer = the threat, gated CRITICAL); skip
+            // only non-person statics (parked cars, forced to NOTICE anyway).
+            if (a.isStatic && a.classGroup != Actor.ClassGroup.PERSON) continue;
             switch (a.classGroup) {
                 case PERSON:  persons++;  break;
                 case VEHICLE: vehicles++; break;
@@ -3838,7 +4134,9 @@ public class SurveillanceEngineGpu {
         Actor.Proximity closest = null;
         Actor threat = null;
         for (Actor a : snap) {
-            if (a.isStatic) continue;
+            // Keep a static PERSON so the body matches the CRITICAL the gate
+            // already sends for a loiterer; skip only non-person statics.
+            if (a.isStatic && a.classGroup != Actor.ClassGroup.PERSON) continue;
             switch (a.classGroup) {
                 case PERSON:  persons++;  break;
                 case VEHICLE: vehicles++; break;
@@ -3858,17 +4156,41 @@ public class SurveillanceEngineGpu {
         }
         // camHint follows the threat actor — see sendRichMotionNotifications.
         String camHint = cameraNameFor(threat);
-        // Telegram tier mute — same gate as the start-stage notification so
-        // both stages of the two-stage flow honour the same toggle.
-        if (!com.overdrive.app.notifications.NotificationGate.shouldTelegram(peakSev, config)) {
-            logger.debug("Telegram final-stage suppressed by per-tier toggle (sev=" + peakSev + ")");
+        // Telegram tier mute. By stop time, an actor that was CRITICAL mid-event
+        // may have been TTL-pruned from lastActors, collapsing the instantaneous
+        // snapshot to NOTICE and silently dropping the closing photo+video of a
+        // genuinely severe event. So consider BOTH the instantaneous snapshot
+        // and the event-level peak latched across the whole recording.
+        //
+        // The tier toggles (tierNotices/tierAlerts/tierCritical) are INDEPENDENT
+        // booleans, NOT an ordinal threshold — so we can't just gate on the max
+        // (that could flip SEND→SUPPRESS when a lower tier is on and a higher
+        // tier off). Send if EITHER severity passes its own toggle: this never
+        // suppresses anything the old instantaneous gate would have sent, and
+        // additionally rescues the receded-CRITICAL case.
+        boolean snapOk = com.overdrive.app.notifications.NotificationGate.shouldTelegram(peakSev, config);
+        // Only let the latch CONTRIBUTE when it was actually observed. A null
+        // latch (no actor ever classified this event) must NOT fail-open via
+        // shouldTelegram(null)=true — that would force-send actor-less events
+        // and break the default NOTICE-suppression. Snapshot remains the
+        // baseline; the latch only ever ADDS a reason to send.
+        boolean peakOk = eventPeakSeverity != null
+                && com.overdrive.app.notifications.NotificationGate.shouldTelegram(eventPeakSeverity, config);
+        if (!snapOk && !peakOk) {
+            logger.debug("Telegram final-stage suppressed by per-tier toggle (eventPeak="
+                    + eventPeakSeverity + ", snapshot=" + peakSev + ")");
             return;
         }
+        // Report the higher of the two as the header severity so a receded
+        // CRITICAL still reads CRITICAL when that's why we're sending.
+        Actor.Severity gateSev = maxOf(eventPeakSeverity, peakSev);
         try {
             TelegramNotifier.notifyMotionFinalized(
                     videoFilename,
                     heroPhotoPath,
-                    peakSev != null ? peakSev.name() : null,
+                    // Report the event-level peak so the message header matches
+                    // the gate decision (a receded CRITICAL still reads CRITICAL).
+                    gateSev != null ? gateSev.name() : null,
                     persons, vehicles, bikes, animals,
                     closest != null ? closest.name() : null,
                     camHint);
@@ -3932,10 +4254,37 @@ public class SurveillanceEngineGpu {
         }
     }
 
+    /** How recently an actor must have been observed to be eligible to drive a
+     *  caption/notification. The tracker retains tracks for TRACK_TTL_MS (5s)
+     *  after an actor leaves so cross-quadrant handoff and post-record framing
+     *  work — but a caption must describe the LIVE scene, not a ghost that left
+     *  up to 5s ago.
+     *
+     *  Sized above the WORST-CASE AI refresh latency: the AI lane runs at most
+     *  one quadrant per AI_COOLDOWN_MS (500ms), round-robin over up to 4
+     *  quadrants, so a non-priority quadrant's actor refreshes only ~every 2s.
+     *  A present actor must stay "fresh" across that gap (and across the
+     *  deferred/timeout trigger paths, which can fire several seconds after the
+     *  last AI hit), so 2500ms > the ~2000ms round-robin worst case — while
+     *  still well under TRACK_TTL_MS so a departed actor is excluded. A tighter
+     *  value dropped the real triggering actor on the live START ping
+     *  (degrading the caption to a bare "Motion detected"). */
+    private static final long ACTOR_CAPTION_FRESHNESS_MS = 2500;
+
+    /** True iff the actor was observed recently enough to caption the live scene. */
+    private boolean isActorFresh(Actor a, long now) {
+        return a != null && a.lastSeenWallMs > 0
+                && (now - a.lastSeenWallMs) <= ACTOR_CAPTION_FRESHNESS_MS;
+    }
+
+    /** Camera name for a caption — the actor's CURRENT (last-seen) quadrant, NOT
+     *  the lifetime peakCamera high-water latch. Naming peakCamera captioned a
+     *  quadrant the actor may have already left ("person at front" when it has
+     *  moved to / off the side). Forensic/thumbnail paths still use peakCamera. */
     private static String cameraNameFor(Actor a) {
         if (a == null) return null;
-        if (a.peakCamera < 0 || a.peakCamera >= MotionPipelineV2.QUADRANT_NAMES.length) return null;
-        return MotionPipelineV2.QUADRANT_NAMES[a.peakCamera];
+        if (a.lastCamera < 0 || a.lastCamera >= MotionPipelineV2.QUADRANT_NAMES.length) return null;
+        return MotionPipelineV2.QUADRANT_NAMES[a.lastCamera];
     }
 
     /**
@@ -4214,12 +4563,15 @@ public class SurveillanceEngineGpu {
                 url = "/events.html?filter=sentry";
             }
 
+            // Name the quadrant where an actor IS NOW (lastCamera via cameraNameFor),
+            // and only from a FRESH actor — a TTL-retained ghost that already left
+            // must not label this live "Motion at <camera>" banner.
+            long nowMs = System.currentTimeMillis();
             String camHint = null;
             for (Actor a : lastActors) {
-                if (a.peakCamera >= 0 && a.peakCamera < MotionPipelineV2.QUADRANT_NAMES.length) {
-                    camHint = MotionPipelineV2.QUADRANT_NAMES[a.peakCamera];
-                    break;
-                }
+                if (!isActorFresh(a, nowMs)) continue;
+                String name = cameraNameFor(a);
+                if (name != null) { camHint = name; break; }
             }
             String title = (camHint != null) ? "Motion at " + camHint : "Motion detected";
             String body = "Recording in progress";
@@ -4275,7 +4627,9 @@ public class SurveillanceEngineGpu {
             // (person > bike > vehicle > animal).
             Actor threat = null;
             for (Actor a : snap) {
-                if (a.isStatic) continue;
+                // Keep a static PERSON (loiterer = threat, gated CRITICAL); skip
+                // only non-person statics (parked cars → NOTICE anyway).
+                if (a.isStatic && a.classGroup != Actor.ClassGroup.PERSON) continue;
                 switch (a.classGroup) {
                     case PERSON:  persons++;  break;
                     case VEHICLE: vehicles++; break;
@@ -4506,7 +4860,38 @@ public class SurveillanceEngineGpu {
         // continuous-mode segments without separate code paths. The mode
         // distinction lives in the user's config, not in the filename.
         String fileName = "event_" + timestamp + ".mp4";
-        currentEventFile = new File(eventOutputDir, fileName);
+        // Re-read the live surveillance dir: enableSurveillance() may have
+        // snapshotted the internal fallback during the boot mount-race, and the
+        // SD/USB mount (incl. the smRef.ensure*Mounted attempt just above) may
+        // have landed since. We MUST resolve LIVE (getLiveSurveillanceDir)
+        // rather than read getSurveillanceDir(): the volatile surveillanceDir
+        // field is frozen while the arm session is active (updateActiveDirectories
+        // skips the surveillance branch), so getSurveillanceDir() would return
+        // the stale internal fallback for a mount that landed after the bounded
+        // enable-wait. getLiveSurveillanceDir() bypasses that freeze and falls
+        // back to internal when the external is genuinely unavailable. Resolved
+        // ONCE here (recording == false above), so the in-flight clip can't be
+        // split across volumes; null-guard back to the snapshot.
+        File trigDir = (smRef != null) ? smRef.getLiveSurveillanceDir() : eventOutputDir;
+        if (trigDir == null) trigDir = eventOutputDir;
+        // ENOSPC internal-spill: if the configured external is mounted-but-FULL,
+        // redirect THIS clip to the INTERNAL SURVEILLANCE dir so it isn't
+        // quarantined as .broken on a packed card. Uses the surveillance-bucket
+        // helper (NOT resolveTargetWithEnospcFallback, which spills to the
+        // recordings folder and would orphan an event_* clip from both cleanup
+        // pools). Defensive: a throw returns trigDir unchanged.
+        if (smRef != null && trigDir != null) {
+            try {
+                File spill = smRef.resolveSurveillanceTargetWithEnospcFallback(trigDir, 100L * 1024 * 1024);
+                if (spill != null) trigDir = spill;
+            } catch (Throwable t) {
+                logger.warn("ENOSPC-fallback resolve failed (continuous): " + t.getMessage());
+            }
+        }
+        if (trigDir != null && !trigDir.equals(eventOutputDir)) {
+            eventOutputDir = trigDir;
+        }
+        currentEventFile = new File(trigDir, fileName);
 
         logger.info("Starting continuous recording: " + currentEventFile.getAbsolutePath());
 
@@ -4727,8 +5112,38 @@ public class SurveillanceEngineGpu {
         
         String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
         String fileName = "event_" + timestamp + ".mp4";
-        currentEventFile = new File(eventOutputDir, fileName);
-        
+        // Re-read the live surveillance dir: enableSurveillance() may have
+        // snapshotted the internal fallback during the boot mount-race, and the
+        // SD/USB mount (incl. the smRef.ensure*Mounted attempt just above) may
+        // have landed since. We MUST resolve LIVE (getLiveSurveillanceDir)
+        // rather than read getSurveillanceDir(): the volatile surveillanceDir
+        // field is frozen while the arm session is active (updateActiveDirectories
+        // skips the surveillance branch), so getSurveillanceDir() would return
+        // the stale internal fallback for a mount that landed after the bounded
+        // enable-wait. getLiveSurveillanceDir() bypasses that freeze and falls
+        // back to internal when the external is genuinely unavailable. Resolved
+        // ONCE here (recording == false above), so the in-flight clip can't be
+        // split across volumes; null-guard back to the snapshot.
+        File trigDir = (smRef != null) ? smRef.getLiveSurveillanceDir() : eventOutputDir;
+        if (trigDir == null) trigDir = eventOutputDir;
+        // ENOSPC internal-spill: if the configured external is mounted-but-FULL,
+        // redirect THIS event to the INTERNAL SURVEILLANCE dir so it isn't
+        // quarantined as .broken on a packed card. Surveillance-bucket helper so
+        // the spilled event_* clip stays in the surveillance reap pool.
+        // Defensive: a throw returns trigDir unchanged.
+        if (smRef != null && trigDir != null) {
+            try {
+                File spill = smRef.resolveSurveillanceTargetWithEnospcFallback(trigDir, 100L * 1024 * 1024);
+                if (spill != null) trigDir = spill;
+            } catch (Throwable t) {
+                logger.warn("ENOSPC-fallback resolve failed (event): " + t.getMessage());
+            }
+        }
+        if (trigDir != null && !trigDir.equals(eventOutputDir)) {
+            eventOutputDir = trigDir;
+        }
+        currentEventFile = new File(trigDir, fileName);
+
         logger.info("Triggering event recording: " + currentEventFile.getAbsolutePath());
         logger.info(String.format("Pre-record: %d sec, Post-record: %d sec", 
                 preRecordMs / 1000, postRecordMs / 1000));
@@ -4743,6 +5158,9 @@ public class SurveillanceEngineGpu {
             return;
         }
         recording = true;
+        // Fresh event → reset the latched peak severity. Each lastActors write
+        // during this recording advances it; both Telegram stages read it.
+        eventPeakSeverity = null;
 
         // OEM Dashcam parallel event recording. When the user has opted into
         // surveillance-driven OEM clips (oemDashcam.surveillance.enabled),
@@ -5014,10 +5432,25 @@ public class SurveillanceEngineGpu {
 
             String heroName = heroSiblingFile.exists() ? heroSibling : null;
             String heroPath = heroSiblingFile.exists() ? heroSiblingFile.getAbsolutePath() : null;
-            try { publishMotionFinal(videoName, heroName); }
-            catch (Throwable t) { logger.debug("publishMotionFinal threw: " + t.getMessage()); }
-            try { sendFinalTelegramNotification(videoName, heroPath); }
-            catch (Throwable t) { logger.debug("sendFinalTelegramNotification threw: " + t.getMessage()); }
+            // Per-event dedup: stopRecording() can be entered twice for one
+            // event if disable() (control thread) and the engine post-record
+            // stop interleave before either clears `recording`. The final
+            // notifications have no internal dedup (the OS-push tag covers only
+            // the push, not Telegram), so a double entry would double-send the
+            // photo + full-clip upload. Claim the event by filename so only the
+            // first caller emits — leaves the `recording` lifecycle flag alone
+            // (clearing it early would risk a new overlap-start race).
+            // Atomic claim: getAndSet returns the PREVIOUS value; only the
+            // caller that finds it != videoName proceeds, so two interleaving
+            // stopRecording() entries for the same event can't both emit.
+            if (!videoName.equals(lastFinalNotifiedEvent.getAndSet(videoName))) {
+                try { publishMotionFinal(videoName, heroName); }
+                catch (Throwable t) { logger.debug("publishMotionFinal threw: " + t.getMessage()); }
+                try { sendFinalTelegramNotification(videoName, heroPath); }
+                catch (Throwable t) { logger.debug("sendFinalTelegramNotification threw: " + t.getMessage()); }
+            } else {
+                logger.debug("Final notification already sent for " + videoName + "; skipping duplicate");
+            }
         }
 
         // Detach the segment listener so a stale lambda from a previous event
@@ -5143,7 +5576,8 @@ public class SurveillanceEngineGpu {
                             a.peakConfidence,
                             a.peakBboxX, a.peakBboxY, a.peakBboxW, a.peakBboxH,
                             a.peakBboxQuadW, a.peakBboxQuadH, a.peakCamera,
-                            a.lastBboxX, a.lastBboxY, a.lastBboxW, a.lastBboxH));
+                            a.lastBboxX, a.lastBboxY, a.lastBboxW, a.lastBboxH,
+                            a.lastCamera));
                 }
             }
             segmentActors = renormalized;
@@ -5193,7 +5627,10 @@ public class SurveillanceEngineGpu {
             if (syncHero) {
                 File heroFile;
                 try {
-                    heroFile = bufferAtDispatch.writeHeroFromSnapshot(snap, segmentMp4);
+                    // Window-gate the hero so it can't depict a peak frame evicted
+                    // from the bounded pre-record ring (segmentStartMs is this
+                    // segment's window start; open upper bound = still finalizing).
+                    heroFile = bufferAtDispatch.writeHeroFromSnapshot(snap, segmentMp4, segmentStartMs, 0L);
                 } catch (Throwable t) {
                     logger.warn("Hero thumbnail sync write failed for "
                             + segmentMp4.getName() + ": " + t.getMessage());
@@ -5209,9 +5646,10 @@ public class SurveillanceEngineGpu {
                 // off the GpuSegmentFinalizer-N thread fast.
                 inFlightSegmentMetadata.incrementAndGet();
                 final ThumbnailBuffer bufFinal = bufferAtDispatch;
+                final long heroWindowStartMs = segmentStartMs;
                 segmentMetadataExecutor.execute(() -> {
                     try {
-                        File heroFile = bufFinal.writeHeroFromSnapshot(snap, segmentMp4);
+                        File heroFile = bufFinal.writeHeroFromSnapshot(snap, segmentMp4, heroWindowStartMs, 0L);
                         if (heroFile != null) {
                             logger.info("Hero thumbnail (" + segmentMp4.getName() + "): "
                                     + heroFile.getName());
@@ -5434,6 +5872,8 @@ public class SurveillanceEngineGpu {
         deterrentFiredTime = 0;  // Reset deterrent suppression
         lastAiConfirmationTimeMs = 0;  // Reset AI confirmation gate
         peakThreatDuringSequence = 0;
+        cachedHighIsTrusted = false;  // Reset flag/shadow HIGH-trust latch
+        cachedIncoherentLoiter = false;  // Reset confirmed-incoherent-loiter latch
         
         // Reset post-suppression baseline refresh tracking
         for (int q = 0; q < MotionPipelineV2.NUM_QUADRANTS; q++) {
@@ -6061,6 +6501,15 @@ public class SurveillanceEngineGpu {
         // THREAT_MEDIUM must persist for this duration before triggering.
         this.loiteringTimeMs = seconds * 1000L;
         logger.info("V2 loitering time set to " + seconds + "s (native=" + (seconds * 10) + " frames, java=" + loiteringTimeMs + "ms)");
+    }
+
+    /** Live-update the approach fast-path bar (0 = disabled). Records a
+     *  YOLO-confirmed MEDIUM(approach) after this many seconds instead of the
+     *  full loitering time. */
+    public void setV2ApproachTrigger(int seconds) {
+        this.approachTriggerMs = (seconds <= 0) ? 0L : seconds * 1000L;
+        logger.info("V2 approach trigger set to " + seconds + "s (java=" + approachTriggerMs + "ms"
+                + (approachTriggerMs == 0 ? ", DISABLED)" : ")"));
     }
     
     /**

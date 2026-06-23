@@ -2864,7 +2864,19 @@ public class CameraDaemon {
      * Disable surveillance mode.
      */
     public static void disableSurveillance() {
-        log("Disabling surveillance mode");
+        // Log the immediate caller so a spurious disarm is attributable from a
+        // single logcat line (user can't always pull full logs). Cheap — only
+        // runs on the rare disable path, not in any hot loop.
+        String caller = "unknown";
+        try {
+            StackTraceElement[] st = Thread.currentThread().getStackTrace();
+            // [0]=getStackTrace, [1]=this method, [2]=immediate caller.
+            if (st.length > 2) {
+                caller = st[2].getMethodName() + "@" + st[2].getFileName()
+                    + ":" + st[2].getLineNumber();
+            }
+        } catch (Throwable ignored) {}
+        log("Disabling surveillance mode (caller=" + caller + ")");
         surveillanceEnabled = false;
 
         if (gpuPipeline != null) {
@@ -2929,14 +2941,16 @@ public class CameraDaemon {
         Boolean cloudInitial = currentCloudLockState();
         if (cloudInitial != null) applyLockEvent(cloudInitial, "cloud-initial");
 
-        // Force-arm timeout: if no source reports a lock within 60s, arm
-        // anyway. Owner may have walked away without locking, or every event
-        // source failed to deliver. This is the final safety net for arming.
-        // Gate ONLY on doorLockListenerArmed — `surveillanceEnabled` is a
-        // sticky static that's set to true by safe-zone / schedule
-        // suppression paths without an actual arm, and is never reset on
-        // ACC ON. Including it here silently disables the safety net for
-        // every cycle after the first suppression.
+        // Force-arm deadline: by DOOR_LOCK_ARM_TIMEOUT_MS (60s) after ACC-OFF,
+        // surveillance MUST be armed REGARDLESS of lock/unlock state. The first 60s is
+        // a grace window where the owner may still be settling (locking, grabbing
+        // things, re-entering) — during it a lock arms early and an unlock disarms.
+        // At the deadline we arm UNCONDITIONALLY: this is authoritative, not a flag
+        // check. We call enableSurveillance() directly (idempotent — a no-op if the
+        // pipeline is already running) and set doorLockListenerArmed=true, so even if
+        // an unlock inside the window had disarmed us, we end up armed at 60s. This
+        // closes the gap where an unlock left surveillance off past the 60s grace.
+        // Still gated on ACC — if ACC came back ON in the meantime we must not arm.
         new Thread(() -> {
             try {
                 Thread.sleep(DOOR_LOCK_ARM_TIMEOUT_MS);
@@ -2948,13 +2962,71 @@ public class CameraDaemon {
                 log("LOCK GATE TIMEOUT: ACC is ON — not arming");
                 return;
             }
-            if (doorLockListenerArmed) {
-                log("LOCK GATE TIMEOUT: already armed via lock event — no-op");
-                return;
+            // Authoritative, not a flag check: set armed + call enableSurveillance()
+            // directly. Idempotent — a no-op if the pipeline is already running, and
+            // enableSurveillance() itself still honors safe-zone / schedule
+            // suppression. This guarantees we end armed at 60s even if an unlock
+            // inside the grace window had disarmed us.
+            //
+            // RACE FIX: do the flag write + enableSurveillance() + consistency
+            // re-check inside the same monitor that applyLockEvent() synchronizes
+            // on (the Class object — both are static). Without this, an
+            // applyLockEvent(false) could interleave between enableSurveillance()
+            // here and the flag write, see doorLockListenerArmed=true, and call
+            // disableSurveillance() — leaving surveillance off though we intended
+            // to arm. Holding the lock makes "set flag + enable + verify" atomic
+            // w.r.t. every other lock-event source.
+            synchronized (CameraDaemon.class) {
+                if (com.overdrive.app.monitor.AccMonitor.isAccOn()) {
+                    log("LOCK GATE TIMEOUT: ACC turned ON before force-arm — not arming");
+                    return;
+                }
+                // SCHEDULE re-check: the upstream ACC-OFF gate (see :3582) only
+                // starts this 60s timer when we parked INSIDE the schedule window,
+                // but the window can END during the grace period. enableSurveillance()
+                // re-checks safe-zone but NOT schedule, so without this guard a
+                // force-arm could arm just outside the window (the 5-min periodic
+                // checker would stop it on its next tick, but that's a delayed
+                // correction). Mirror the upstream gate exactly: if a schedule is
+                // enabled and we're now outside it, skip the force-arm and leave the
+                // intent flag set so the periodic checker arms when the window opens.
+                try {
+                    com.overdrive.app.surveillance.SurveillanceSchedule schedule =
+                        com.overdrive.app.config.UnifiedConfigManager.getSurveillanceSchedule();
+                    if (schedule != null && schedule.isEnabled() && !schedule.isActiveNow()) {
+                        log("LOCK GATE TIMEOUT: outside schedule window ("
+                            + schedule.getSummary() + ") — not force-arming; "
+                            + "periodic checker will arm when the window opens");
+                        surveillanceEnabled = true;  // keep intent for the periodic checker
+                        return;
+                    }
+                } catch (Exception e) {
+                    log("LOCK GATE TIMEOUT: schedule check error (proceeding): " + e.getMessage());
+                }
+                log("LOCK GATE TIMEOUT: " + (DOOR_LOCK_ARM_TIMEOUT_MS / 1000)
+                    + "s elapsed — force-arming surveillance regardless of lock state");
+                doorLockListenerArmed = true;
+                safeZoneSuppressed = false;  // cleared if/when enableSurveillance() actually starts
+                enableSurveillance();
+                // Consistency guard: enableSurveillance() can decline to start the
+                // pipeline for two reasons — (1) ACC turned ON in the gap before its
+                // internal re-check (see :2787), or (2) we're parked in a safe zone
+                // and it suppressed the start (see :2815, sets safeZoneSuppressed).
+                // In either case the pipeline never armed, so leaving
+                // doorLockListenerArmed=true would be a lie (flag says "armed" but
+                // surveillance isn't running) and a later unlock would call a
+                // spurious disableSurveillance(). Revert the flag if the pipeline did
+                // not actually start.
+                if (com.overdrive.app.monitor.AccMonitor.isAccOn()) {
+                    log("LOCK GATE TIMEOUT: ACC turned ON during force-arm — reverting doorLockListenerArmed");
+                    doorLockListenerArmed = false;
+                } else if (safeZoneSuppressed
+                        || gpuPipeline == null || !gpuPipeline.isRunning()) {
+                    log("LOCK GATE TIMEOUT: pipeline not running after force-arm "
+                        + "(safeZone=" + safeZoneSuppressed + ") — reverting doorLockListenerArmed");
+                    doorLockListenerArmed = false;
+                }
             }
-            log("LOCK GATE TIMEOUT: No lock detected within "
-                + (DOOR_LOCK_ARM_TIMEOUT_MS / 1000) + "s — force-arming surveillance");
-            applyLockEvent(true, "timeout");
         }, "DoorLockTimeout").start();
 
         // Reverse fallback: ACC-ON disarm watchdog. Periodically queries
@@ -3063,16 +3135,50 @@ public class CameraDaemon {
                 }
                 if (sharedAppContext == null) continue;
                 try {
-                    // probeAccState: returns true if ACC is OFF, false if ON
-                    // or unknown. As a side effect updates AccMonitor.
-                    boolean hwSaysAccOff = com.overdrive.app.monitor.AccMonitor
-                        .probeAccState(sharedAppContext);
-                    if (!hwSaysAccOff && surveillanceEnabled) {
-                        log("ACC-ON DISARM WATCHDOG: hardware says ACC ON but "
-                            + "surveillance still active — force-disabling");
+                    // BUGFIX (surv disarms after ~1 event w/ USB-power OFF):
+                    // The old code called the SINGLE-SHOT probeAccState here.
+                    // On a sentinel HAL reading (FAKE_OK=4 / INVALID=255) with a
+                    // non-authoritative AccMonitor cache, probeAccState returns
+                    // false = "ACC ON safe default" (AccMonitor:283-285). With the
+                    // "Keep USB powered" toggle OFF the AP is allowed to sleep, so
+                    // AccSentryDaemon's setAccState IPC heartbeats stop arriving and
+                    // accOnAuthoritative goes stale/false — making that safe-default
+                    // path reachable on any transient sentinel read. The watchdog
+                    // then mistook the bluff for real ignition-on and force-disarmed
+                    // surveillance (badge → OFF, sentry listener torn down), with no
+                    // re-arm until a manual restart / web re-enable.
+                    //
+                    // Two guards:
+                    //   1. Use the 3× stability probe (probeAccStateWithBackoff),
+                    //      not the single shot, so one transient sentinel can't trip it.
+                    //   2. Only disarm on a CLEAN (trustworthy) reading. A real
+                    //      ignition-on always reads a clean bodywork power level (≥2);
+                    //      a sentinel (FAKE_OK=4 / INVALID=255) that merely DEFAULTS to
+                    //      ACC-ON must NOT disarm a parked session. With "Keep USB
+                    //      powered" OFF the AP sleeps and AccSentryDaemon's ACC-state
+                    //      IPC stops, so the HAL frequently returns sentinels — the old
+                    //      single-shot probe treated those as ACC-ON and force-disarmed
+                    //      surveillance with no re-arm. wasLastProbeTrustworthy() is
+                    //      false on any sentinel/error/default path, true only on a
+                    //      clean level read — so a REAL ACC-ON (clean read) still
+                    //      disarms promptly, while bluffs are ignored.
+                    boolean hwSaysAccOff = probeAccStateWithBackoff("disarm-watchdog");
+                    boolean trustworthy = com.overdrive.app.monitor.AccMonitor
+                        .wasLastProbeTrustworthy();
+                    if (!hwSaysAccOff && trustworthy && surveillanceEnabled) {
+                        log("ACC-ON DISARM WATCHDOG: hardware says ACC ON (clean read) "
+                            + "but surveillance still active — force-disabling");
                         disableSurveillance();
                         doorLockListenerArmed = false;
                         return;
+                    } else if (!hwSaysAccOff && !trustworthy && surveillanceEnabled) {
+                        // Probe returned ACC-ON but via a sentinel/default (untrustworthy).
+                        // Do NOT disarm — stay armed and let a clean read (or a genuine
+                        // ACC-ON IPC via setAccState) decide. Logged so a recurring
+                        // disarm investigation can see this path was taken.
+                        log("ACC-ON disarm watchdog: probe returned ACC-ON but reading "
+                            + "is a sentinel/default (untrustworthy — likely parked w/ "
+                            + "USB-power off) — staying armed");
                     }
                 } catch (Exception ignored) {}
             }
@@ -3150,6 +3256,13 @@ public class CameraDaemon {
             log("Unlock poll thread started (5s polling getDoorLockStatus + REST fallback)");
 
             int restPollCounter = 0;
+            // BUGFIX (surv disarms after ~1 event): debounce the UNLOCK direction.
+            // A single transient/bluff DOOR_STATE_UNLOCK read from the OTA poll used
+            // to disarm immediately (applyLockEvent(false) → disableSurveillance →
+            // badge OFF, no re-arm until restart). Require 2 consecutive UNLOCK reads
+            // before disarming. ARM (LOCK) stays eager — arming early is always safe,
+            // and a missed lock is already backstopped by the force-arm timeout.
+            int consecutiveUnlockReads = 0;
 
             while (!com.overdrive.app.monitor.AccMonitor.isAccOn()) {
                 try {
@@ -3167,9 +3280,19 @@ public class CameraDaemon {
                 try {
                     int state = readDoorLockStatus();
                     if (state == DOOR_STATE_LOCK) {
+                        consecutiveUnlockReads = 0;
                         applyLockEvent(true, "ota-poll");
                     } else if (state == DOOR_STATE_UNLOCK) {
-                        applyLockEvent(false, "ota-poll");
+                        consecutiveUnlockReads++;
+                        if (consecutiveUnlockReads >= 2) {
+                            applyLockEvent(false, "ota-poll");
+                        } else {
+                            log("LOCK GATE [ota-poll]: single UNLOCK read — "
+                                + "debouncing (need 2 consecutive before disarm)");
+                        }
+                    } else {
+                        // INVALID / out-of-range: not a real transition, don't let it
+                        // reset the unlock streak either way (treat as no-signal).
                     }
                 } catch (Exception e) {
                     // Silently continue — OTA device may be unreachable
@@ -4706,6 +4829,12 @@ public class CameraDaemon {
         com.overdrive.app.notifications.NotificationBus.get()
                 .subscribe(new com.overdrive.app.notifications.sinks.PushSink(
                         subStore, registry, keyStore, signer));
+        // Forward WARN/CRITICAL vehicle events (charging fault/full, door
+        // opened, tyre alarm/leak, SOH mismatch) to Telegram too — they were
+        // Web-Push-only before. Excludes surveillance.* (delivered to Telegram
+        // directly via TelegramNotifier) so there is no double-send.
+        com.overdrive.app.notifications.NotificationBus.get()
+                .subscribe(new com.overdrive.app.notifications.sinks.TelegramSink());
 
         com.overdrive.app.server.NotificationApiHandler.init(registry, subStore, keyStore);
 

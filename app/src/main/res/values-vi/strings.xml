@@ -1155,12 +1155,14 @@
     <string name="roadsense_map_search_to_save">Tìm kiếm một địa điểm để đặt làm %1$s</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">Chuyến đi đã khôi phục</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">Mã thông báo được lưu trữ an toàn và chia sẻ giữa ứng dụng và các quy trình nền.</string>
-    <string name="cloudflared_token_hint">Nhập mã thông báo cloudflared</string>
-    <string name="cloudflare_paid_version">Phiên bản trả phí của Cloudflare</string>
-    <string name="dialog_cloudflared_settings_title">🌐 Cài đặt Cloudflared</string>
-    <string name="dialog_cloudflared_settings_message">Xác định xem bạn đang sử dụng Cloudflare trả phí hay trycloudflare. Nếu bạn đang sử dụng Cloudflare trả phí, hãy nhập mã thông báo đường hầm của bạn.</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">Nếu đặt thành phiên bản trả phí, mã thông báo không được để trống</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">Token được lưu trữ ở dạng mã hóa và được chia sẻ giữa ứng dụng và tiến trình daemon.</string>
+    <string name="cloudflared_token_hint">Nhập token cloudflared</string>
+    <string name="cloudflare_paid_version">Phiên bản trả phí Cloudflare</string>
+    <string name="dialog_cloudflared_settings_title">Cài đặt Cloudflared</string>
+    <string name="dialog_cloudflared_settings_message">Xác định xem bạn đang dùng Cloudflare trả phí hay trycloudflare. Nếu bạn dùng Cloudflare trả phí, hãy nhập token đường hầm của bạn.</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">Nếu bạn đặt phiên bản trả phí thì token không được để trống</string>
+    <string name="toast_cloudflared_token_invalid">Token không hợp lệ: chỉ dùng chữ cái, chữ số và các ký tự . _ - =</string>
     <string name="toast_cloudflared_saved_settings">Đã lưu cài đặt Cloudflared</string>
 </resources>

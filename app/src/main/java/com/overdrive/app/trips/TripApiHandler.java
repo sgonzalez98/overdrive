@@ -103,6 +103,19 @@ public class TripApiHandler {
                 if ("POST".equals(method)) return handlePostStorage(body);
             }
 
+            // Route: POST /api/trips/recover — rebuild trip rows from surviving
+            // .jsonl.gz telemetry files whose DB row was lost (e.g. the SD-drop
+            // reaper bug). User-triggered from the Trips page, NOT automatic.
+            // Runs on a background thread (the scan can take minutes on a large
+            // FUSE-bridged SD) and returns immediately; the UI polls
+            // GET /api/trips/recover/status for progress/result.
+            if (path.equals("/api/trips/recover") && "POST".equals(method)) {
+                return handleStartRecoverTrips();
+            }
+            if (path.equals("/api/trips/recover/status") && "GET".equals(method)) {
+                return handleRecoverStatus();
+            }
+
             // Route: GET /api/trips/{id}/telemetry
             Matcher telemetryMatcher = TRIP_TELEMETRY_PATTERN.matcher(path);
             if (telemetryMatcher.matches() && "GET".equals(method)) {
@@ -271,6 +284,160 @@ public class TripApiHandler {
             response.put("trips", tripsArray);
         } catch (Exception e) {
             logger.error("Error building trips list response", e);
+        }
+        return response;
+    }
+
+    // Background-recovery state. The scan can take minutes on a large FUSE SD,
+    // so POST /api/trips/recover validates + starts a worker and returns
+    // immediately; the UI polls GET /api/trips/recover/status. Single global
+    // state is fine — recovery is single-flighted in TripDatabase anyway.
+    private static final java.util.concurrent.atomic.AtomicBoolean recoverRunning =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private static volatile JSONObject lastRecoverResult = null;   // null until first run completes
+
+    /**
+     * POST /api/trips/recover — START a background rebuild of trip rows from
+     * surviving {@code <id>.jsonl.gz} telemetry files whose DB row is missing
+     * (history lost to the SD-drop reaper bug; the files were never touched).
+     * Validates synchronously (fast), then runs the scan off the HTTP thread.
+     * Returns {started:true} or {started:false,running:true} if already going.
+     */
+    private JSONObject handleStartRecoverTrips() {
+        final TripDatabase db = manager.getDatabase();
+        if (db == null) {
+            return errorResponse("Trip database not available", 500);
+        }
+
+        final com.overdrive.app.storage.StorageManager sm;
+        try {
+            sm = com.overdrive.app.storage.StorageManager.getInstance();
+        } catch (Throwable e) {
+            return errorResponse("Trips storage not available", 500);
+        }
+
+        // Configured trips volume is external but not mounted → can't read the
+        // files; return the "insert the card" 409 FIRST (don't gate on the dir
+        // scan: getAllTripsDirs always includes the internal fallback dir).
+        boolean configuredExternalButUnmounted = false;
+        try {
+            com.overdrive.app.storage.StorageManager.StorageType configured = sm.getTripsStorageType();
+            if (configured == com.overdrive.app.storage.StorageManager.StorageType.SD_CARD && !sm.isSdCardAvailable()) {
+                configuredExternalButUnmounted = true;
+            } else if (configured == com.overdrive.app.storage.StorageManager.StorageType.USB && !sm.isUsbAvailable()) {
+                configuredExternalButUnmounted = true;
+            }
+        } catch (Throwable ignored) {}
+        if (configuredExternalButUnmounted) {
+            return errorResponse(
+                "Trip storage isn't available. Your trips are saved on a removable "
+                + "card that isn't detected right now — insert it and try again.", 409);
+        }
+
+        final java.util.List<java.io.File> dirs;
+        java.util.List<java.io.File> resolved;
+        try { resolved = sm.getAllTripsDirs(); } catch (Throwable e) { resolved = null; }
+        dirs = resolved;
+        boolean haveAnyDir = false;
+        if (dirs != null) {
+            for (java.io.File d : dirs) { if (d != null && d.isDirectory()) { haveAnyDir = true; break; } }
+        }
+        if (!haveAnyDir) {
+            return errorResponse("Trip storage isn't available right now.", 409);
+        }
+
+        // Single-flight at the handler level too (in addition to TripDatabase's
+        // own guard) so we don't spawn a redundant worker.
+        if (!recoverRunning.compareAndSet(false, true)) {
+            JSONObject busy = new JSONObject();
+            try { busy.put("started", false); busy.put("running", true);
+                  busy.put("message", "Recovery is already running…"); } catch (Exception ignored) {}
+            return busy;
+        }
+        lastRecoverResult = null;
+
+        Thread worker = new Thread(() -> {
+            try {
+                TripDatabase.RecoveryResult r = db.recoverTripsFromDisk(dirs);
+                if (r.recovered > 0) {
+                    try { sm.ensureTripsSpace(0); }   // re-enforce limit + refresh size cache
+                    catch (Exception ex) { logger.warn("Async trips cleanup after recovery failed: " + ex.getMessage()); }
+                }
+                lastRecoverResult = buildRecoverResult(r);
+            } catch (Throwable t) {
+                logger.error("Trips recovery worker failed", t);
+                JSONObject err = new JSONObject();
+                try { err.put("success", false); err.put("done", true);
+                      err.put("message", "Recovery failed: " + t.getMessage()); } catch (Exception ignored) {}
+                lastRecoverResult = err;
+            } finally {
+                recoverRunning.set(false);
+            }
+        }, "TripsRecover");
+        // start() can throw (OutOfMemoryError "unable to create native thread"
+        // under thread-count/ulimit pressure) BEFORE the runnable's finally can
+        // reset recoverRunning. Without this guard the single-flight latch would
+        // stay true for the daemon's life, wedging ALL future recovery (every
+        // POST loses the CAS, status forever reports running). Catch Throwable
+        // (the OOM case is an Error, not an Exception) and release the latch.
+        try {
+            worker.start();
+        } catch (Throwable t) {
+            recoverRunning.set(false);
+            logger.error("Failed to start TripsRecover worker", t);
+            return errorResponse("Could not start recovery — try again.", 500);
+        }
+
+        JSONObject started = new JSONObject();
+        try { started.put("started", true); started.put("running", true); } catch (Exception ignored) {}
+        return started;
+    }
+
+    /**
+     * GET /api/trips/recover/status — poll the background recovery. Returns
+     * {running:true} while in progress, or the final {done:true, success,
+     * scanned, recovered, skipped, message} once complete.
+     */
+    private JSONObject handleRecoverStatus() {
+        JSONObject resp = new JSONObject();
+        try {
+            if (recoverRunning.get()) {
+                resp.put("running", true);
+                resp.put("done", false);
+            } else if (lastRecoverResult != null) {
+                return lastRecoverResult;   // already carries done:true
+            } else {
+                resp.put("running", false);
+                resp.put("done", false);    // no run yet this session
+            }
+        } catch (Exception e) {
+            logger.error("Error building recover status", e);
+        }
+        return resp;
+    }
+
+    private JSONObject buildRecoverResult(TripDatabase.RecoveryResult r) {
+        JSONObject response = new JSONObject();
+        try {
+            response.put("success", true);
+            response.put("done", true);
+            response.put("scanned", r.scanned);
+            response.put("recovered", r.recovered);
+            response.put("skipped", r.skipped);
+            String msg;
+            if (r.recovered > 0) {
+                msg = "Recovered " + r.recovered + " trip"
+                        + (r.recovered == 1 ? "" : "s")
+                        + " from telemetry files. Energy and driving-score details "
+                        + "aren't available for recovered trips.";
+            } else if (r.scanned == 0) {
+                msg = "No telemetry files found in trip storage.";
+            } else {
+                msg = "No missing trips to recover — your history is already complete.";
+            }
+            response.put("message", msg);
+        } catch (Exception e) {
+            logger.error("Error building recover response", e);
         }
         return response;
     }
@@ -872,6 +1039,7 @@ public class TripApiHandler {
         int sumScore = 0, sumDuration = 0;
         double sumSpeed = 0, sumCost = 0;
         int count = 0;
+        int scoredCount = 0;   // trips with a real DNA score (recovered trips have 0)
 
         for (TripRecord t : candidates) {
             if (t.id == tripId) continue;
@@ -887,7 +1055,12 @@ public class TripApiHandler {
             double eff = t.efficiencySocPerKm;
             similar.put(t.toSummaryJson());
             sumEff += eff;
-            sumScore += t.getOverallScore();
+            // Only fold REAL scores into the average. Recovered-from-telemetry
+            // trips carry a 0 overall score (no DNA data), which would drag
+            // avgScore down — exclude them via a separate scoredCount, matching
+            // how getAverageDna and the rollups treat unscored rows.
+            int overall = t.getOverallScore();
+            if (overall > 0) { sumScore += overall; scoredCount++; }
             sumDuration += t.durationSeconds;
             sumSpeed += t.avgSpeedKmh;
             sumCost += t.tripCost;
@@ -909,7 +1082,7 @@ public class TripApiHandler {
             if (count > 0) {
                 JSONObject stats = new JSONObject();
                 stats.put("avgEfficiency", sumEff / count);
-                stats.put("avgScore", sumScore / count);
+                stats.put("avgScore", scoredCount > 0 ? sumScore / scoredCount : 0);
                 stats.put("avgDurationSeconds", sumDuration / count);
                 stats.put("avgSpeedKmh", sumSpeed / count);
                 stats.put("avgCost", sumCost / count);
@@ -1006,7 +1179,8 @@ public class TripApiHandler {
                     com.overdrive.app.monitor.SocHistoryDatabase.getInstance().getSohEstimator();
                 if (soh != null && soh.getNominalCapacityKwh() > 0) {
                     double nominal = soh.getNominalCapacityKwh();
-                    double sohPercent = soh.hasEstimate() ? soh.getCurrentSoh() : 100.0;
+                    // Displayed (capped, anchored) SOH — same frame as the UI.
+                    double sohPercent = soh.hasDisplaySoh() ? soh.getDisplaySoh() : 100.0;
                     double usableKwh = nominal * (sohPercent / 100.0);
                     double socDelta = trip.socStart - trip.socEnd;
                     double estimatedEnergy = (socDelta / 100.0) * usableKwh;
@@ -1049,14 +1223,24 @@ public class TripApiHandler {
         // The DB load path preserves any previously-stored fuelCost via
         // readTripFromResultSet, and the `trip.fuelCost <= 0` guard below
         // means we only fill from current config when the field is empty.
-        if (trip.isPhev && config != null
-                && trip.fuelPctStart >= 0 && trip.fuelPctEnd >= 0
-                && trip.fuelPctStart >= trip.fuelPctEnd
-                && (trip.fuelPctStart - trip.fuelPctEnd) >= 1.0) {
-            double tankL = config.getTankCapacityL();
-            double pricePerL = config.getFuelPricePerL();
-            if (tankL > 0) {
-                double litres = ((trip.fuelPctStart - trip.fuelPctEnd) / 100.0) * tankL;
+        if (trip.isPhev && config != null) {
+            // Resolve litres the same way computeSummary does: metered HAL
+            // accumulator delta first (independent of tank size), then the
+            // legacy fuelPct×tank estimate. A reset/rollover (end < start)
+            // falls through to the estimate.
+            double litres = 0;
+            if (trip.fuelConStart >= 0 && trip.fuelConEnd >= 0
+                    && trip.fuelConEnd >= trip.fuelConStart) {
+                litres = trip.fuelConEnd - trip.fuelConStart;
+            } else if (trip.fuelPctStart >= 0 && trip.fuelPctEnd >= 0
+                    && trip.fuelPctStart >= trip.fuelPctEnd
+                    && (trip.fuelPctStart - trip.fuelPctEnd) >= 1.0
+                    && config.getTankCapacityL() > 0) {
+                litres = ((trip.fuelPctStart - trip.fuelPctEnd) / 100.0) * config.getTankCapacityL();
+            }
+
+            if (litres > 0) {
+                double pricePerL = config.getFuelPricePerL();
                 if (trip.litresUsed <= 0) trip.litresUsed = litres;
                 if (pricePerL > 0 && trip.fuelCost <= 0) {
                     // Preserve the at-trip-end snapshot if one was stored,

@@ -379,7 +379,59 @@ public class SurveillanceIpcServer implements Runnable {
                     response.put("success", ok);
                     break;
                 }
-                    
+
+                // ==================== CONFIG BACKUP / RESTORE ====================
+                // Single core lives in ConfigBackupService; web + app + Telegram
+                // all reach it through these two commands (no duplicated logic).
+
+                // Build a backup bundle (settings + device-id snapshot). Read-only.
+                // NOT public-mode gated (unlike update install): the owner opted to
+                // allow backup/restore over the tunnel, relying on JWT auth alone —
+                // /api/backup/* is a non-public path so AuthMiddleware enforces a
+                // token in every mode. The bundle carries credentials, so the UI
+                // warns to keep the file private.
+                case "EXPORT_CONFIG": {
+                    // includeTrips opts the (location-bearing) trip history into
+                    // the bundle; default settings-only.
+                    boolean includeTrips = request.optBoolean("includeTrips", false);
+                    JSONObject bundle = com.overdrive.app.config.ConfigBackupService.buildBundle(
+                            com.overdrive.app.updater.AppUpdater.getInstalledVersion(),
+                            deviceModelString(),
+                            System.currentTimeMillis(),
+                            includeTrips);
+                    response.put("success", true);
+                    response.put("bundle", bundle);
+                    break;
+                }
+
+                // Transactional whole-config restore. The atomic write + single
+                // coordinated listener reload live in ConfigBackupService /
+                // UnifiedConfigManager.saveConfig. CONFIG_LOCK serialises against
+                // peer UPDATE_SECTION/UPDATE_VALUES writers in this JVM; the
+                // file lock inside saveConfig serialises across daemon JVMs.
+                case "REPLACE_CONFIG": {
+                    // NOT public-mode gated — owner opted to allow remote restore
+                    // over the tunnel (JWT-gated; confirm=true still required by the
+                    // HTTP handler).
+                    JSONObject bundle = request.optJSONObject("bundle");
+                    if (bundle == null) {
+                        response.put("success", false);
+                        response.put("error", "missing bundle");
+                        break;
+                    }
+                    com.overdrive.app.config.ConfigBackupService.ApplyResult res;
+                    synchronized (CONFIG_LOCK) {
+                        res = com.overdrive.app.config.ConfigBackupService.applyBundle(
+                                bundle,
+                                com.overdrive.app.updater.AppUpdater.getInstalledVersion(),
+                                deviceModelString());
+                    }
+                    response.put("success", res.getSuccess());
+                    response.put("message", res.getMessage());
+                    response.put("warnings", new org.json.JSONArray(res.getWarnings()));
+                    break;
+                }
+
                 case "GET_STATUS":
                     response.put("success", true);
                     response.put("status", getSurveillanceStatus());
@@ -1356,6 +1408,16 @@ public class SurveillanceIpcServer implements Runnable {
         return config;
     }
     
+    /** Device model for the backup-bundle manifest (same-device advisory). */
+    private static String deviceModelString() {
+        try {
+            String m = android.os.Build.MODEL;
+            return (m == null || m.isEmpty()) ? "unknown" : m;
+        } catch (Exception e) {
+            return "unknown";
+        }
+    }
+
     private JSONObject getSurveillanceStatus() throws Exception {
         JSONObject status = new JSONObject();
         

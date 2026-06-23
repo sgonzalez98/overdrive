@@ -99,6 +99,27 @@
                     android:textColor="@android:color/white"
                     android:textSize="9sp"
                     tools:text="EVENT" />
+
+                <!-- Storage tag (INTERNAL / SD_CARD / USB) — where the clip
+                     actually landed. Makes the silent SD→internal fallback (SD
+                     bridged behind the USB power rail) visible per file. The
+                     adapter sets the text, icon and tint; hidden when the
+                     storage type is unknown. -->
+                <TextView
+                    android:id="@+id/tvStorageBadge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:background="#99000000"
+                    android:drawablePadding="3dp"
+                    android:fontFamily="sans-serif-medium"
+                    android:paddingHorizontal="6dp"
+                    android:paddingVertical="2dp"
+                    android:textColor="@android:color/white"
+                    android:textSize="9sp"
+                    android:visibility="gone"
+                    tools:text="SD"
+                    tools:visibility="visible" />
             </LinearLayout>
 
             <!-- Top-left camera/type chip -->

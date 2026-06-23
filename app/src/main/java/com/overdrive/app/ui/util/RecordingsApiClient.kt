@@ -91,7 +91,13 @@ object RecordingsApiClient {
          */
         val placeContains: String? = null,
         /** ISO 3166-1 alpha-2 country, lowercased. */
-        val country: String? = null
+        val country: String? = null,
+        /**
+         * Physical-volume filter: "INTERNAL" / "SD_CARD" / "USB". Empty = all
+         * volumes (default; the index already spans every storage location).
+         * Sent to the server as `storage=a,b` CSV.
+         */
+        val storages: Set<String> = emptySet()
     ) {
         /**
          * Build the query string for /api/recordings. CSV joins to match
@@ -117,6 +123,7 @@ object RecordingsApiClient {
             if (!place.isNullOrEmpty()) sb.append("&place=").append(enc(place))
             if (!placeContains.isNullOrEmpty()) sb.append("&placeContains=").append(enc(placeContains))
             if (!country.isNullOrEmpty()) sb.append("&country=").append(enc(country))
+            if (storages.isNotEmpty()) sb.append("&storage=").append(enc(storages.joinToString(",")))
             return sb.toString()
         }
 
@@ -131,6 +138,7 @@ object RecordingsApiClient {
             if (!place.isNullOrEmpty()) appendParam(sb, "place", place)
             if (!placeContains.isNullOrEmpty()) appendParam(sb, "placeContains", placeContains)
             if (!country.isNullOrEmpty()) appendParam(sb, "country", country)
+            if (storages.isNotEmpty()) appendParam(sb, "storage", storages.joinToString(","))
             return sb.toString()
         }
 
@@ -435,6 +443,11 @@ object RecordingsApiClient {
         // lets RecordingSectionHeaderDecoration skip its own date math.
         val bucketLabel = rec.optString("bucketLabel", "").takeIf { it.isNotEmpty() }
 
+        // Per-clip storage tag (INTERNAL / SD_CARD / USB), classified
+        // server-side from the path. Absent on legacy daemon builds → null,
+        // adapter omits the badge.
+        val storageType = rec.optString("storage").takeIf { it.isNotEmpty() }
+
         return RecordingFile(
             file = File(absPath),
             cameraId = cameraId,
@@ -457,7 +470,8 @@ object RecordingsApiClient {
             placeSource = placeSource,
             startLat = startLat,
             startLng = startLng,
-            bucketLabel = bucketLabel
+            bucketLabel = bucketLabel,
+            storageType = storageType
         )
     }
 

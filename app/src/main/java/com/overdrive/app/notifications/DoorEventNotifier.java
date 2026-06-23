@@ -97,9 +97,14 @@ public final class DoorEventNotifier {
         } catch (Exception ignored) {}
 
         try {
+            // door.opened = WARN (security-relevant while parked → reaches
+            // Telegram via TelegramSink). door.closed = INFO, matching the
+            // category registry (vehicle.security.door.closed severity "info")
+            // and TelegramSink's documented INFO/Web-Push-only contract — a
+            // routine close shouldn't buzz Telegram, only the web push.
             NotificationBus.get().publish(new NotificationEvent(
                     category,
-                    NotificationEvent.Severity.WARN,
+                    opened ? NotificationEvent.Severity.WARN : NotificationEvent.Severity.INFO,
                     opened
                             ? Messages.get("notifications.door_opened", areaLabel)
                             : Messages.get("notifications.door_closed", areaLabel),

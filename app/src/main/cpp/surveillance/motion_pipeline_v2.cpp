@@ -43,7 +43,17 @@ void v2_initPipeline(PipelineStateV2* state) {
         qs.centroidCount = 0;
         qs.oscillationHistoryIndex = 0;
         qs.oscillationHistoryCount = 0;
-        
+
+        // Stage 4b: flow coherence. Start at 1.0 (coherent) so a genuine
+        // translation isn't demoted before the net-flow window fills.
+        qs.lastFlowCoherence = 1.0f;
+        qs.netRingIndex = 0;
+        qs.netRingCount = 0;
+        for (int n = 0; n < V2_FLOW_NET_WINDOW; n++) {
+            qs.netRingX[n] = 0.0f;
+            qs.netRingY[n] = 0.0f;
+        }
+
         // Default ROI: all blocks enabled
         for (int i = 0; i < V2_TOTAL_BLOCKS; i++) {
             qs.blockRoiMask[i] = true;
@@ -471,7 +481,8 @@ static int stage4_connectedComponents(
     const bool confirmedBlocks[V2_TOTAL_BLOCKS],
     int componentLabels[V2_TOTAL_BLOCKS],
     float* largestCentroidX,
-    float* largestCentroidY)
+    float* largestCentroidY,
+    int* outLargestLabel)
 {
     // Initialize labels to -1 (unvisited)
     for (int i = 0; i < V2_TOTAL_BLOCKS; i++) {
@@ -531,8 +542,141 @@ static int stage4_connectedComponents(
         
         currentLabel++;
     }
-    
+
+    if (outLargestLabel) *outLargestLabel = largestLabel;
     return largestSize;
+}
+
+// ============================================================================
+// Stage 4b: Motion-direction flow coherence (flag / shadow / foliage rejection)
+//
+// For each block in the largest connected component, estimate a per-block flow
+// vector by an integer SAD block-match of the current 32×32 block against the
+// N-3 reference over a ±V2_FLOW_SEARCH_RADIUS window (stride-4 grayscale, ~64
+// samples/block). A real intruder translates → vectors agree → |net|/|gross|
+// (coherence) → 1 and net displacement accumulates over the window. A flag /
+// foliage / sweeping shadow oscillates in place → vectors cancel → coherence
+// → 0 and windowed net drift stays ≈ 0.
+//
+// Returns the per-frame net vector via outNetX/outNetY (block units) and the
+// instantaneous coherence ratio via outCoherence. Touches only the largest
+// component's blocks (typically 2–15 of 70), reusing the existing N-3 ring, so
+// the per-frame cost is bounded. A uniform low-variance block (flag interior,
+// blank wall) is skipped — block-matching it is the aperture problem and would
+// fabricate a spurious vector; we only trust textured blocks.
+// ============================================================================
+
+static inline int lumaAt(const uint8_t* img, int x, int y) {
+    int idx = (y * V2_QUADRANT_WIDTH + x) * V2_BYTES_PER_PIXEL;
+    int r = img[idx] & 0xFF;
+    int g = img[idx + 1] & 0xFF;
+    int b = img[idx + 2] & 0xFF;
+    return (r + (g << 1) + b) >> 2;
+}
+
+static float stage4b_flowCoherence(
+    const uint8_t* current,
+    const uint8_t* reference,
+    const int componentLabels[V2_TOTAL_BLOCKS],
+    int largestLabel,
+    float* outNetX, float* outNetY)
+{
+    *outNetX = 0.0f;
+    *outNetY = 0.0f;
+    if (largestLabel < 0) return -1.0f;
+
+    float netX = 0.0f, netY = 0.0f;
+    float gross = 0.0f;
+    int matchedBlocks = 0;
+
+    // Bound worst-case cost: coherence is a statistical average over the
+    // component's blocks, so matching ~12 of them yields the same ratio as
+    // matching all of them. Capping here keeps the per-frame block-match count
+    // bounded even if a large blob forms (near the 25% global-flash ceiling),
+    // so Stage 4b stays well under ~1ms/quadrant on the shared Adreno-610 bus.
+    const int MAX_FLOW_BLOCKS = 12;
+
+    for (int blockIdx = 0; blockIdx < V2_TOTAL_BLOCKS && matchedBlocks < MAX_FLOW_BLOCKS; blockIdx++) {
+        if (componentLabels[blockIdx] != largestLabel) continue;
+
+        int bx = blockIdx % V2_GRID_COLS;
+        int by = blockIdx / V2_GRID_COLS;
+        int startX = bx * V2_BLOCK_SIZE;
+        int startY = by * V2_BLOCK_SIZE;
+
+        // Keep the ±R search window inside the quadrant.
+        int x0 = startX, y0 = startY;
+        if (x0 < V2_FLOW_SEARCH_RADIUS) x0 = V2_FLOW_SEARCH_RADIUS;
+        if (y0 < V2_FLOW_SEARCH_RADIUS) y0 = V2_FLOW_SEARCH_RADIUS;
+        int xMax = V2_QUADRANT_WIDTH  - V2_BLOCK_SIZE - V2_FLOW_SEARCH_RADIUS;
+        int yMax = V2_QUADRANT_HEIGHT - V2_BLOCK_SIZE - V2_FLOW_SEARCH_RADIUS;
+        if (x0 > xMax) x0 = xMax;
+        if (y0 > yMax) y0 = yMax;
+        if (x0 < 0 || y0 < 0) continue;  // block too close to edge to search
+
+        // Cache the current block's stride-4 grayscale samples ONCE: they are
+        // invariant across the ~169 search positions below, so recomputing them
+        // each time would 169× the luma loads. 8×8 = 64 samples max.
+        const int SPB = V2_BLOCK_SIZE / 4;  // samples per block axis (8)
+        int curSamp[SPB * SPB];
+        int n = 0, sampleSum = 0;
+        for (int y = 0; y < V2_BLOCK_SIZE; y += 4) {
+            for (int x = 0; x < V2_BLOCK_SIZE; x += 4) {
+                int v = lumaAt(current, x0 + x, y0 + y);
+                curSamp[n++] = v;
+                sampleSum += v;
+            }
+        }
+        int sampleCount = n;
+        if (sampleCount == 0) continue;
+
+        // Variance gate (aperture problem): a flat, low-texture patch
+        // block-matches ambiguously and would fabricate a vector. Skip it.
+        int meanL = sampleSum / sampleCount;
+        int texture = 0;
+        for (int i = 0; i < sampleCount; i++) texture += std::abs(curSamp[i] - meanL);
+        // ~64 samples; require average per-sample deviation ≥ 6 luma.
+        if (texture < sampleCount * 6) continue;
+
+        // Integer SAD block-match over the ±R window (stride-4 grayscale),
+        // matching the cached current samples against the N-3 reference.
+        long bestSad = -1;
+        int bestDx = 0, bestDy = 0;
+        for (int dy = -V2_FLOW_SEARCH_RADIUS; dy <= V2_FLOW_SEARCH_RADIUS; dy++) {
+            for (int dx = -V2_FLOW_SEARCH_RADIUS; dx <= V2_FLOW_SEARCH_RADIUS; dx++) {
+                long sad = 0;
+                int si = 0;
+                for (int y = 0; y < V2_BLOCK_SIZE; y += 4) {
+                    for (int x = 0; x < V2_BLOCK_SIZE; x += 4) {
+                        int ref = lumaAt(reference, x0 + x + dx, y0 + y + dy);
+                        sad += std::abs(curSamp[si++] - ref);
+                    }
+                }
+                if (bestSad < 0 || sad < bestSad) {
+                    bestSad = sad;
+                    bestDx = dx;
+                    bestDy = dy;
+                }
+            }
+        }
+
+        netX += bestDx;
+        netY += bestDy;
+        gross += std::sqrt((float)(bestDx * bestDx + bestDy * bestDy));
+        matchedBlocks++;
+    }
+
+    *outNetX = netX / V2_BLOCK_SIZE;  // convert px → block units
+    *outNetY = netY / V2_BLOCK_SIZE;
+
+    if (matchedBlocks == 0 || gross < 1e-3f) {
+        // No textured moving blocks (e.g. uniform flag, or no real motion).
+        // Treat as "unknown" — return -1 so the caller fails open.
+        return -1.0f;
+    }
+
+    float netMag = std::sqrt(netX * netX + netY * netY);
+    return netMag / gross;  // coherence ∈ [0,1]
 }
 
 // ============================================================================
@@ -553,14 +697,21 @@ static int stage5_behaviorClassification(
     qs->centroidIndex = (qs->centroidIndex + 1) % V2_CENTROID_HISTORY;
     if (qs->centroidCount < V2_CENTROID_HISTORY) qs->centroidCount++;
     
+    // Loiter window, clamped to what the centroid ring buffer can actually hold.
+    // Without this clamp, a loiteringFrames larger than V2_CENTROID_HISTORY makes
+    // the gate below permanently true (centroidCount caps at V2_CENTROID_HISTORY),
+    // so THREAT_HIGH would be unreachable — the exact bug that pinned detections at
+    // MEDIUM whenever loiter was configured beyond the buffer size.
+    int loiterWindow = std::min(config->loiteringFrames, V2_CENTROID_HISTORY);
+
     // Need enough history for loitering analysis
-    if (qs->centroidCount < config->loiteringFrames) {
+    if (qs->centroidCount < loiterWindow) {
         // Not enough history yet — default to medium threat if motion exists
         return THREAT_MEDIUM;
     }
-    
+
     // Check loitering: has centroid stayed within radius for N frames?
-    int framesToCheck = std::min(config->loiteringFrames, qs->centroidCount);
+    int framesToCheck = std::min(loiterWindow, qs->centroidCount);
     float maxDrift = 0.0f;
     float firstX = 0, firstY = 0;
     float lastX = 0, lastY = 0;
@@ -636,9 +787,14 @@ static void processQuadrant(
 {
     // Clear result
     memset(result, 0, sizeof(QuadrantResultV2));
-    
+    // Flow-coherence sentinel: memset zeroed these, but 0.0 means "perfectly
+    // incoherent" to Java. -1 = "not computed this frame" → Java fails open to
+    // the person-tracker test. Stage 4b overwrites these only when it runs.
+    result->flowCoherence = -1.0f;
+    result->netDriftBlocks = -1.0f;
+
     if (!qs->enabled) return;
-    
+
     // --- Stage 1: Brightness check ---
     float meanLuma = 0;
     bool suppressed = stage1_brightnessCheck(qs, quadrantRgb, config, &meanLuma);
@@ -861,10 +1017,48 @@ static void processQuadrant(
     // --- Stage 4: Connected components ---
     int componentLabels[V2_TOTAL_BLOCKS];
     float centroidX = 0, centroidY = 0;
-    int largestComponent = stage4_connectedComponents(confirmedBlocks, componentLabels, &centroidX, &centroidY);
+    int largestLabel = -1;
+    int largestComponent = stage4_connectedComponents(confirmedBlocks, componentLabels, &centroidX, &centroidY, &largestLabel);
     result->componentSize = largestComponent;
     result->centroidX = centroidX;
     result->centroidY = centroidY;
+
+    // --- Stage 4b: Flow coherence (flag/shadow/foliage rejection) ---
+    // Estimate the largest component's motion direction. Update the per-frame
+    // net-displacement ring and EMA-smooth the coherence ratio. Computed here
+    // (before Stage 5) so Stage 5's loiter branch can demote an INCOHERENT
+    // stationary loiter — a waving flag / sweeping shadow — to THREAT_MEDIUM
+    // while a coherently translating approach keeps THREAT_HIGH.
+    {
+        float netX = 0.0f, netY = 0.0f;
+        float coh = stage4b_flowCoherence(quadrantRgb, referenceFrame,
+                                          componentLabels, largestLabel, &netX, &netY);
+        // Push this frame's net vector into the ring (even when coh<0, push 0 so
+        // a stalled/uniform frame decays the windowed drift rather than freezing it).
+        qs->netRingX[qs->netRingIndex] = (coh >= 0.0f) ? netX : 0.0f;
+        qs->netRingY[qs->netRingIndex] = (coh >= 0.0f) ? netY : 0.0f;
+        qs->netRingIndex = (qs->netRingIndex + 1) % V2_FLOW_NET_WINDOW;
+        if (qs->netRingCount < V2_FLOW_NET_WINDOW) qs->netRingCount++;
+
+        if (coh >= 0.0f) {
+            // EMA-smooth (alpha 0.4) so a single aperture-ambiguous frame can't
+            // flip the verdict; init was 1.0 (coherent) to protect early frames.
+            qs->lastFlowCoherence = qs->lastFlowCoherence * 0.6f + coh * 0.4f;
+        }
+
+        // Windowed cumulative net drift magnitude (blocks).
+        float sumX = 0.0f, sumY = 0.0f;
+        for (int n = 0; n < qs->netRingCount; n++) { sumX += qs->netRingX[n]; sumY += qs->netRingY[n]; }
+        float netDrift = std::sqrt(sumX * sumX + sumY * sumY);
+
+        // Only publish a trustworthy signal once enough flow history has accrued
+        // AND this frame actually produced a usable coherence reading. Otherwise
+        // leave the -1 sentinel so Java fails open to the tracker test.
+        if (qs->netRingCount >= config->coherenceMinFrames && coh >= 0.0f) {
+            result->flowCoherence = qs->lastFlowCoherence;
+            result->netDriftBlocks = netDrift;
+        }
+    }
     
     // Check minimum component size
     if (largestComponent < config->minComponentSize) {
@@ -897,9 +1091,33 @@ static void processQuadrant(
     
     // --- Stage 5: Behavioral classification ---
     int threatLevel = stage5_behaviorClassification(qs, centroidX, centroidY, largestComponent, config);
+
+    // --- Stage 5b: Coherence demotion of incoherent stationary loiter ---
+    // Stage 5 calls a near-stationary centroid THREAT_HIGH ("loiter") on
+    // geometry alone — exactly what a waving flag / sweeping shadow produces.
+    // If Stage 4b has a trustworthy reading (flowCoherence >= 0, i.e. enough
+    // history AND a textured moving component) and the motion is INCOHERENT
+    // (low ratio AND low windowed net drift), demote HIGH → MEDIUM so it must
+    // clear the Java YOLO confirmation gate. DOWNGRADE not drop: a real but
+    // YOLO-invisible loiterer still records via the Java 2s-timeout fallback.
+    // Fail-open: when flowCoherence < 0 (warmup / uniform / coherence stage
+    // absent) we leave the THREAT_HIGH verdict untouched — current behavior.
+    if (threatLevel >= THREAT_HIGH && result->flowCoherence >= 0.0f) {
+        bool incoherent = (result->flowCoherence < config->coherenceRatioMin)
+                       && (result->netDriftBlocks < config->coherenceNetMin);
+        if (incoherent) {
+            threatLevel = THREAT_MEDIUM;
+            if (frameCount % 50 == 0) {
+                LOGI_V2("Q%d: HIGH→MEDIUM demote (incoherent loiter: coherence=%.2f<%.2f, netDrift=%.1f<%.1f) — likely flag/shadow",
+                        quadrantIdx, result->flowCoherence, config->coherenceRatioMin,
+                        result->netDriftBlocks, config->coherenceNetMin);
+            }
+        }
+    }
+
     result->threatLevel = threatLevel;
     result->motionDetected = (threatLevel > THREAT_NONE);
-    
+
     if (result->motionDetected) {
         const char* threatNames[] = {"NONE", "LOW(pass)", "MEDIUM(approach)", "HIGH(loiter)"};
         LOGI_V2("Q%d: >>> MOTION DETECTED <<<\n"

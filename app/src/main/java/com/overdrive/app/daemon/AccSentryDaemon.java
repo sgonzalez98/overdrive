@@ -306,10 +306,8 @@ public class AccSentryDaemon {
      *   - PowerDevice  -1442840502 = 0 (release power hold)
      *
      * ENABLE path (MCU status 1 or 10):
-     *   - SpecialDevice 782237711 = {@link #remotePowerModeEnableValue()} (5V rail:
-     *     1=hold when USB toggle ON, 0=release when OFF)
-     *   - SpecialDevice 782237728 = {@link #dataModulePowerEnableValue()} (USB sub-rail:
-     *     1=on when USB toggle ON, 2=sleep when OFF)
+     *   - SpecialDevice 782237711 = 1 (sentry keep-alive ON)
+     *   - SpecialDevice 782237728 = 1 (Modem/USB rail ON)
      *   - PowerDevice  -1442840502 = 1 ON dilink4 ONLY — esco kh/C6861d.java:344
      *     writes this on its sentry wake path. Without it the byd_apa MCU
      *     drops the AVM/ISP rail seconds after ACC OFF and any subsequent
@@ -319,22 +317,12 @@ public class AccSentryDaemon {
      * ENABLE path (MCU needs wake):
      *   - wakeUpMcu() loop, then signals + dilink4 power hold are set when MCU is ready.
      *
-     * <p><b>USB rail is user-configurable and the 5 V parent rail moves with it.</b>
-     * The "Keep USB powered" toggle governs the 5 V peripheral rail
-     * ({@link #SPECIAL_CONFIG_REMOTE_POWER_MODE}, 782237711) AND its USB/modem sub-rail
-     * ({@link #SPECIAL_CONFIG_DATA_MODULE_POWER}, 782237728) together. Toggle ON holds
-     * both (5V=1, USB=1); toggle OFF releases both (5V=0, USB=2). Releasing the 5 V
-     * PARENT is what actually cuts USB — the sub-rail "allow sleep" (2) alone is
-     * ignored by the BCM/MCU while the parent is held at 1 (root-caused on-device:
-     * disabling only wrote 782237728=2 while 782237711=1 kept USB powered). Mirrors the
-     * reference USB-release path exactly (C1310c: 782237711=0, 782237728=2).
-     *
-     * <p>The esco AVM keys (1901/1902), the MCU power hold (-1442840502), and the OEM
-     * 409 camera/ISP vote still fire UNCONDITIONALLY, so cameras keep running on any
-     * trim whose ISP/AVM rail is independent of the 5 V rail. On trims where the camera
-     * rail is derived from the 5 V rail, turning the USB toggle OFF can also stop parked
-     * surveillance — the accepted trade-off for a toggle that genuinely cuts USB rather
-     * than silently leaving it powered.
+     * <p><b>ALL writes here are UNCONDITIONAL — identical regardless of the "Keep USB
+     * powered" toggle.</b> The SpecialDevice rail writes do NOT gate USB-port power on
+     * DiLink 3.0 (proven on-device). The toggle's ONLY effect is gating {@link
+     * #performSystemWakeUp()} in {@link #enterSentryMode()}: the AP wake state is the
+     * real USB lever (USB VBUS follows wakefulness). This method behaves the same in
+     * both toggle states.
      *
      * @param enable true to keep peripherals powered, false to restore stock behavior
      */
@@ -349,26 +337,18 @@ public class AccSentryDaemon {
             applyEscoSentrySpecialConfig(false);                    // dilink4-only esco-parity disable
             applySentryIspPowerVote(false);                         // release OEM 409 camera/ISP power vote (fleet-wide)
         } else {
-            // ENABLE — check MCU state first. The "Keep USB powered" toggle governs
-            // TWO writes that move together: the 5 V peripheral rail
-            // (SPECIAL_CONFIG_REMOTE_POWER_MODE) and its USB/data sub-rail
-            // (SPECIAL_CONFIG_DATA_MODULE_POWER). Toggle ON  → 5V=1, USB=1 (hold both).
-            // Toggle OFF → 5V=0, USB=2 (release both) — releasing the 5 V PARENT is
-            // what actually cuts USB; the sub-rail "allow sleep" alone is ignored while
-            // the parent is held. Mirrors the reference USB-release path exactly
-            // (C1310c: 782237711=0, 782237728=2). The esco/AVM keys, MCU hold, and OEM
-            // 409 camera/ISP vote below stay unconditional so cameras survive on trims
-            // whose ISP rail is independent of this 5 V rail.
-            final int usbVal = dataModulePowerEnableValue();
-            final int remoteVal = remotePowerModeEnableValue();
+            // ENABLE — check MCU state first. ALL peripheral rail writes below are
+            // UNCONDITIONAL and identical regardless of the "Keep USB powered" toggle.
+            // The toggle's ONLY effect is gating performSystemWakeUp() in enterSentryMode
+            // (the AP wake state is the real USB lever on DiLink 3.0; the SpecialDevice
+            // rail writes do NOT gate USB-port power here — proven on-device).
             int mcuStatus = getMcuStatus();
-            log("MCU status for peripheral power: " + mcuStatus
-                + " (USB/5V rail " + (usbVal == 1 ? "ON" : "released to sleep") + ")");
+            log("MCU status for peripheral power: " + mcuStatus);
 
             if (mcuStatus == 1 || mcuStatus == 10) {
                 // MCU is in normal standby — use signal-based path
-                setSpecialConfig(SPECIAL_CONFIG_REMOTE_POWER_MODE, remoteVal);  // 5V rail: 1=hold (default), 0=release (cuts USB)
-                setSpecialConfig(SPECIAL_CONFIG_DATA_MODULE_POWER, usbVal);     // USB sub-rail: 1=on (default), 2=sleep
+                setSpecialConfig(SPECIAL_CONFIG_REMOTE_POWER_MODE, 1);  // Sentry keep-alive ON
+                setSpecialConfig(SPECIAL_CONFIG_DATA_MODULE_POWER, 1);  // Modem/USB rail ON
                 applyEscoSentrySpecialConfig(true);                    // dilink4-only esco-parity enable
                 applyEscoMcuPowerHold(true);                           // dilink4-only McuStatus=1
                 applySentryIspPowerVote(true);                         // OEM 409 camera/ISP power vote (fleet-wide)
@@ -382,8 +362,8 @@ public class AccSentryDaemon {
                     int retryStatus = getMcuStatus();
                     log("MCU status after wake: " + retryStatus);
                     if (retryStatus == 1 || retryStatus == 10) {
-                        setSpecialConfig(SPECIAL_CONFIG_REMOTE_POWER_MODE, remoteVal);
-                        setSpecialConfig(SPECIAL_CONFIG_DATA_MODULE_POWER, usbVal);
+                        setSpecialConfig(SPECIAL_CONFIG_REMOTE_POWER_MODE, 1);
+                        setSpecialConfig(SPECIAL_CONFIG_DATA_MODULE_POWER, 1);
                         applyEscoSentrySpecialConfig(true);
                         applyEscoMcuPowerHold(true);
                         applySentryIspPowerVote(true);
@@ -391,8 +371,8 @@ public class AccSentryDaemon {
                         // One more attempt
                         wakeUpMcu();
                         try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
-                        setSpecialConfig(SPECIAL_CONFIG_REMOTE_POWER_MODE, remoteVal);
-                        setSpecialConfig(SPECIAL_CONFIG_DATA_MODULE_POWER, usbVal);
+                        setSpecialConfig(SPECIAL_CONFIG_REMOTE_POWER_MODE, 1);
+                        setSpecialConfig(SPECIAL_CONFIG_DATA_MODULE_POWER, 1);
                         applyEscoSentrySpecialConfig(true);
                         applyEscoMcuPowerHold(true);
                         applySentryIspPowerVote(true);
@@ -401,47 +381,6 @@ public class AccSentryDaemon {
                 }).start();
             }
         }
-    }
-
-    /**
-     * Value to write to {@link #SPECIAL_CONFIG_DATA_MODULE_POWER} (the Modem/USB
-     * sub-rail) on the ENABLE path: 1 = keep the USB rail powered (default), 2 = allow
-     * that rail to sleep (user opted out to save the 12 V battery). Value 2 (NOT 0) is
-     * the verified "allow sleep" request for this rail — mirrors the reference's USB
-     * release path (C1310c: 782237728=2). On its own this is only a soft request: the
-     * BCM/MCU honors it only when the PARENT 5 V rail ({@link
-     * #SPECIAL_CONFIG_REMOTE_POWER_MODE}) is ALSO released — see {@link
-     * #remotePowerModeEnableValue()}. Read fresh each ACC-OFF; defaults to 1 (keep on)
-     * on any config-read failure.
-     */
-    private static int dataModulePowerEnableValue() {
-        return isKeepUsbPowerOnAccOff() ? 1 : 2;
-    }
-
-    /**
-     * Value to write to {@link #SPECIAL_CONFIG_REMOTE_POWER_MODE} (the 5 V peripheral
-     * rail / sentry keep-alive) on the ENABLE path: 1 = hold the 5 V rail active
-     * (default), 0 = release it.
-     *
-     * <p><b>This is the lever that actually cuts USB.</b> USB hangs off the 5 V
-     * peripheral rail; the {@link #SPECIAL_CONFIG_DATA_MODULE_POWER}=2 sub-rail "allow
-     * sleep" request is overridden by the BCM/MCU as long as this parent rail is held
-     * at 1. So when the user turns "Keep USB powered" OFF we release this rail (0),
-     * exactly as the reference's USB-release path does (C1310c: 782237711=0,
-     * 782237728=2). This is the same value the ACC-ON teardown (DISABLE branch) writes.
-     *
-     * <p><b>Trade-off (intentional):</b> on trims where the camera/ISP power is derived
-     * from this same 5 V rail, releasing it can also stop parked surveillance while the
-     * toggle is OFF. That is the accepted behaviour for this toggle — it genuinely cuts
-     * USB rather than silently leaving it powered. The OEM 409 camera/ISP vote and the
-     * dilink4 esco/AVM keys still fire unconditionally below, so cameras survive on any
-     * trim where the ISP rail is independent of this 5 V rail.
-     *
-     * <p>Defaults to 1 (keep on) on any config-read failure so a transient read error
-     * can never disable parked surveillance unexpectedly.
-     */
-    private static int remotePowerModeEnableValue() {
-        return isKeepUsbPowerOnAccOff() ? 1 : 0;
     }
 
     // ==================== ESCO-PARITY MCU POWER HOLD (DILINK 4) ====================
@@ -1377,20 +1316,36 @@ public class AccSentryDaemon {
                 immediateWakeUpMcu();
                 
                 // 3. Configure peripheral power to keep camera/ISP/AVM rails active.
-                // ALWAYS enabled — surveillance must run while parked. The ONLY
-                // user-configurable part is the USB/data-module rail, handled INSIDE
-                // configurePeripheralPower via isKeepUsbPowerOnAccOff(); the camera
-                // power writes (esco AVM keys, MCU hold, 409 ISP vote, 5V sentry
-                // keep-alive) are unconditional so cameras never go dark.
+                // ALWAYS enabled and identical in both toggle states — all rail writes
+                // (esco AVM keys, MCU hold, 409 ISP vote, 5V sentry keep-alive, USB/modem
+                // rail) are unconditional so cameras never go dark. The "Keep USB powered"
+                // toggle does NOT touch these; it only gates performSystemWakeUp() below.
                 configurePeripheralPower(true);
 
                 // 4. Small delay to let MCU stabilize power rails
                 try { Thread.sleep(300); } catch (InterruptedException ignored) {}
-                
-                // 4. THEN wake the system (screen/CPU)
-                performSystemWakeUp();
-                
-                // 5. Start the keep-alive loop (maintains the wake state)
+
+                // 4. THEN wake the system (screen/CPU) — GATED ON THE "Keep USB powered"
+                // TOGGLE. On DiLink 3.0 the USB-port VBUS follows the AP wake state, not
+                // the SpecialDevice rail registers (rail writes proven ineffective
+                // on-device). Forcing wakefulness=Awake here is what keeps USB powered
+                // while parked. When the user turns "Keep USB powered" OFF we SKIP the
+                // forced wake so the AP can sleep on ACC-OFF and USB drops, saving the
+                // 12 V battery. Default ON → identical to the pre-toggle behaviour.
+                boolean keepUsbPowered = isKeepUsbPowerOnAccOff();
+                if (keepUsbPowered) {
+                    performSystemWakeUp();
+                } else {
+                    log("Keep-USB-power OFF: skipping forced system wake so AP can sleep "
+                        + "(USB drops). HAL events still wake on demand.");
+                }
+
+                // 5. Start the keep-alive loop. Still started even when USB-power is OFF:
+                // it re-asserts the OEM 409 camera/ISP vote and (dilink4) the AVC
+                // keep-alive that surveillance needs. Its userActivity() injection,
+                // which resets the AP sleep timer, is itself gated on the toggle inside
+                // the loop, so when USB-power is OFF the loop maintains the camera rail
+                // without re-forcing the AP awake — letting the AP sleep and USB drop.
                 startSystemKeepAlive();
 
                 // 5a. Schedule the V2 voltage monitor to start 35 s after ACC=OFF.
@@ -2156,7 +2111,17 @@ public class AccSentryDaemon {
                 try {
                     // 1. Maintain Network Interface Stability
                     ensureWifiEnabled();
-                    injectFakeUserActivity();
+                    // Fake-activity injection resets the AP sleep timer (2-arg
+                    // userActivity(long, true) at :2579 keeps the CPU awake without
+                    // turning the screen on). That directly defeats "Keep USB power"
+                    // OFF, where performSystemWakeUp() was deliberately skipped so the
+                    // AP can reach deep sleep and USB drops. Only inject when the
+                    // toggle is ON (default). The ISP/AVM camera vote and AVC
+                    // keep-alive below stay unconditional — they're the camera rail,
+                    // not the AP wake, and surveillance needs them either way.
+                    if (isKeepUsbPowerOnAccOff()) {
+                        injectFakeUserActivity();
+                    }
 
                     // ScreenDeterrent gate: if a screen deterrent is currently
                     // displaying (set by ScreenDeterrent.fire()), skip the
@@ -2178,9 +2143,28 @@ public class AccSentryDaemon {
                     // gate: only the slice of time when the GPU pipeline is
                     // actively consuming frames. Useful even on legacy if
                     // a dashcam mode is running across ACC OFF (rare).
+                    //
+                    // "Keep USB powered" gate: on DiLink 3.0 / legacy panoramic
+                    // trims the SD card is a USB-bridged reader (block major 8)
+                    // whose power rail follows the AP/display wake state. When
+                    // surveillance is suppressed (e.g. parked in a safe zone) the
+                    // GPU pipeline never starts, so cameraActiveUntilMs is never
+                    // published and isCameraPipelineActive() stays false — the
+                    // backlight-off tick then fires, the screen goes off,
+                    // injectFakeUserActivity() self-skips (it no-ops with the
+                    // screen off, see :2558), the AP sleeps, and the bridged-SD
+                    // rail drops ~90s into the park even though the user asked to
+                    // keep USB powered. So when the toggle is ON, hold the
+                    // backlight on regardless of pipeline state — this keeps the
+                    // AP awake (userActivity keeps re-pumping with the screen on)
+                    // and the SD mounted. Mirrors the toggle gate already on
+                    // performSystemWakeUp() (:1335) and injectFakeUserActivity()
+                    // (:2122). Toggle OFF → unchanged: let the screen sleep and
+                    // USB/SD drop to save the 12 V battery.
                     if (!isScreenDeterrentActive()
                             && !isDilink4CameraMode()
-                            && !isCameraPipelineActive()) {
+                            && !isCameraPipelineActive()
+                            && !isKeepUsbPowerOnAccOff()) {
                         setBacklightState(false);
                     }
 
@@ -2291,24 +2275,27 @@ public class AccSentryDaemon {
 
     /**
      * User toggle (Surveillance → General → "Keep USB powered while parked"):
-     * whether to hold the 5 V peripheral rail ({@link #SPECIAL_CONFIG_REMOTE_POWER_MODE})
-     * and its USB/modem sub-rail ({@link #SPECIAL_CONFIG_DATA_MODULE_POWER}) active
-     * after ACC OFF. DEFAULT TRUE so the out-of-box behaviour is byte-for-byte
-     * identical to the pre-toggle build (and any install whose config predates this
-     * key). When the user turns it OFF, the daemon releases BOTH rails on the next
-     * ACC-OFF cycle (5V=0, USB=2) so USB power actually drops, saving the 12 V battery.
+     * whether the head-unit AP is forced fully awake after ACC OFF. DEFAULT TRUE so the
+     * out-of-box behaviour is byte-for-byte identical to the pre-toggle build (and any
+     * install whose config predates this key).
      *
-     * <p><b>Trade-off:</b> on trims whose camera/ISP rail is derived from the 5 V rail,
-     * turning this OFF can also stop parked surveillance — see
-     * {@link #remotePowerModeEnableValue()}. The OEM 409 camera/ISP vote and dilink4
-     * esco/AVM/MCU keys still fire unconditionally in {@link #configurePeripheralPower},
-     * so cameras survive on any trim whose ISP rail is independent of the 5 V rail.
+     * <p><b>This gates {@link #performSystemWakeUp()} in {@link #enterSentryMode()}.</b>
+     * On DiLink 3.0 the USB-port VBUS follows the AP wake state, not the SpecialDevice
+     * rail registers (rail writes were proven ineffective on-device). When the toggle is
+     * ON we force wakefulness=Awake (USB stays powered, as today). When OFF we skip the
+     * wake so the AP can sleep on ACC-OFF and USB drops, saving the 12 V battery.
+     *
+     * <p><b>Trade-off:</b> skipping the forced wake means features that need the AP
+     * continuously awake while parked may not run when the toggle is OFF. The MCU/AVM
+     * power writes in {@link #configurePeripheralPower} still fire, and HAL events still
+     * wake the AP on demand, but a continuously-awake assumption (e.g. some keep-alive
+     * cadence) won't hold. The toggle defaults ON so this only applies when the user
+     * explicitly opts out.
      *
      * <p>Read fresh on the ACC-OFF setup path so a change applies on the NEXT ACC-OFF
-     * cycle (never mid-session — the rail is already configured for the current
-     * session). Reads the same cross-UID mtime-gated loadConfig() cache the other
-     * gates here use (no forceReload churn); returns the safe DEFAULT (true) on any
-     * failure so a transient read error can never cut the USB/5 V rail unexpectedly.
+     * cycle. Reads the same cross-UID mtime-gated loadConfig() cache the other gates here
+     * use (no forceReload churn); returns the safe DEFAULT (true) on any failure so a
+     * transient read error can never suppress the wake unexpectedly.
      */
     private static boolean isKeepUsbPowerOnAccOff() {
         try {
@@ -2645,13 +2632,22 @@ public class AccSentryDaemon {
      */
     private static void forceMcuWakeUp() {
         log("VOLTAGE-TRIGGERED MCU WAKE-UP...");
-        
+
         // Update wake timestamp
         lastMcuWakeTime = System.currentTimeMillis();
-        
-        // Wake the system first (ensures power rails are active)
-        performSystemWakeUp();
-        
+
+        // Wake the system first (ensures power rails are active) — GATED ON THE
+        // "Keep USB powered" TOGGLE, matching enterSentryMode(). The forced AP wake
+        // is what keeps USB powered while parked; when the user turned it OFF we must
+        // NOT force the AP awake, or the emergency wake silently contradicts their
+        // power-save preference. The MCU wake below (DC-DC converter) stays
+        // unconditional — it is the actual low-battery emergency action.
+        if (isKeepUsbPowerOnAccOff()) {
+            performSystemWakeUp();
+        } else {
+            log("  Keep-USB-power OFF: skipping forced system wake (AP may stay asleep)");
+        }
+
         // Then wake MCU to trigger DC-DC converter
         if (wakeUpMcu()) {
             log("  MCU wake: OK");

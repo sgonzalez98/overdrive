@@ -55,16 +55,40 @@ public class ProximityRecordingHandler {
         currentTriggerLevel = triggerLevel;
         
         try {
+            // Per-trigger SD/USB mount sanity-check, mirroring the surveillance
+            // engine's trigger-time check. Proximity follows the RECORDINGS
+            // (ACC-ON) storage type, so probe THAT volume. A boot/intermittent
+            // SD unmount could have dropped the card; attempt a remount so this
+            // clip lands on the configured external instead of the internal
+            // fallback. No-op for INTERNAL config / already-mounted.
+            try {
+                StorageManager.StorageType type = storageManager.getRecordingsStorageType();
+                if (type == StorageManager.StorageType.SD_CARD && !storageManager.isSdCardMounted()) {
+                    logger.warn("SD card unmounted before proximity recording — attempting remount");
+                    storageManager.ensureSdCardMounted(true);
+                } else if (type == StorageManager.StorageType.USB && !storageManager.isUsbMounted()) {
+                    logger.warn("USB unmounted before proximity recording — attempting remount");
+                    storageManager.ensureUsbMounted(true);
+                }
+            } catch (Exception e) {
+                logger.warn("Proximity storage mount check failed: " + e.getMessage());
+            }
+
             // Ensure space available (reserve 50MB)
             boolean spaceAvailable = storageManager.ensureProximitySpace(50 * 1024 * 1024);
             if (!spaceAvailable) {
                 logger.error("Insufficient space for proximity recording");
                 return;
             }
-            
-            // Get proximity output directory
-            outputDir = storageManager.getProximityDir();
-            
+
+            // Resolve the LIVE proximity dir (getLiveProximityDir, not the frozen
+            // getProximityDir snapshot): proximity follows the recordings/ACC-ON
+            // volume, and a mount that landed after boot — or the ensure*Mounted
+            // attempt just above — must be picked up so the clip lands on SD, not
+            // the stale internal fallback. Null-guard back to the snapshot.
+            File live = storageManager.getLiveProximityDir();
+            outputDir = (live != null) ? live : storageManager.getProximityDir();
+
             // Start recording with proximity directory and prefix
             pipeline.startRecording(outputDir, "proximity");
             isRecording = true;

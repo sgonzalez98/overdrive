@@ -42,7 +42,17 @@ public class ProximityGuardConfig {
     private static final int MAX_POST_RECORD_SECONDS = 30;
     private static final int MIN_MONITOR_FPS = 1;
     private static final int MAX_MONITOR_FPS = 15;
-    private static final int DEFAULT_MONITOR_FPS = 4;
+    // 8 fps idle-monitor rate. Raised from 4: the pre-record ring fills at this
+    // rate (stride = round(cameraFps / monitorFps)), so 8 gives a smoother
+    // pre-roll and — because the encoder's frame-count GOP lands every ~4 s
+    // instead of ~8 s at 4 fps — better keyframe coverage inside the
+    // pre-record window. Cost is a modest, bounded bump in idle encode frame
+    // rate on the shared video block; bitrate (monitorBitrate) and pre-record
+    // RAM (sized by bitrate×seconds, not fps) are unchanged, and the camera HAL
+    // capture rate is owned elsewhere so OEM-capture cost is unaffected. Audio
+    // is captured in a separate process at a fixed sample rate and is fully
+    // decoupled from this value.
+    private static final int DEFAULT_MONITOR_FPS = 8;
     private static final int MIN_BITRATE = 500_000;     // 0.5 Mbps floor
     private static final int MAX_BITRATE = 12_000_000;   // 12 Mbps ceiling
     private static final int DEFAULT_MONITOR_BITRATE = 1_500_000;  // 1.5 Mbps idle

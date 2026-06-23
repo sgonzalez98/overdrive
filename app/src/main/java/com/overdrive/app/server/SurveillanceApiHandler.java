@@ -476,6 +476,7 @@ public class SurveillanceApiHandler {
             config.put("sensitivityLevel", sentryConfig.getSensitivityLevel());
             config.put("detectionZone", sentryConfig.getDetectionZone());
             config.put("loiteringTime", sentryConfig.getLoiteringTimeSeconds());
+            config.put("approachTrigger", sentryConfig.getApproachTriggerSeconds());
             boolean[] cameras = sentryConfig.getCameraEnabled();
             config.put("cameraFront", cameras[0]);
             config.put("cameraRight", cameras[1]);
@@ -589,6 +590,7 @@ public class SurveillanceApiHandler {
             config.put("sensitivityLevel", 3);
             config.put("detectionZone", "normal");
             config.put("loiteringTime", 3);
+            config.put("approachTrigger", 2);
             config.put("cameraFront", true);
             config.put("cameraRight", true);
             config.put("cameraLeft", true);
@@ -1162,6 +1164,12 @@ public class SurveillanceApiHandler {
                 int seconds = configJson.optInt("loiteringTime", 3);
                 sentryConfig.setLoiteringTimeSeconds(seconds);
                 if (sentry != null) sentry.setV2LoiteringTime(seconds);
+                configChanged = true;
+            }
+            if (configJson.has("approachTrigger")) {
+                int seconds = configJson.optInt("approachTrigger", 2);
+                sentryConfig.setApproachTriggerSeconds(seconds);
+                if (sentry != null) sentry.setV2ApproachTrigger(seconds);
                 configChanged = true;
             }
             if (configJson.has("shadowFilter")) {

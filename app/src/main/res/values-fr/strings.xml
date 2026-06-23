@@ -1165,12 +1165,14 @@
     <string name="roadsense_map_search_to_save">Rechercher un lieu à définir comme %1$s</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">La course a été restaurée</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">Le jeton est stocké en toute sécurité et partagé entre les processus de l\'application et du démon.</string>
-    <string name="cloudflared_token_hint">Entrez le jeton cloudflared</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">Le token est stocké de manière chiffrée et partagé entre l\'application et le processus du daemon.</string>
+    <string name="cloudflared_token_hint">Saisir le token cloudflared</string>
     <string name="cloudflare_paid_version">Version payante de Cloudflare</string>
-    <string name="dialog_cloudflared_settings_title">🌐 Paramètres Cloudflared</string>
-    <string name="dialog_cloudflared_settings_message">Définissez si vous utilisez Cloudflare payant ou trycloudflare. Si vous utilisez Cloudflare payant, entrez votre jeton de tunnel.</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">Si vous passez à la version payante, le jeton ne peut pas être vide</string>
+    <string name="dialog_cloudflared_settings_title">Paramètres Cloudflared</string>
+    <string name="dialog_cloudflared_settings_message">Définissez si vous utilisez Cloudflare payant ou trycloudflare. Si vous utilisez Cloudflare payant, saisissez le token de votre tunnel.</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">Si vous définissez la version payante, le token ne peut pas être vide</string>
+    <string name="toast_cloudflared_token_invalid">Token invalide : utilisez uniquement des lettres, des chiffres et les caractères . _ - =</string>
     <string name="toast_cloudflared_saved_settings">Paramètres Cloudflared enregistrés</string>
 </resources>

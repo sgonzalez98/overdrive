@@ -39,6 +39,8 @@ import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.layers.SymbolLayer
 import org.maplibre.android.style.sources.GeoJsonOptions
 import org.maplibre.android.style.sources.GeoJsonSource
+import org.maplibre.geojson.Feature
+import org.maplibre.geojson.Point
 import com.overdrive.app.navmap.nav.ForwardGeocoder
 import com.overdrive.app.navmap.nav.NavGuidanceEngine
 import com.overdrive.app.navmap.nav.NavRoute
@@ -232,6 +234,18 @@ open class RoadSenseMapActivity : AppCompatActivity() {
     private val motionEstimator = com.overdrive.app.navmap.nav.VehicleMotionEstimator()
     /** True while the render micro-tick should run (nav, or cluster idle-follow). */
     @Volatile private var motionFollowActive = false
+    /** Last render frame saw the car moving (speed > gate). Drives the adaptive tick:
+     *  fast (RENDER_TICK_MS) when moving or navigating, idle (IDLE_RENDER_TICK_MS) when
+     *  parked, so a stationary map stops pegging the main thread + GL RenderThread. */
+    @Volatile private var lastFrameMoving = false
+    /** HEAD-UNIT view of the daemon's navMap.clusterMapActive flag: true while the SAME
+     *  drive is being mirrored live on the cluster display. When true, the head unit
+     *  stops running its 30fps motion glide (the driver is watching the cluster, not the
+     *  head unit) and falls back to the idle tick — the head-unit map stays truthful +
+     *  fully interactive (search/pan/zoom repaint on demand under WHEN_DIRTY) but the
+     *  smooth animated map is rendered only ONCE, on the cluster. Cluster instance leaves
+     *  this false (it IS the live view). Polled off the looper — see headUnitProjectionPoll. */
+    @Volatile private var projectionActive = false
 
     /** Periodic guidance tick: pulls a fresh GPS fix and advances guidance. */
     private val guidanceRunnable = object : Runnable {
@@ -242,15 +256,33 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         }
     }
 
-    /** Render micro-tick (~12fps): dead-reckons the vehicle motion forward from the
-     *  last filtered fix and paints the puck + heading-up camera, so movement glides
+    /** Render micro-tick: dead-reckons the vehicle motion forward from the last
+     *  filtered fix and paints the puck + heading-up camera, so movement glides
      *  between the sparse 1s GPS truth fixes. Cheap: instant moveCamera (no anim
-     *  thread) on an already-smooth interpolated pose. Self-reschedules. */
+     *  thread) on an already-smooth interpolated pose. Self-reschedules at the FAST
+     *  RENDER_TICK_MS only while navigating (real motion to glide); the no-route idle
+     *  / cluster follow drops to IDLE_RENDER_TICK_MS — there's nothing to interpolate
+     *  when parked, and at 30fps the tick + per-frame puck rewrite pegged the GL
+     *  RenderThread on a stationary car (measured ~80% of a core, ×2 map instances). */
     private val renderRunnable = object : Runnable {
         override fun run() {
             if (!motionFollowActive) return
             try { renderMotionFrame() } catch (_: Throwable) {}
-            mainHandler.postDelayed(this, RENDER_TICK_MS)
+            // Fast tick while there's real motion to glide (navigating, or a moving car
+            // on the no-route cluster follow); slow tick when parked so we stop waking
+            // the main thread 30×/s to recompute an unchanged pose. Motion-aware (not
+            // just nav-aware) so driving WITHOUT a route still glides smoothly.
+            //   PROJECTION GATE: on the HEAD UNIT while the same drive is mirrored live
+            //   on the cluster (projectionActive), don't run the 30fps glide — the driver
+            //   is watching the cluster, so rendering the smooth animated map a SECOND
+            //   time on the head unit is pure duplicate GPU. Drop to the idle rate; the
+            //   head-unit map stays truthful (1Hz puck) and fully interactive (search/
+            //   pan/zoom repaint on demand via WHEN_DIRTY). The cluster instance itself
+            //   leaves projectionActive=false and keeps the fast glide.
+            val fast = (navigating || lastFrameMoving) && !projectionActive
+            // Cluster glides at its own (lower) cap-matched rate; head unit at 30fps.
+            val fastTick = if (clusterMode) CLUSTER_RENDER_TICK_MS else RENDER_TICK_MS
+            mainHandler.postDelayed(this, if (fast) fastTick else IDLE_RENDER_TICK_MS)
         }
     }
 
@@ -304,6 +336,17 @@ open class RoadSenseMapActivity : AppCompatActivity() {
             applyClusterChrome()
             registerClusterDisplayWatch()
             startClusterFinishPoll()
+            // The cluster mirror has no theme FAB (it's non-touch) — the user changes
+            // the map theme on the head unit. Both Activities live in the SAME process,
+            // so a SharedPreferences change listener on KEY_MAP_THEME lets the cluster
+            // re-resolve its scheme and reload the basemap live, instead of staying on
+            // whatever it loaded at launch until the projection is torn down + relaunched.
+            registerClusterThemeWatch()
+        } else {
+            // Head unit: watch whether the same drive is mirrored live on the cluster,
+            // so we can suppress our own duplicate 30fps glide while it is (see
+            // headUnitProjectionPoll / projectionActive).
+            startHeadUnitProjectionPoll()
         }
 
         findViewById<MaterialToolbar>(R.id.mapToolbar).setNavigationOnClickListener {
@@ -398,7 +441,10 @@ open class RoadSenseMapActivity : AppCompatActivity() {
                 it.topMargin = bars.top + dp(56); searchColumn.layoutParams = it
             }
             (banner?.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.let {
-                it.topMargin = bars.top + dp(56); banner.layoutParams = it
+                // The +56dp clears the search bar on the head unit; the cluster has no
+                // search bar (chrome stripped) so it just wastes vertical space on the
+                // short 720px panel — pin the banner near the top edge there instead.
+                it.topMargin = bars.top + dp(if (clusterMode) 8 else 56); banner.layoutParams = it
             }
             // Top-right map controls sit below the search bar.
             (controlsTop?.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.let {
@@ -458,7 +504,10 @@ open class RoadSenseMapActivity : AppCompatActivity() {
             }
         }
         setWidthCentered(R.id.navSearchColumn)
-        setWidthCentered(R.id.navBanner)
+        // The cluster owns its own compact fixed-width banner geometry
+        // (applyClusterChrome) — don't let the responsive full-width/centered sizing
+        // clobber it (this also runs from onConfigurationChanged on rotation).
+        if (!clusterMode) setWidthCentered(R.id.navBanner)
     }
 
     /**
@@ -466,33 +515,29 @@ open class RoadSenseMapActivity : AppCompatActivity() {
      * heading-up camera even when no route is active, so the projected map always
      * tracks the car. While navigating, the guidance tick already drives the
      * camera, so this only runs the idle (no-route) follow.
+     *
+     * <p>This is a pure TRUTH FEEDER (like {@link #tickGuidance}): it fetches a fresh
+     * fix at the 1 Hz GPS cadence and feeds it into the motion estimator, then ensures
+     * the 30 fps {@link #renderMotionFrame} loop is running. The render loop is the
+     * SOLE writer of the puck + heading-up camera. Previously this runnable wrote the
+     * puck/camera DIRECTLY from the raw 1 Hz fix while the render tick (left running on
+     * the cluster after guidance ended) ALSO dead-reckoned the puck from a stale fix —
+     * two unsynchronized writers that visibly fought = the cluster puck jump. Routing
+     * everything through the estimator gives the cluster the SAME smooth dead-reckoned
+     * glide as the head-unit nav view and removes the race. feedMotionTruth() dedupes
+     * identical re-polls so the estimator advances once per genuinely-new fix.
      */
     private val clusterFollowRunnable = object : Runnable {
         override fun run() {
             if (!clusterMode || isFinishing || isDestroyed) return
-            if (!navigating) {   // guidance owns the camera while navigating
+            if (!navigating) {   // guidance owns the estimator+camera while navigating
                 ioExecutor().execute {
                     val fix = RoadSenseHazardApiClient.fetchCurrentLocation()
                     if (fix != null) mainHandler.post {
                         if (isFinishing || isDestroyed || navigating) return@post
                         lastFix = fix
-                        updateLocationPuck(fix)
-                        val rawBearing = fix.bearing?.takeIf { (fix.speed ?: 0.0) > IMMERSIVE_MIN_SPEED_MPS } ?: lastBearing
-                        val bearing = if (fix.bearing != null && (fix.speed ?: 0.0) > IMMERSIVE_MIN_SPEED_MPS)
-                            smoothBearing(rawBearing) else (smoothedBearing.takeUnless { it.isNaN() } ?: rawBearing)
-                        lastBearing = bearing
-                        // Dead-band: skip the glide when barely moved + barely turned
-                        // (puck above still updates). Keyed off the live fix position.
-                        if (!cameraWithinDeadband(fix.lat, fix.lng, bearing)) {
-                            map?.animateCamera(
-                                CameraUpdateFactory.newCameraPosition(
-                                    org.maplibre.android.camera.CameraPosition.Builder()
-                                        .target(LatLng(fix.lat, fix.lng))
-                                        .zoom(IMMERSIVE_ZOOM).tilt(IMMERSIVE_TILT).bearing(bearing).build()
-                                ), GUIDANCE_CAM_ANIM_MS
-                            )
-                            rememberAnimatedTarget(fix.lat, fix.lng, bearing)
-                        }
+                        feedMotionTruth(fix)   // single source of truth → render tick paints
+                        startMotionFollow()    // idempotent; 30 fps glide of puck + camera
                     }
                 }
             }
@@ -503,6 +548,45 @@ open class RoadSenseMapActivity : AppCompatActivity() {
     private fun startClusterFollow() {
         mainHandler.removeCallbacks(clusterFollowRunnable)
         mainHandler.post(clusterFollowRunnable)
+    }
+
+    /**
+     * Head-unit IDLE (non-navigating) GPS follow — the head-unit counterpart to
+     * [clusterFollowRunnable]. The head unit previously had NO idle GPS ticker, so
+     * the puck only refreshed while navigating or on a manual Locate tap; after a
+     * resume-from-background it sat at the stale pre-background fix until the user
+     * tapped Locate (while the cluster, which DOES have an idle follow, stayed live).
+     *
+     * <p>This refreshes the PUCK ONLY — it never moves the camera — so a user who
+     * panned/zoomed away from their position keeps that view; the blue dot just stays
+     * truthful underneath it. (Locate remains the explicit "snap back to me" action.)
+     * Runs only on the head unit while NOT navigating: the guidance tick owns the puck
+     * during nav, and the cluster has its own follow. Self-reschedules at the 1 Hz GPS
+     * cadence; suspended in onStop, restarted in onResume.
+     */
+    private val idleFollowRunnable = object : Runnable {
+        override fun run() {
+            if (isFinishing || isDestroyed || navigating || clusterMode) return
+            ioExecutor().execute {
+                val fix = RoadSenseHazardApiClient.fetchCurrentLocation()
+                if (fix != null) mainHandler.post {
+                    if (isFinishing || isDestroyed || navigating || clusterMode) return@post
+                    lastFix = fix
+                    updateLocationPuck(fix)   // puck only — camera untouched
+                }
+            }
+            mainHandler.postDelayed(this, GUIDANCE_TICK_MS)
+        }
+    }
+
+    private fun startIdleFollow() {
+        if (navigating || clusterMode) return
+        mainHandler.removeCallbacks(idleFollowRunnable)
+        mainHandler.post(idleFollowRunnable)
+    }
+
+    private fun stopIdleFollow() {
+        mainHandler.removeCallbacks(idleFollowRunnable)
     }
 
     /**
@@ -577,6 +661,91 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         mainHandler.postDelayed(clusterFinishPoll, CLUSTER_FINISH_POLL_MS)
     }
 
+    // ---- Cluster live theme watch -------------------------------------------
+    // CLUSTER-ONLY. The head-unit cycleMapTheme() persists the chosen scheme to
+    // PREFS_NAVMAP/KEY_MAP_THEME and reloads its own basemap. The cluster mirror is a
+    // separate Activity instance (same process) that read mapThemeMode once at onCreate
+    // and has no theme FAB, so it never followed a live dark↔light switch. Listen for
+    // the SharedPreferences change, re-resolve mapThemeMode, and reload the style only
+    // when the EFFECTIVE day/night state actually flips (cheap no-op otherwise). The
+    // callback already fires on the main thread (same process that committed the apply()),
+    // so reloadStyleForTheme — which touches the GL map — is safe to call directly.
+    private var clusterThemeListener:
+        android.content.SharedPreferences.OnSharedPreferenceChangeListener? = null
+
+    private fun registerClusterThemeWatch() {
+        val prefs = getSharedPreferences(PREFS_NAVMAP, MODE_PRIVATE)
+        val l = android.content.SharedPreferences.OnSharedPreferenceChangeListener { sp, key ->
+            if (key != KEY_MAP_THEME) return@OnSharedPreferenceChangeListener
+            if (isFinishing || isDestroyed) return@OnSharedPreferenceChangeListener
+            val newMode = sp.getInt(KEY_MAP_THEME, MAP_THEME_AUTO)
+            if (newMode == mapThemeMode) return@OnSharedPreferenceChangeListener
+            val wasNight = isNightTheme()
+            mapThemeMode = newMode
+            if (isNightTheme() != wasNight) reloadStyleForTheme()
+        }
+        clusterThemeListener = l
+        prefs.registerOnSharedPreferenceChangeListener(l)
+    }
+
+    // ---- Head-unit projection-active poll (dual-render avoidance) -----------
+    // HEAD-UNIT ONLY. Tracks the daemon's navMap.clusterMapActive flag so the head
+    // unit knows when the SAME drive is being shown live on the cluster. While it is,
+    // [projectionActive] suppresses the head unit's 30fps motion glide (the cluster is
+    // the live view the driver watches) — so the animated map renders once, not twice,
+    // halving the dual-map GPU cost during nav. The head-unit map stays interactive
+    // (search/pan/zoom) the whole time. The UCM read runs on the IO executor (it's an
+    // EACCES-prone cross-UID file read — never the looper) and only the cheap flag flip
+    // posts back to the main thread. Self-reschedules; removed in onDestroy via
+    // removeCallbacksAndMessages(null). Started only on the head unit (clusterMode=false).
+    private val headUnitProjectionPoll = object : Runnable {
+        override fun run() {
+            if (isFinishing || isDestroyed || clusterMode) return
+            ioExecutor().execute {
+                val active = isClusterProjectionActive()
+                mainHandler.post {
+                    if (isFinishing || isDestroyed || clusterMode) return@post
+                    if (active != projectionActive) {
+                        projectionActive = active
+                        // Re-kick the render tick so the rate change takes effect now
+                        // (when projection ENDS we want the head unit back to the smooth
+                        // glide immediately; when it STARTS we drop to idle next tick).
+                        if (motionFollowActive) {
+                            mainHandler.removeCallbacks(renderRunnable)
+                            mainHandler.post(renderRunnable)
+                        }
+                    }
+                }
+            }
+            mainHandler.postDelayed(this, PROJECTION_POLL_MS)
+        }
+    }
+
+    private fun startHeadUnitProjectionPoll() {
+        if (clusterMode) return
+        mainHandler.removeCallbacks(headUnitProjectionPoll)
+        mainHandler.postDelayed(headUnitProjectionPoll, PROJECTION_POLL_MS)
+    }
+
+    private fun stopHeadUnitProjectionPoll() {
+        mainHandler.removeCallbacks(headUnitProjectionPoll)
+    }
+
+    /** True iff the daemon currently has the cluster map projection active
+     *  (navMap.clusterMapActive == true). forceReload() for cross-UID freshness; a read
+     *  failure is treated as NOT active so a transient UCM error can never wedge the head
+     *  unit into the throttled state (worst case: the head unit keeps its own full glide,
+     *  i.e. the pre-change behaviour). */
+    private fun isClusterProjectionActive(): Boolean {
+        return try {
+            val nav = com.overdrive.app.config.UnifiedConfigManager.forceReload()
+                .optJSONObject("navMap")
+            nav != null && nav.optBoolean("clusterMapActive", false)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
     /** True once the daemon has signalled this cluster projection should end
      *  (navMap.clusterMapActive == false). forceReload() for cross-write freshness.
      *  A read failure is treated as "not dismissed" so a transient UCM error never
@@ -596,19 +765,72 @@ open class RoadSenseMapActivity : AppCompatActivity() {
     }
 
     private fun applyClusterChrome() {
+        // Cluster overscan defeat. The fission VirtualDisplay declares overscan
+        // (80,50,80,50) (confirmed on-car: dumpsys window mContent/mStable=[80,50]
+        // [1840,670] on the full [0,0][1920,720] frame). Without opting in, the window
+        // content is confined to that ~1760×620 overscan-SAFE rect and the OEM scales
+        // it back up to the 1920×720 panel — black borders + a soft, upscaled map (the
+        // "low-res projection" report). FLAG_LAYOUT_IN_OVERSCAN is the purpose-built
+        // lever: it lets the window paint into the overscan area so the map fills the
+        // true surface 1:1 (no upscale). The LAYOUT_FULLSCREEN|LAYOUT_STABLE flags
+        // complement it by also zeroing any stable/system-bar inset attribution. ALL
+        // cluster-only: applyClusterChrome runs solely from the clusterMode branch
+        // (onCreate) + onConfigurationChanged, so the head unit (display 0, no overscan)
+        // is byte-for-byte unchanged.
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_LAYOUT_IN_OVERSCAN)
+        window.decorView.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
         listOf(
             R.id.mapAppBar, R.id.navSearchColumn, R.id.zoomControls,
             R.id.fabLocate, R.id.fabEndNav, R.id.mapControlsTop, R.id.fabNavBack
         ).forEach { findViewById<View>(it)?.visibility = View.GONE }
-        // Keep the maneuver banner and actually enlarge its text so it's legible at a
-        // glance on the driver cluster (the previous alpha-only line was a no-op).
+        // Keep the maneuver banner glanceable but COMPACT — it sits over a short
+        // 720px panel that also magnifies sp by the 320-dpi density, so the previous
+        // 30/18sp card wrapped to 2-3 lines and covered most of the map. Use the
+        // tighter cluster sizes + a smaller glyph so the card stays a slim strip at
+        // the top and leaves the road visible.
+        val density = resources.displayMetrics.density
+        fun px(dp: Int) = (dp * density).toInt()
+
         findViewById<View>(R.id.navBanner)?.alpha = 1f
-        findViewById<TextView>(R.id.navBannerPrimary)?.setTextSize(
-            android.util.TypedValue.COMPLEX_UNIT_SP, CLUSTER_BANNER_PRIMARY_SP
-        )
+        findViewById<TextView>(R.id.navBannerPrimary)?.let { tv ->
+            tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, CLUSTER_BANNER_PRIMARY_SP)
+            // Single line on the compact cluster card — the secondary row carries
+            // the remaining/ETA, so the primary instruction need not wrap (a 2-line
+            // primary is what drove the old card tall).
+            tv.maxLines = 1
+        }
         findViewById<TextView>(R.id.navBannerSecondary)?.setTextSize(
             android.util.TypedValue.COMPLEX_UNIT_SP, CLUSTER_BANNER_SECONDARY_SP
         )
+        // Shrink the maneuver glyph from the 40dp layout default so it matches the
+        // smaller text and doesn't set the card height on its own.
+        findViewById<ImageView>(R.id.navBannerIcon)?.let { iv ->
+            val side = px(CLUSTER_BANNER_ICON_DP)
+            iv.layoutParams = iv.layoutParams?.apply {
+                width = side; height = side
+                (this as? android.view.ViewGroup.MarginLayoutParams)
+                    ?.marginEnd = px(CLUSTER_BANNER_ICON_MARGIN_DP)
+            }
+        }
+        // Make the card itself a small fixed-width strip pinned top-start (instead of
+        // the head unit's full-width match_parent), with a tighter corner radius and
+        // inner padding, so it reads as a compact maneuver card and frees the map.
+        findViewById<com.google.android.material.card.MaterialCardView>(R.id.navBanner)?.let { card ->
+            (card.layoutParams as? androidx.coordinatorlayout.widget.CoordinatorLayout.LayoutParams)?.let { lp ->
+                lp.width = px(CLUSTER_BANNER_WIDTH_DP)
+                lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+                card.layoutParams = lp
+            }
+            card.radius = px(CLUSTER_BANNER_RADIUS_DP).toFloat()
+            // Tighten the inner LinearLayout padding (shared with the head unit in XML;
+            // overridden here so the head unit stays unchanged).
+            (card.getChildAt(0) as? android.view.ViewGroup)?.setPadding(
+                px(CLUSTER_BANNER_PAD_H_DP), px(CLUSTER_BANNER_PAD_V_DP),
+                px(CLUSTER_BANNER_PAD_H_DP), px(CLUSTER_BANNER_PAD_V_DP)
+            )
+        }
     }
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
@@ -624,7 +846,30 @@ open class RoadSenseMapActivity : AppCompatActivity() {
     // ---------------------------------------------------------------------
 
     private fun onMapReady(mlMap: MapLibreMap) {
+        // getMapAsync is not cancellable: if the Activity was finished between the
+        // getMapAsync() call and this async callback (rapid back-then-reopen, or the
+        // cluster-finish poll tearing us down), the MapView/render surface is already
+        // gone and setRenderingRefreshMode/setMaximumFps below would touch a destroyed
+        // surface. Bail if we're on the way out.
+        if (isFinishing || isDestroyed) return
         map = mlMap
+
+        // Render ONLY when the scene actually changes. MapLibre defaults to CONTINUOUS
+        // — the GL RenderThread swaps a buffer EVERY vsync (60fps) even when nothing
+        // moved, which on a parked car pegged a core (measured RenderThread ~80%) and
+        // DOUBLED it once the cluster mirror's second map instance was up. WHEN_DIRTY
+        // renders only on a real change (camera move, source update, gesture, tile/label
+        // load) — so a stationary map costs ~0 GPU on BOTH screens, and the head unit
+        // still repaints instantly when the user pans or runs a search. Paired with the
+        // puck-rewrite dead-band (updateLocationPuckAt) so a held pose emits no dirty
+        // frame at all. setMaximumFps then bounds the MOVING-map rate: the cluster is a
+        // glanceable driver panel that doesn't need the head unit's full rate, so it's
+        // capped lower. (Both calls are safe here — the MapRenderer is created during
+        // MapView init, before this onMapReady callback fires.)
+        mapView.setRenderingRefreshMode(
+            org.maplibre.android.maps.renderer.MapRenderer.RenderingRefreshMode.WHEN_DIRTY
+        )
+        mapView.setMaximumFps(if (clusterMode) CLUSTER_MAX_FPS else HEADUNIT_MAX_FPS)
 
         // App-like feel: lock rotation + tilt, hide the compass (irrelevant
         // when north-locked) but ENABLE on-screen zoom +/- controls (no
@@ -662,9 +907,10 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         )
 
         // Theme-aware basemap: dark style in night mode, light otherwise, so the
-        // map matches the rest of the app shell. Re-add all our sources/layers
-        // in the onStyleLoaded callback (setStyle wipes them).
-        mlMap.setStyle(Style.Builder().fromUri(styleUrlForTheme())) { style ->
+        // map matches the rest of the app shell. Loaded from the BUNDLED style asset
+        // (instant, no network round-trip; hosted-URL fallback) — re-add all our
+        // sources/layers in the onStyleLoaded callback (setStyle wipes them).
+        mlMap.setStyle(styleBuilderForTheme()) { style ->
             onStyleLoaded(style)
         }
     }
@@ -700,6 +946,47 @@ open class RoadSenseMapActivity : AppCompatActivity() {
     private fun styleUrlForTheme(): String =
         if (isNightTheme()) STYLE_URL_DARK else STYLE_URL_LIGHT
 
+    /** Bundled on-device style ASSET path chosen by the active app theme (day/night). */
+    private fun styleAssetForTheme(): String =
+        if (isNightTheme()) STYLE_ASSET_DARK else STYLE_ASSET_LIGHT
+
+    /**
+     * Build the basemap [Style.Builder] for the current theme, preferring the
+     * BUNDLED on-device style asset and falling back to the hosted URL.
+     *
+     * <p>Why asset-first: the style document (the layer/paint "recipe") shipped in
+     * [styleAssetForTheme] is byte-equivalent to the hosted style we used to fetch,
+     * so there is ZERO visual change — but loading it from disk removes a network
+     * round-trip on every map open (no proxy/sing-box stall, works with no
+     * connectivity for the style itself), and it makes the basemap OURS to tune
+     * (colors / road casings / label halos / POI styling) instead of an opaque URL.
+     * The tiles, sprite and glyphs referenced INSIDE the style are still streamed
+     * from OpenFreeMap (and cached by {@link MapTilePrefetcher}), exactly as before.
+     *
+     * <p>Resilience: if the asset is somehow unreadable (corrupt packaging), we fall
+     * back to {@code fromUri(styleUrlForTheme())} so this can never render worse than
+     * the previous URL-only path. MapLibre resolves {@code asset://} URLs against the
+     * APK assets, so [readStyleAsset] only needs to confirm the asset opens.
+     */
+    private fun styleBuilderForTheme(): Style.Builder {
+        val assetPath = styleAssetForTheme()
+        val json = readStyleAsset(assetPath)
+        return if (json != null) {
+            Style.Builder().fromJson(json)
+        } else {
+            Log.w("RoadSenseMap", "bundled style asset $assetPath unreadable — falling back to hosted URL")
+            Style.Builder().fromUri(styleUrlForTheme())
+        }
+    }
+
+    /** Read a bundled style asset to a String, or null if it can't be opened/read. */
+    private fun readStyleAsset(assetPath: String): String? = try {
+        assets.open(assetPath).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            .takeIf { it.isNotBlank() }
+    } catch (t: Throwable) {
+        null
+    }
+
     /**
      * Active day/night state for the BASEMAP. A per-map override
      * ([mapThemeMode]) wins when the user has explicitly pinned light/dark from the
@@ -721,12 +1008,167 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         return ui == android.content.res.Configuration.UI_MODE_NIGHT_YES
     }
 
+    /**
+     * Resolve a Material-3 color ROLE (e.g. "surface", "outline_variant",
+     * "secondary_container") to the themed `md_sys_color_<role>_(light|dark)` value
+     * for the CURRENT basemap theme. Single source of truth for both the basemap
+     * recolor and the overlay colors, so the whole map (basemap + route + puck) flips
+     * day/night coherently off [isNightTheme]. Falls back to a neutral grey if a role
+     * name is mistyped (defensive — a missing R.color would otherwise crash the walk).
+     */
+    private fun m3(role: String): Int {
+        val name = "md_sys_color_${role}_" + if (isNightTheme()) "dark" else "light"
+        val id = resources.getIdentifier(name, "color", packageName)
+        return if (id != 0) ContextCompat.getColor(this, id) else 0xFF808080.toInt()
+    }
+
+    /** Hex string form of [m3], for paint properties set via a color string. */
+    private fun m3Hex(role: String): String = colorToHex(m3(role))
+
+    /** "#AARRGGBB" for a packed ARGB int (MapLibre accepts rgba()/hex strings). */
+    private fun colorToHex(color: Int): String = String.format("#%08X", color)
+
+    /**
+     * Recolor the bundled basemap to the Overdrive Material-3 palette at runtime, so
+     * the map matches the app shell (day + night) instead of rendering the stock
+     * OpenFreeMap colors. This walks the loaded style's layers ONCE (mirroring
+     * [localizeMapLabels]) and rewrites each layer's flat paint color onto an M3 role.
+     *
+     * <p>Cost: a single layer pass at style-load / theme-switch — NOT per frame. The
+     * GPU renders a recolored flat fill identically to the original, so there is zero
+     * added render cost (no new layers, no blur, no extrusion).
+     *
+     * <p>Safety: wrapped in try/catch like [localizeMapLabels] so basemap schema
+     * variance can never break the map — a failed recolor just leaves the stock colors.
+     * Roles are chosen to stay clear of the OVERLAY colors (route/puck = primary,
+     * hazard pins = fixed saturated hues) so those stay legible on the recolored map.
+     *
+     * <p>Expression-valued paints (zoom-interpolated road/landuse colors, the
+     * natural_earth relief raster-opacity) are intentionally LEFT ALONE — overwriting
+     * them with a flat color would drop their zoom ramp. We only rewrite layers whose
+     * id matches a bucket below, and {@link #setLayerColor} additionally skips a
+     * property that currently holds an Expression.
+     *
+     * <p>The set of paint properties recolored here was derived by inspecting OUR OWN
+     * bundled style assets (maps/liberty_style.json + maps/dark_style.json): they carry
+     * background-color, fill-color, fill-outline-color, line-color, fill-extrusion-color,
+     * text-color and text-halo-color — the standard MapLibre GL spec-v8 color paints.
+     * The text-halo is recolored to the surface (background) tone so labels keep the
+     * same "outlined in the background colour" legibility they have in the stock style.
+     */
+    private fun recolorBasemapForTheme(style: Style) {
+        try {
+            // Resolve every role once for this pass (cheap; avoids re-resolving per layer).
+            val land = m3("surface")
+            val water = m3("secondary_container")
+            val parks = m3("surface_container_high")
+            val roadFill = m3(if (isNightTheme()) "surface_container_high" else "surface_container_lowest")
+            val roadCasing = m3("outline_variant")
+            val building = m3("surface_container")
+            val outlineSoft = m3("outline_variant")
+            val boundary = m3("outline")
+            val label = m3("on_surface_variant")
+            val labelHalo = m3("surface")
+            val poiAccent = m3("tertiary")
+
+            for (layer in style.layers) {
+                val id = layer.id
+                // NEVER recolor our own overlay layers — they're added to the style
+                // before this pass and own their (theme-aware) colors. All of ours are
+                // "roadsense-…"; skipping the prefix also protects the 3D extrusion
+                // (roadsense-building-3d) so it keeps MAP_3D_COLOR_*.
+                if (id.startsWith("roadsense-")) continue
+                when {
+                    // Background / land.
+                    id == "background" -> setLayerColor(layer, land)
+
+                    // Water bodies + waterways (fill + line).
+                    id == "water" || id.startsWith("water") -> setLayerColor(layer, water)
+                    id.startsWith("waterway") -> setLayerColor(layer, water)
+
+                    // Parks / landcover / landuse fills.
+                    id == "park" -> setLayerColor(layer, parks)
+                    id == "park_outline" -> setLayerColor(layer, outlineSoft)
+                    id.startsWith("landcover") || id.startsWith("landuse") ||
+                        id.startsWith("aeroway_fill") -> setLayerColor(layer, parks)
+
+                    // Road casings (drawn under the fills) — soft outline tone.
+                    id.contains("_casing") -> setLayerColor(layer, roadCasing)
+
+                    // Road fills (incl. tunnels/bridges/links) — brighter than land.
+                    id.startsWith("road_") || id.startsWith("tunnel_") ||
+                        id.startsWith("bridge_") || id.startsWith("aeroway_runway") ||
+                        id.startsWith("aeroway_taxiway") -> setLayerColor(layer, roadFill)
+
+                    // Buildings (2D fill only; 3D extrusion keeps MAP_3D_COLOR_*).
+                    id == "building" -> setLayerColor(layer, building)
+
+                    // Administrative boundaries.
+                    id.startsWith("boundary") -> setLayerColor(layer, boundary)
+
+                    // Labels: transit/airport get a subtle tertiary accent; the rest the
+                    // neutral on-surface-variant. Halo is the base land tone for contrast.
+                    layer is SymbolLayer -> {
+                        val text = if (id == "poi_transit" || id == "airport") poiAccent else label
+                        layer.setProperties(
+                            PropertyFactory.textColor(colorToHex(text)),
+                            PropertyFactory.textHaloColor(colorToHex(labelHalo))
+                        )
+                    }
+                }
+            }
+        } catch (_: Throwable) {
+            // Schema variance across basemaps — never break the map over a recolor.
+        }
+    }
+
+    /**
+     * Set the appropriate COLOR paint property for [layer] by its type, but ONLY when
+     * that property currently holds a flat color (skips Expression-valued paints so
+     * their zoom ramp survives). Fills also get their outline recolored to match.
+     */
+    private fun setLayerColor(layer: org.maplibre.android.style.layers.Layer, color: Int) {
+        val hex = colorToHex(color)
+        when (layer) {
+            is org.maplibre.android.style.layers.BackgroundLayer ->
+                layer.setProperties(PropertyFactory.backgroundColor(hex))
+            is org.maplibre.android.style.layers.FillLayer -> {
+                if (!layer.fillColor.isExpression) {
+                    layer.setProperties(PropertyFactory.fillColor(hex))
+                }
+                // Fill outline only when it's a flat color present (building's is an
+                // Expression; many fills have no outline at all).
+                if (!layer.fillOutlineColor.isExpression && layer.fillOutlineColor.value != null) {
+                    layer.setProperties(PropertyFactory.fillOutlineColor(hex))
+                }
+            }
+            is LineLayer -> {
+                if (!layer.lineColor.isExpression) {
+                    layer.setProperties(PropertyFactory.lineColor(hex))
+                }
+            }
+            is org.maplibre.android.style.layers.FillExtrusionLayer -> {
+                if (!layer.fillExtrusionColor.isExpression) {
+                    layer.setProperties(PropertyFactory.fillExtrusionColor(hex))
+                }
+            }
+            is CircleLayer -> {
+                if (!layer.circleColor.isExpression) {
+                    layer.setProperties(PropertyFactory.circleColor(hex))
+                }
+            }
+        }
+    }
+
     private fun onStyleLoaded(style: Style) {
         // 0) Route line FIRST (added before hazards/clusters so the line draws
         //    UNDER the hazard markers). Two-layer stroke: a wide casing under a
         //    narrower bright main line. Empty until a route is computed.
-        val routeColor = ContextCompat.getColor(this, R.color.md_sys_color_primary_light)
-        val routeCasing = ContextCompat.getColor(this, R.color.md_sys_color_on_primary_container_light)
+        // Theme-aware so the route stays legible on BOTH the light and dark recolored
+        // basemaps (was hardcoded _light). Resolved via the same m3() role helper the
+        // basemap recolor uses, so the whole map flips day/night coherently.
+        val routeColor = m3("primary")
+        val routeCasing = m3("on_primary_container")
         style.addSource(GeoJsonSource(ROUTE_SOURCE_ID, EMPTY_FEATURE_COLLECTION))
         style.addLayer(
             LineLayer(ROUTE_CASING_LAYER_ID, ROUTE_SOURCE_ID).withProperties(
@@ -740,7 +1182,7 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         // Alternate routes — a SEPARATE source/layer drawn UNDER the selected
         // route, dimmed + thinner but tappable (tap selects that alternate).
         // Added before the bright route layers so the selected route sits on top.
-        val altColor = ContextCompat.getColor(this, R.color.md_sys_color_outline_light)
+        val altColor = m3("outline")
         style.addSource(GeoJsonSource(ALT_ROUTE_SOURCE_ID, EMPTY_FEATURE_COLLECTION))
         style.addLayer(
             LineLayer(ALT_ROUTE_LAYER_ID, ALT_ROUTE_SOURCE_ID).withProperties(
@@ -782,7 +1224,7 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         hazardSource = source
 
         // 3) Cluster bubble (CircleLayer) — only features carrying point_count.
-        val clusterColor = ContextCompat.getColor(this, R.color.md_sys_color_primary_light)
+        val clusterColor = m3("primary")
         val clusterCircle = CircleLayer(CLUSTER_CIRCLE_LAYER_ID, HAZARD_SOURCE_ID).apply {
             setFilter(Expression.has(POINT_COUNT))
             setProperties(
@@ -803,7 +1245,7 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         style.addLayer(clusterCircle)
 
         // 4) Cluster count text on top of the bubble.
-        val onPrimary = ContextCompat.getColor(this, R.color.md_sys_color_on_primary_light)
+        val onPrimary = m3("on_primary")
         val clusterCount = SymbolLayer(CLUSTER_COUNT_LAYER_ID, HAZARD_SOURCE_ID).apply {
             setFilter(Expression.has(POINT_COUNT))
             setProperties(
@@ -903,11 +1345,11 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         //         source/layer so it's independent of the itinerary markers and can
         //         be cleared the moment the place sheet is dismissed. Drawn on top.
         if (style.getImage(ICON_DROPPED_PIN) == null) {
-            // Brand teal (same source as the route line / cluster bubble) — not the
-            // M3-default seed purple, which would clash with the teal route + the
-            // place sheet's own teal pin icon.
-            style.addImage(ICON_DROPPED_PIN, buildDestinationPinPlain(
-                ContextCompat.getColor(this, R.color.md_sys_color_primary_light)))
+            // Brand primary (same source as the route line / cluster bubble), theme-
+            // aware so it stays legible on the dark recolored basemap too. A style
+            // reload (theme switch) wipes registered images, so onStyleLoaded re-runs
+            // this with the fresh themed color.
+            style.addImage(ICON_DROPPED_PIN, buildDestinationPinPlain(m3("primary")))
         }
         style.addSource(GeoJsonSource(DROPPED_PIN_SOURCE_ID, EMPTY_FEATURE_COLLECTION))
         style.addLayer(
@@ -935,6 +1377,13 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         //     local/default name. So "München"/"慕尼黑" etc. render to match the app.
         localizeMapLabels(style)
 
+        // 5f) Recolor the basemap to the Overdrive M3 palette (day/night) so the map
+        //     matches the app shell instead of the stock OpenFreeMap colors. One layer
+        //     pass, no per-frame cost; re-runs here on every theme switch (setStyle →
+        //     onStyleLoaded). Done AFTER localizeMapLabels (same kind of one-time walk)
+        //     and BEFORE the overlay layers below so it never touches our route/puck.
+        recolorBasemapForTheme(style)
+
         // 6+7) Tap-to-verify (query the hazard symbol layer at the tap point) and
         //      refetch on every camera-idle (debounced inside). Wired ONCE — a style
         //      reload re-runs onStyleLoaded but the map listeners persist, so a guard
@@ -961,6 +1410,12 @@ open class RoadSenseMapActivity : AppCompatActivity() {
             didInitialRecenter = true
             recenter()
         }
+        // Keep the head-unit puck live while idle (not navigating): start the idle
+        // follow so the blue dot tracks the live fix on the interactive map, not just
+        // on a manual Locate tap. No-op while navigating or on the cluster (those own
+        // the puck via their own loops). Idempotent (self-dedupes). onResume restarts
+        // it after a background trip; onStop suspends it.
+        if (!clusterMode && !navigating) startIdleFollow()
 
         // 10) Cluster mirror: subscribe to the shared NavSession so a route the
         //     user sets on the infotainment map renders here in real time (the
@@ -1536,7 +1991,7 @@ open class RoadSenseMapActivity : AppCompatActivity() {
      */
     private fun reloadStyleForTheme() {
         val m = map ?: return
-        m.setStyle(Style.Builder().fromUri(styleUrlForTheme())) { style ->
+        m.setStyle(styleBuilderForTheme()) { style ->
             // Re-add all static sources/layers/icons + refetch hazards.
             onStyleLoaded(style)
             // Repaint the live overlays the fresh style dropped.
@@ -2737,6 +3192,28 @@ open class RoadSenseMapActivity : AppCompatActivity() {
      * Network runs on the IO executor; results post back guarded. Requires a GPS
      * fix (origin) and a configured routing key — both surfaced via snackbar.
      */
+    /**
+     * Map the routing client's TYPED last-error into a SPECIFIC user message, so a
+     * failure stops masquerading as the catch-all "Could not find a route." The old
+     * code only distinguished empty-key (need_key) from everything-else (route_failed),
+     * so a wrong/expired BYOK key (HTTP 401) and a proxy timeout both showed the same
+     * unhelpful text. Reads ValhallaRouteClient.lastError, set on the call that just
+     * returned empty (single foreground routing call at a time).
+     */
+    private fun routeFailureMessage(): String = when (ValhallaRouteClient.lastError) {
+        ValhallaRouteClient.RouteError.NO_KEY -> getString(R.string.roadsense_map_need_key)
+        ValhallaRouteClient.RouteError.AUTH -> getString(R.string.roadsense_map_route_key_rejected)
+        ValhallaRouteClient.RouteError.TIMEOUT,
+        ValhallaRouteClient.RouteError.NETWORK -> getString(R.string.roadsense_map_route_network)
+        ValhallaRouteClient.RouteError.HTTP -> {
+            val code = ValhallaRouteClient.lastHttpCode
+            if (code > 0) getString(R.string.roadsense_map_route_http, code)
+            else getString(R.string.roadsense_map_route_failed)
+        }
+        // EMPTY (200 but no path) / NONE — genuinely no route between the points.
+        else -> getString(R.string.roadsense_map_route_failed)
+    }
+
     private fun recomputeItinerary(autoStart: Boolean = false) {
         // Persist the new itinerary so it survives leaving the map.
         persistTrip()
@@ -2774,12 +3251,7 @@ open class RoadSenseMapActivity : AppCompatActivity() {
             mainHandler.post {
                 if (isFinishing || isDestroyed) return@post
                 if (routes.isEmpty()) {
-                    val cfg = NavMapConfig.fromUnifiedConfig()
-                    showSnackbar(
-                        if (cfg.routingApiKey.isNullOrEmpty())
-                            getString(R.string.roadsense_map_need_key)
-                        else getString(R.string.roadsense_map_route_failed)
-                    )
+                    showSnackbar(routeFailureMessage())
                     return@post
                 }
                 previewRoutes = routes
@@ -3334,6 +3806,9 @@ open class RoadSenseMapActivity : AppCompatActivity() {
     private fun startGuidance(route: NavRoute, destLabel: String) {
         guidance.start(route)
         navigating = true
+        // Guidance owns the puck now (its 1 Hz tick + 30 fps dead-reckon) — stop the
+        // head-unit idle follow so the two don't both write the puck.
+        stopIdleFollow()
         // Persist that we're now navigating so a re-entry resumes guidance (not just
         // the preview). The stops were already saved by recomputeItinerary.
         persistTrip()
@@ -3454,6 +3929,18 @@ open class RoadSenseMapActivity : AppCompatActivity() {
     }
 
     /**
+     * Gentle north-up camera pitch for the IDLE (resting / browsing) map, giving the
+     * basemap a modern 3D perspective (depth on buildings + road casings) at street
+     * zoom. Returns 0 (flat) on the non-touch cluster and while navigating — those
+     * own the camera via their own loops (the cluster glanceable follow, and the
+     * steeper heading-up [IMMERSIVE_TILT] during guidance). Only applied by
+     * [recenter] at [FOLLOW_ZOOM]; the overview framings (route preview, nav-exit
+     * level-off at [DEFAULT_ZOOM]) intentionally stay flat, where a tilt would distort.
+     */
+    private fun restingTilt(): Double =
+        if (clusterMode || navigating) 0.0 else RESTING_TILT
+
+    /**
      * True when an animateCamera to ([lat],[lng],[bearing]) is close enough to the
      * last animated target to skip (within [CAM_DEADBAND_M] and [CAM_DEADBAND_DEG]).
      * Records the new target as the last animated one only when we DON'T skip
@@ -3485,6 +3972,12 @@ open class RoadSenseMapActivity : AppCompatActivity() {
     private var renderedPuckLng: Double = Double.NaN
     /** elapsedRealtime of the last render-frame positional ease, for its dt-aware alpha. */
     private var lastPuckEaseMs: Long = 0L
+    /** Pose of the puck Feature ACTUALLY pushed to the GL source, so the per-frame
+     *  rewrite can be skipped when the puck hasn't meaningfully moved/turned (freezes
+     *  GL re-render on a parked car). NaN until the first paint seeds it. */
+    private var puckPaintedLat: Double = Double.NaN
+    private var puckPaintedLng: Double = Double.NaN
+    private var puckPaintedBearing: Double = Double.NaN
     /** Sticky on-route latch (hysteresis): true while the puck snaps to the line.
      *  Enters below PUCK_SNAP_ENTER_M, leaves only above PUCK_SNAP_EXIT_M, so a GPS
      *  offset hovering near the boundary can't chatter the puck on/off the line. */
@@ -3556,7 +4049,7 @@ open class RoadSenseMapActivity : AppCompatActivity() {
                 // Pass heading+speed+clock so the windowed map-matcher + adaptive
                 // off-route latch engage (legacy 2-arg path stays for tests).
                 val state = guidance.update(
-                    fix.lat, fix.lng, fix.bearing, fix.speed ?: 0.0,
+                    fix.lat, fix.lng, fix.bearing, fix.bestSpeedMps,
                     android.os.SystemClock.elapsedRealtime()
                 )
                 lastFix = fix
@@ -3576,7 +4069,7 @@ open class RoadSenseMapActivity : AppCompatActivity() {
                 // Require TWO consecutive near-stop ticks so a car briefly halted at a
                 // light/queue that happens to sit just short of the pin doesn't end nav
                 // on the very first stopped fix.
-                if (state.remainingDistanceM <= NEAR_STOP_ARRIVAL_M && (fix.speed ?: 0.0) <= NEAR_STOP_SPEED_MPS) {
+                if (state.remainingDistanceM <= NEAR_STOP_ARRIVAL_M && fix.bestSpeedMps <= NEAR_STOP_SPEED_MPS) {
                     nearStopTicks++
                 } else {
                     nearStopTicks = 0
@@ -3604,7 +4097,7 @@ open class RoadSenseMapActivity : AppCompatActivity() {
                         // destination from the current fix, then keep navigating. Pass
                         // the heading only when genuinely moving (a stationary GPS
                         // heading is noise and would lock the reroute to a wrong way).
-                        val rerouteHeading = fix.bearing?.takeIf { (fix.speed ?: 0.0) > 2.0 }
+                        val rerouteHeading = fix.bearing?.takeIf { fix.bestSpeedMps > 2.0 }
                         maybeReroute(fix.lat, fix.lng, rerouteHeading)
                         return@post
                     }
@@ -3663,10 +4156,18 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         lastTruthElapsedMs = android.os.SystemClock.elapsedRealtime()
         motionEstimator.onTruthPoint(
             lat = fix.lat, lng = fix.lng,
-            speedMps = fix.speed ?: 0.0,
+            // Prefer the smooth BYD CAN wheel speed over noisy GPS speed (falls back to
+            // GPS, then 0). This is the core puck-smoothness win: the dead-reckoner now
+            // extrapolates at the true vehicle speed, so it no longer over-travels on a
+            // GPS speed spike and snap-corrects when the next fix lands.
+            speedMps = fix.bestSpeedMps,
             rawBearingDeg = fix.bearing,
             accuracyM = fix.accuracy,
-            tsMs = ts ?: android.os.SystemClock.elapsedRealtime()
+            tsMs = ts ?: android.os.SystemClock.elapsedRealtime(),
+            // Brake pedal (0-100) when the CAN bus reported it — lets the estimator
+            // shed predicted speed during braking so the puck eases to a stop instead
+            // of overshooting then being pulled back.
+            brakePercent = fix.brakePercent
         )
     }
 
@@ -3697,6 +4198,7 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         // raw estimate + its filtered heading. Below the moving gate the heading is
         // held (a parked car's heading is noise either way).
         val moving = m.speedMps > IMMERSIVE_MIN_SPEED_MPS
+        lastFrameMoving = moving   // drives the adaptive render-tick rate (fast vs idle)
         val snap = if (navigating) guidance.snapToRoute(m.lat, m.lng) else null
         // Sticky on-route latch (hysteresis): enter snapping when comfortably close to
         // the line, leave only when clearly off it, so a GPS offset hovering near a
@@ -3887,15 +4389,29 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         if (!clusterMode) NavTripStore.clear(applicationContext)
         mainHandler.removeCallbacks(guidanceRunnable)
         guidance.stop()
-        // On the non-touch cluster, idle-follow still wants the smooth render tick;
-        // only the head unit fully stops it (it returns to the interactive map).
-        if (!clusterMode) { stopMotionFollow(); motionEstimator.reset() }
+        // Stop the 30 fps dead-reckon render tick + reset the estimator on BOTH the
+        // head unit AND the cluster when guidance ends. Previously the cluster KEPT
+        // motionFollowActive=true, so renderMotionFrame() went on dead-reckoning from
+        // the LAST guidance fix (feedMotionTruth only runs inside the guidance tick, so
+        // no fresh truth ever arrived) WHILE clusterFollowRunnable simultaneously wrote
+        // the puck from fresh 1 Hz GPS — two unsynchronized writers fighting over the
+        // puck = the visible cluster jump. With the render tick stopped, the cluster
+        // idle-follow (which now feeds the estimator — see clusterFollowRunnable) is the
+        // SINGLE puck writer. The head unit hands back to its idle follow below.
+        stopMotionFollow()
+        motionEstimator.reset()
         if (!clusterMode) NavSession.clear()   // tell the cluster mirror nav ended
         lastSpokenInstruction = null
         smoothedBearing = Double.NaN   // reset bearing EMA so the next trip starts clean
         smoothedZoom = Double.NaN       // reset zoom EMA too
         renderedPuckLat = Double.NaN    // reset puck position-ease so it re-seeds next trip
         renderedPuckLng = Double.NaN
+        puckPaintedLat = Double.NaN     // reset painted-pose dead-band so next trip re-seeds
+        puckPaintedLng = Double.NaN
+        puckPaintedBearing = Double.NaN
+        lastAnimatedLat = Double.NaN    // reset camera dead-band baseline too (hygiene:
+        lastAnimatedLng = Double.NaN    // a stale baseline could otherwise suppress the
+        lastAnimatedBearing = Double.NaN // first idle-follow camera frame of the next trip)
         puckOnRoute = false             // reset the on-route snap latch
         lastFedFixTsMs = 0L             // reset the duplicate-fix dedup for the next trip
         nearStopTicks = 0               // reset the near-stop arrival debounce
@@ -3908,6 +4424,9 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         exitImmersive()
         // Clear the navigation POIs (they were route-specific).
         poiSource?.setGeoJson(EMPTY_FEATURE_COLLECTION)
+        // Hand the puck back to the idle follow so it keeps tracking the live fix after
+        // the route ends (head unit → idle follow; cluster → its own idle follow).
+        if (clusterMode) startClusterFollow() else startIdleFollow()
     }
 
     private fun speakOnce(text: String) {
@@ -3989,9 +4508,21 @@ open class RoadSenseMapActivity : AppCompatActivity() {
                 if (isFinishing || isDestroyed) return@post
                 if (fix != null) {
                     lastFix = fix
+                    // Center on the live fix at street zoom with a gentle north-up
+                    // RESTING TILT so the idle map reads as a modern 3D perspective
+                    // (buildings/road casings gain depth) instead of a flat top-down
+                    // sheet. North-up (bearing 0) keeps it a calm "where am I" view —
+                    // heading-up + steep tilt is reserved for active guidance. The tilt
+                    // is suppressed on the non-touch cluster (its follow loop owns the
+                    // camera) and while navigating (guidance owns it).
+                    val pos = org.maplibre.android.camera.CameraPosition.Builder()
+                        .target(LatLng(fix.lat, fix.lng))
+                        .zoom(FOLLOW_ZOOM)
+                        .tilt(restingTilt())
+                        .bearing(0.0)
+                        .build()
                     map?.animateCamera(
-                        CameraUpdateFactory.newLatLngZoom(LatLng(fix.lat, fix.lng), FOLLOW_ZOOM),
-                        RECENTER_ANIM_MS
+                        CameraUpdateFactory.newCameraPosition(pos), RECENTER_ANIM_MS
                     )
                     updateLocationPuck(fix)
                     MapTilePrefetcher.schedulePrefetch(
@@ -4013,7 +4544,7 @@ open class RoadSenseMapActivity : AppCompatActivity() {
      * the first fix; kept above the hazard layers so it's never occluded.
      */
     private fun updateLocationPuck(fix: RoadSenseHazardApiClient.LatLngFix) {
-        val bearing = fix.bearing?.takeIf { (fix.speed ?: 0.0) > IMMERSIVE_MIN_SPEED_MPS } ?: lastBearing
+        val bearing = fix.bearing?.takeIf { fix.bestSpeedMps > IMMERSIVE_MIN_SPEED_MPS } ?: lastBearing
         updateLocationPuckAt(fix.lat, fix.lng, bearing)
     }
 
@@ -4021,20 +4552,47 @@ open class RoadSenseMapActivity : AppCompatActivity() {
      *  dead-reckoning render frame (interpolated pose) and the fix-based path. */
     private fun updateLocationPuckAt(lat: Double, lng: Double, bearing: Double) {
         val style = map?.style ?: return
-        val pointJson =
-            "{\"type\":\"Feature\",\"properties\":{\"bearing\":$bearing}," +
-                "\"geometry\":{\"type\":\"Point\",\"coordinates\":[$lng,$lat]}}"
+        // Hot path: the puck source is rewritten EVERY render frame (~30fps from
+        // renderMotionFrame). Push a TYPED Feature, not a JSON string. setGeoJson(String)
+        // routes to nativeSetGeoJsonString, which runs a full JSON PARSER on the native
+        // side every frame — and we pay a Kotlin string-concat heap alloc to build it
+        // first (serialize → JNI → re-parse). setGeoJson(Feature) routes to
+        // nativeSetFeature: the geometry crosses JNI as an object with no parse step.
+        // The SymbolLayer's iconRotate(Expression.get("bearing")) reads the numeric
+        // "bearing" property identically, so the rendered arrow is unchanged — this is
+        // a pure cost cut on the per-frame path (less main-thread work + GC churn on
+        // the Adreno 610 that also drives the daemon encoder).
         val existing = style.getSourceAs<GeoJsonSource>(PUCK_SOURCE_ID)
         if (existing != null) {
-            existing.setGeoJson(pointJson)
+            // Dead-band the per-FRAME source rewrite. setGeoJson dirties the source and
+            // forces MapLibre's GL RenderThread to re-render the frame; the render tick
+            // calls this ~30fps, so a STATIONARY car (dead-reckon estimate holds, pose
+            // unchanged) was re-rendering an identical scene every frame — measured as
+            // ~80% of a core on the GL RenderThread, doubled by the cluster mirror's
+            // second map instance. Skip the rewrite when the pose hasn't meaningfully
+            // moved/turned: while driving each frame steps far beyond the gate, so this
+            // costs nothing in motion; it only freezes a parked map.
+            if (!puckPaintedLat.isNaN()) {
+                val moved = guidance.haversineMeters(puckPaintedLat, puckPaintedLng, lat, lng)
+                var dBearing = kotlin.math.abs(bearing - puckPaintedBearing) % 360.0
+                if (dBearing > 180.0) dBearing = 360.0 - dBearing
+                if (moved < PUCK_DEADBAND_M && dBearing < PUCK_DEADBAND_DEG) return
+            }
+            existing.setGeoJson(buildPuckFeature(lat, lng, bearing))
+            puckPaintedLat = lat; puckPaintedLng = lng; puckPaintedBearing = bearing
             return
         }
-        val accent = ContextCompat.getColor(this, R.color.md_sys_color_primary_light)
+        val feature = buildPuckFeature(lat, lng, bearing)
+        puckPaintedLat = lat; puckPaintedLng = lng; puckPaintedBearing = bearing
+        // Theme-aware accent so the puck reads on the dark recolored basemap too. A
+        // theme switch wipes the registered arrow image + source (style reload), so
+        // this re-registers with the fresh themed color on the next paint.
+        val accent = m3("primary")
         // Register the directional arrow bitmap once.
         if (style.getImage(ICON_PUCK_ARROW) == null) {
             style.addImage(ICON_PUCK_ARROW, buildDirectionArrow(accent))
         }
-        style.addSource(GeoJsonSource(PUCK_SOURCE_ID, pointJson))
+        style.addSource(GeoJsonSource(PUCK_SOURCE_ID, feature))
         // Soft accuracy halo underneath.
         style.addLayer(
             CircleLayer(PUCK_HALO_LAYER_ID, PUCK_SOURCE_ID).withProperties(
@@ -4056,6 +4614,14 @@ open class RoadSenseMapActivity : AppCompatActivity() {
             )
         )
     }
+
+    /** Build the puck Feature: a Point at (lng,lat) carrying the numeric "bearing"
+     *  property that drives iconRotate. Typed (no JSON string) so the per-frame
+     *  setGeoJson(Feature) skips native JSON parsing. */
+    private fun buildPuckFeature(lat: Double, lng: Double, bearing: Double): Feature =
+        Feature.fromGeometry(Point.fromLngLat(lng, lat)).apply {
+            addNumberProperty("bearing", bearing)
+        }
 
     /**
      * Build a SOTA 3D-style navigation arrow puck (Gmaps/Waze look): a chevron
@@ -4186,22 +4752,41 @@ open class RoadSenseMapActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        mapView.onStart()
+        // mapView is a lateinit assigned at the END of onCreate. onCreate has an
+        // early return (cluster instance that landed on display 0 → finishAndRemoveTask)
+        // that bails BEFORE that assignment, yet super.onCreate already ran so AMS
+        // still drives the full lifecycle on the finishing instance. Touching the
+        // uninitialized lateinit here threw UninitializedPropertyAccessException and
+        // crashed the whole app — the intermittent "clicking Map crashes Overdrive".
+        // Guard every forward with ::mapView.isInitialized.
+        if (::mapView.isInitialized) mapView.onStart()
     }
 
     override fun onResume() {
         super.onResume()
+        if (!::mapView.isInitialized) return
         mapView.onResume()
         // Resume the camera/guidance loops suspended in onStop (state was kept).
         if (navigating) {
             mainHandler.removeCallbacks(guidanceRunnable); mainHandler.post(guidanceRunnable)
             startMotionFollow()   // resume the dead-reckoning render tick
+        } else if (clusterMode) {
+            startClusterFollow()   // idempotent (self-dedupes)
+        } else {
+            // Head-unit, NOT navigating (idle browsing). Previously NOTHING ran here,
+            // so the puck stayed frozen at the pre-background lastFix until the user
+            // tapped Locate — while the cluster (which has its own idle follow) stayed
+            // live. Mirror that here: start the head-unit idle follow so the puck
+            // refreshes on resume and keeps tracking. PUCK-ONLY (never moves the camera)
+            // so a user who panned away keeps their view.
+            startIdleFollow()
         }
-        if (clusterMode) startClusterFollow()   // idempotent (self-dedupes)
+        // Head unit: resume watching the cluster-projection flag (suspended in onStop).
+        if (!clusterMode) startHeadUnitProjectionPoll()
     }
 
     override fun onPause() {
-        mapView.onPause()
+        if (::mapView.isInitialized) mapView.onPause()
         super.onPause()
     }
 
@@ -4213,19 +4798,24 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         // so onResume restarts seamlessly.
         mainHandler.removeCallbacks(guidanceRunnable)
         mainHandler.removeCallbacks(clusterFollowRunnable)
+        mainHandler.removeCallbacks(idleFollowRunnable)
+        stopHeadUnitProjectionPoll()   // suspend the cluster-projection watch while backgrounded
+        projectionActive = false       // clear so onResume re-derives it (the poll's first
+                                       // read is 1s out; don't carry a stale-true → avoid
+                                       // ~1s of throttled glide after a resume)
         stopMotionFollow()   // pause the dead-reckoning render tick while backgrounded
-        mapView.onStop()
+        if (::mapView.isInitialized) mapView.onStop()
         super.onStop()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        mapView.onSaveInstanceState(outState)
+        if (::mapView.isInitialized) mapView.onSaveInstanceState(outState)
     }
 
     override fun onLowMemory() {
         super.onLowMemory()
-        mapView.onLowMemory()
+        if (::mapView.isInitialized) mapView.onLowMemory()
     }
 
     /** Animate the camera zoom by [delta] levels (+in / -out), clamped by the map. */
@@ -4253,6 +4843,13 @@ open class RoadSenseMapActivity : AppCompatActivity() {
             } catch (_: Throwable) {}
         }
         clusterDisplayListener = null
+        clusterThemeListener?.let { l ->
+            try {
+                getSharedPreferences(PREFS_NAVMAP, MODE_PRIVATE)
+                    .unregisterOnSharedPreferenceChangeListener(l)
+            } catch (_: Throwable) {}
+        }
+        clusterThemeListener = null
         // Dismiss any open place-action sheet so its Activity-parented window doesn't
         // leak if the Activity is finished out from under a showing sheet (e.g. the
         // cluster-finish poll's finishAndRemoveTask). Null the listener first so the
@@ -4287,8 +4884,9 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         routeSheetBehavior = null
         map = null
         // Forward last so MapLibre releases its GL resources after we've
-        // dropped our references.
-        mapView.onDestroy()
+        // dropped our references. Guarded: the display-0 early return finishes
+        // before mapView is assigned (see onStart note).
+        if (::mapView.isInitialized) mapView.onDestroy()
         super.onDestroy()
     }
 
@@ -4312,6 +4910,17 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         const val STYLE_URL_LIGHT = "https://tiles.openfreemap.org/styles/liberty"
         const val STYLE_URL_DARK = "https://tiles.openfreemap.org/styles/dark"
         const val STYLE_URL = STYLE_URL_LIGHT
+
+        /**
+         * BUNDLED on-device style assets (preferred over the hosted URLs above). These
+         * are the SAME OpenFreeMap basemap recipe shipped in the APK so the map opens
+         * instantly without a style-document fetch, survives a flaky link, and is ours
+         * to tune. The tiles/sprite/glyphs referenced inside are still streamed from
+         * OpenFreeMap. Loaded via Style.Builder().fromJson(asset) in styleBuilderForTheme();
+         * the hosted URL remains the fallback if an asset can't be read.
+         */
+        const val STYLE_ASSET_LIGHT = "maps/liberty_style.json"
+        const val STYLE_ASSET_DARK = "maps/dark_style.json"
 
         // Source / layer ids.
         const val HAZARD_SOURCE_ID = "roadsense-hazards"
@@ -4427,11 +5036,40 @@ open class RoadSenseMapActivity : AppCompatActivity() {
 
         // Cluster maneuver-banner text sizes (sp) — larger than the head-unit's
         // TitleLarge/BodyMedium for glanceability on the driver cluster.
-        const val CLUSTER_BANNER_PRIMARY_SP = 30f
-        const val CLUSTER_BANNER_SECONDARY_SP = 18f
+        // Cluster maneuver-banner text sizes (sp). Kept glanceable but NOT oversized:
+        // the cluster panel is short (720px) AND runs at density 320, so sp renders
+        // ~1.33× larger than the same number on the 240-dpi head unit — the old 30/18
+        // produced a card that wrapped to 2-3 lines and covered most of the map. 22/14
+        // matches the head-unit TitleLarge/BodyMedium numerically (still a touch larger
+        // physically from the density), so it reads at a glance without dominating.
+        const val CLUSTER_BANNER_PRIMARY_SP = 18f
+        const val CLUSTER_BANNER_SECONDARY_SP = 12f
+        // Maneuver glyph side (dp) on the cluster — smaller than the 40dp layout
+        // default so the icon matches the tighter text and doesn't drive card height.
+        const val CLUSTER_BANNER_ICON_DP = 22
+        // Compact-card geometry on the cluster: a small fixed-width strip (NOT
+        // match_parent) pinned top-start, with tight padding + a smaller corner
+        // radius, so the maneuver card occupies a slim corner and leaves the road
+        // map visible. dp values, scaled by display density in applyClusterChrome.
+        const val CLUSTER_BANNER_WIDTH_DP = 280
+        const val CLUSTER_BANNER_PAD_H_DP = 12
+        const val CLUSTER_BANNER_PAD_V_DP = 8
+        const val CLUSTER_BANNER_RADIUS_DP = 16
+        const val CLUSTER_BANNER_ICON_MARGIN_DP = 10
 
         // Immersive driving view: 3D tilt, close zoom, heading-up follow.
         const val IMMERSIVE_TILT = 55.0
+
+        // Resting (idle/browse) camera pitch — a gentle perspective that gives the
+        // static map depth (3D buildings + road casings) at street zoom, WITHOUT the
+        // steep heading-up framing of active guidance. Deliberately NOT an independent
+        // magic number: it is DERIVED as a fraction of our own [IMMERSIVE_TILT] so the
+        // resting view always reads as a calmer, shallower cousin of the driving
+        // framing and the two stay in proportion if either is ever retuned. ~0.62× of
+        // the driving pitch → a shallow lean. Applied by recenter() at FOLLOW_ZOOM;
+        // suppressed on the cluster + during nav.
+        const val RESTING_TILT_FRACTION = 0.62
+        const val RESTING_TILT = IMMERSIVE_TILT * RESTING_TILT_FRACTION
         const val IMMERSIVE_ZOOM = 17.5
         const val IMMERSIVE_MIN_SPEED_MPS = 1.5 // below this, GPS bearing is noise → hold last
 
@@ -4442,6 +5080,42 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         // 60fps Choreographer loop) so it stays light on the Adreno 610 which also
         // runs the daemon encoder.
         const val RENDER_TICK_MS = 33L
+
+        // Cluster fast-tick: the cluster's GL is capped at CLUSTER_MAX_FPS (15), so
+        // dead-reckoning the pose at the head unit's 30fps would just compute frames the
+        // FPS cap discards. Match the compute rate to the cap (≈67ms = 15fps) — same
+        // glance-smooth motion, half the per-frame pose math on the shared SoC.
+        const val CLUSTER_RENDER_TICK_MS = 67L
+
+        // Idle render tick: when the car is parked (no motion to interpolate) drop the
+        // dead-reckon tick from 30fps to 5fps. At 30fps the tick + per-frame puck
+        // source rewrite kept MapLibre's GL RenderThread pegged on a STATIONARY car
+        // (measured ~80% of a core, doubled by the cluster mirror's second map). The
+        // puck/camera dead-bands already elide the actual GL work when parked, so the
+        // residual cost is just waking the main thread — 5fps keeps the map responsive
+        // to the next fix while cutting that wakeup rate 6×. Snaps back to 30fps within
+        // one idle tick (≤200 ms) the instant the car starts moving.
+        const val IDLE_RENDER_TICK_MS = 200L
+
+        // Per-instance GL render-rate cap (MapView.setMaximumFps), applied ON TOP of
+        // WHEN_DIRTY mode. WHEN_DIRTY already drops a parked/idle map to ~0 frames; this
+        // bounds the MOVING-map rate. The head unit is the user-facing, touch-interactive
+        // surface — keep it at the 30fps smoothness floor. The cluster is a glanceable,
+        // non-touch driver panel mirroring the same drive — it doesn't need the full rate
+        // and shares the Adreno 610 with the recording encoder, so cap it at 15fps: still
+        // reads as smooth map-scroll at a glance (sub-12 starts looking stepped) but ~2×
+        // less GPU draw than 30 — directly cutting the second instance's cost. The render
+        // TICK matches this cap (CLUSTER_RENDER_TICK_MS) so we don't dead-reckon 30 poses
+        // /s only to drop half at the FPS cap.
+        const val HEADUNIT_MAX_FPS = 30
+        const val CLUSTER_MAX_FPS = 15
+
+        // Head-unit poll cadence for the daemon's clusterMapActive flag (dual-render
+        // avoidance). 1s matches the GPS/guidance cadence — the head unit doesn't need
+        // to learn about a projection start/stop faster than that, and the read is a
+        // cross-UID UCM forceReload kept off the looper. Mirrors CLUSTER_FINISH_POLL_MS's
+        // role on the cluster side.
+        const val PROJECTION_POLL_MS = 1000L
 
         // Speed-adaptive zoom (km/h → zoom): open the view out at speed (see further
         // ahead on the highway), close in around town. EMA-smoothed across thresholds
@@ -4487,6 +5161,16 @@ open class RoadSenseMapActivity : AppCompatActivity() {
         const val CAM_DEADBAND_M = 0.6
         const val CAM_DEADBAND_DEG = 0.4
 
+        // Puck SOURCE-rewrite dead-band: skip the per-frame setGeoJson on the puck
+        // GeoJsonSource when the painted pose has barely moved/turned. setGeoJson
+        // dirties the source → forces a GL re-render, so without this a parked car
+        // re-rendered an identical puck every render tick (the dominant idle-CPU cost,
+        // ×2 with the cluster mirror). Sub-metre / sub-degree so it NEVER skips a frame
+        // while driving (each real step dwarfs it); its only job is to freeze a parked
+        // map. Slightly below the camera dead-band so the puck can never lag the camera.
+        const val PUCK_DEADBAND_M = 0.5
+        const val PUCK_DEADBAND_DEG = 0.3
+
         // On-route snap hysteresis (m). The render frame snaps the puck to the route
         // line while the lateral offset is small and only releases it to the raw
         // position once clearly off-route — a single threshold would let a GPS offset
@@ -4504,11 +5188,14 @@ open class RoadSenseMapActivity : AppCompatActivity() {
 
         // Heading-up bearing low-pass TIME CONSTANT (seconds). smoothBearing derives
         // its per-call alpha = 1 - exp(-dt/tau) from the REAL elapsed dt, so the feel
-        // is identical whether it's called at ~12fps (render frame) or 1Hz (cluster
-        // idle follow) — a fixed alpha would silently collapse the time-constant ~12x
+        // is identical whether it's called at ~30fps (render frame) or 1Hz (cluster
+        // idle follow) — a fixed alpha would silently collapse the time-constant ~30x
         // at the faster cadence and make the camera whip through corners + pass GPS
-        // jitter. ~0.6s = smooth heading-up rotation that still tracks turns promptly.
-        const val BEARING_TAU_S = 0.6
+        // jitter. 0.35s = the consumer-nav feel: smooth heading-up rotation that still
+        // turns promptly into corners (0.6s felt laggy — the arrow/camera trailed the
+        // actual turn by a beat; now that bearing is steered by the route TANGENT when
+        // on-route, a shorter tau tracks the turn without re-exposing GPS jitter).
+        const val BEARING_TAU_S = 0.35
 
         // POI (EV charging / fuel) along-route layer.
         const val POI_SOURCE_ID = "roadsense-poi"

@@ -383,7 +383,7 @@
     <string name="toast_updated_to">Обновлено на %1$s</string>
     <string name="toast_update_install_failed">Не удалось установить обновление: %1$s</string>
     <string name="toast_checking_for_updates">Проверяю обновления...</string>
-    <string name="toast_app_up_to_date">App is up to date (%1$s)</string>
+    <string name="toast_app_up_to_date">Приложение обновлено (%1$s)</string>
     <string name="toast_update_check_failed">Не удалось проверить обновление: %1$s</string>
     <!-- Update dialog + version picker -->
     <string name="update_dialog_available_title">Доступно обновление</string>
@@ -578,7 +578,7 @@
     <string name="toast_batch_delete_partial">%1$d удалено, %2$d не удалось</string>
     <string name="play_with_chooser">Играть с</string>
     <!-- Setup guide -->
-    <string name="setup_version_banner">Updated to %1$s — re-confirm autostart, BYD wipes it on every install</string>
+    <string name="setup_version_banner">Обновлено до %1$s — повторно подтвердите автозапуск, BYD удаляет его при каждой установке</string>
     <string name="setup_overlay_already_granted">Уже предоставлено</string>
     <!-- Setup guide — post-setup tips section -->
     <string name="setup_tips_header">Советы и решение проблем</string>
@@ -920,9 +920,9 @@
     <string name="pin_lock_backspace_cd">Заднее место</string>
     <plurals name="pin_lock_dot_a11y">
         <item quantity="one">Введена цифра %1$d</item>
-        <item quantity="few">%1$d digits entered</item>
-        <item quantity="many">%1$d digits entered</item>
-        <item quantity="other">%1$d digits entered</item>
+        <item quantity="few">Введены цифры %1$d</item>
+        <item quantity="many">Введены цифры %1$d</item>
+        <item quantity="other">Введена цифра %1$d</item>
     </plurals>
     <!-- Place tagging (reverse geocoding) — recording row chip fallback. -->
     <string name="recording_unknown_location">Нет места.</string>
@@ -1130,7 +1130,7 @@
     <!-- Hazards-along-route pills (%1$d = count) -->
     <string name="roadsense_map_pill_severe">Тяжелое %1$d</string>
     <string name="roadsense_map_pill_moderate">%1$d модерируемый</string>
-    <string name="roadsense_map_pill_minor">%1$d minor</string>
+    <string name="roadsense_map_pill_minor">%1$d младший</string>
     <!-- Shown briefly if the basemap can\'t be reached. -->
     <string name="roadsense_map_offline">Данные карты недоступны в автономном режиме</string>
     <!-- Navigation: autocomplete + route options -->
@@ -1185,12 +1185,14 @@
     <string name="roadsense_map_search_to_save">Искать место для установки как %1$s</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">Поездка восстановлена</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">Токен хранится в безопасности и используется совместно приложением и фоновыми процессами.</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">Токен хранится в зашифрованном виде и используется совместно приложением и процессом демона.</string>
     <string name="cloudflared_token_hint">Введите токен cloudflared</string>
     <string name="cloudflare_paid_version">Платная версия Cloudflare</string>
-    <string name="dialog_cloudflared_settings_title">🌐 Настройки Cloudflared</string>
-    <string name="dialog_cloudflared_settings_message">Укажите, используете ли вы платный Cloudflare или trycloudflare. Если вы используете платный Cloudflare, введите свой токен туннеля.</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">Если выбрана платная версия, токен не может быть пустым</string>
+    <string name="dialog_cloudflared_settings_title">Настройки Cloudflared</string>
+    <string name="dialog_cloudflared_settings_message">Укажите, используете ли вы платный Cloudflare или trycloudflare. Если вы используете платный Cloudflare, введите токен своего туннеля.</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">Если вы выбрали платную версию, токен не может быть пустым</string>
+    <string name="toast_cloudflared_token_invalid">Недопустимый токен: используйте только буквы, цифры и символы . _ - =</string>
     <string name="toast_cloudflared_saved_settings">Настройки Cloudflared сохранены</string>
 </resources>

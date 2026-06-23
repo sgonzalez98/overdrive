@@ -1165,12 +1165,14 @@
     <string name="roadsense_map_search_to_save">Zoek een plaats om in te stellen als %1$s</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">Rit hersteld</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">Token wordt veilig opgeslagen en gedeeld tussen app- en daemonprocessen.</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">Het token wordt versleuteld opgeslagen en gedeeld tussen de app en het daemon-proces.</string>
     <string name="cloudflared_token_hint">Voer cloudflared-token in</string>
-    <string name="cloudflare_paid_version">Cloudflare Betaalde Versie</string>
-    <string name="dialog_cloudflared_settings_title">🌐 Cloudflared-instellingen</string>
-    <string name="dialog_cloudflared_settings_message">Geef aan of u betaalde Cloudflare of trycloudflare gebruikt. Als u betaalde Cloudflare gebruikt, voert u uw tunneltoken in.</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">Als dit is ingesteld op de betaalde versie, mag het token niet leeg zijn</string>
+    <string name="cloudflare_paid_version">Cloudflare betaalde versie</string>
+    <string name="dialog_cloudflared_settings_title">Cloudflared-instellingen</string>
+    <string name="dialog_cloudflared_settings_message">Bepaal of je betaald Cloudflare of trycloudflare gebruikt. Als je betaald Cloudflare gebruikt, voer dan je tunnel-token in.</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">Als je de betaalde versie instelt, mag het token niet leeg zijn</string>
+    <string name="toast_cloudflared_token_invalid">Ongeldig token: gebruik alleen letters, cijfers en de tekens . _ - =</string>
     <string name="toast_cloudflared_saved_settings">Cloudflared-instellingen opgeslagen</string>
 </resources>

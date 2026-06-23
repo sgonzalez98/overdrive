@@ -1155,12 +1155,14 @@
     <string name="roadsense_map_search_to_save">%1$sとして設定する場所を検索します</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">トリップが復元されました</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">トークンは安全に保存され、アプリとデーモンプロセスの間で共有されます。</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">トークンは暗号化して保存され、アプリとデーモンプロセス間で共有されます。</string>
     <string name="cloudflared_token_hint">cloudflared トークンを入力</string>
     <string name="cloudflare_paid_version">Cloudflare 有料版</string>
-    <string name="dialog_cloudflared_settings_title">🌐 Cloudflared 設定</string>
-    <string name="dialog_cloudflared_settings_message">有料の Cloudflare または trycloudflare のどちらを使用するかを定義します。有料の Cloudflare を使用している場合は、トンネルトークンを入力してください。</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">有料版に設定する場合、トークンを空にすることはできません</string>
+    <string name="dialog_cloudflared_settings_title">Cloudflared 設定</string>
+    <string name="dialog_cloudflared_settings_message">有料版の Cloudflare を使用するか trycloudflare を使用するかを設定します。有料版の Cloudflare を使用する場合は、トンネルのトークンを入力してください。</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">有料版を設定する場合、トークンを空にすることはできません</string>
+    <string name="toast_cloudflared_token_invalid">無効なトークン: 英字、数字、および . _ - = の文字のみを使用してください</string>
     <string name="toast_cloudflared_saved_settings">Cloudflared 設定を保存しました</string>
 </resources>

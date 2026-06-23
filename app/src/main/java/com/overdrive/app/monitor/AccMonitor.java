@@ -34,6 +34,17 @@ public class AccMonitor {
     // it stays unrecorded for the rest of the drive.
     private static volatile boolean accOnAuthoritative = false;
 
+    // Trustworthiness of the MOST RECENT probeAccState() call. True only when the
+    // last probe landed on a CLEAN bodywork power level (0-3); false when it
+    // returned via a sentinel bluff (FAKE_OK=4 / INVALID=255), a reflection/device
+    // failure, or the "assume ACC-ON safe default" fallback. The ACC-ON disarm
+    // watchdog reads this so it disarms ONLY on a real ignition-on (clean level≥2)
+    // and never on a sentinel that merely DEFAULTED to ACC-ON — the latter is what
+    // a parked car with "Keep USB powered" OFF produces once AccSentryDaemon's IPC
+    // heartbeats stop. A genuine ACC-ON still reads cleanly, so real disarm is
+    // unaffected. Volatile: written on the probe thread, read on the watchdog thread.
+    private static volatile boolean lastProbeTrustworthy = false;
+
     // Last accOn value an EDGE was dispatched for, so notifyAccEdge fires the
     // auto-project hook only on a genuine OFF→ON transition (both setAccState
     // IPC and probeAccState refresh the value repeatedly without a real change).
@@ -204,6 +215,7 @@ public class AccMonitor {
         if (!bodyworkReflectionResolved) {
             // Class genuinely missing on this firmware — safe default.
             // Don't enter sentry on a permanent reflection failure.
+            lastProbeTrustworthy = false;
             return false;
         }
         try {
@@ -211,6 +223,7 @@ public class AccMonitor {
 
             if (device == null) {
                 CameraDaemon.log("AccMonitor: BYDAutoBodyworkDevice.getInstance returned null");
+                lastProbeTrustworthy = false;
                 return false;
             }
 
@@ -280,6 +293,11 @@ public class AccMonitor {
                     // safe default that keeps recording alive). Only
                     // trust the prior state when an authoritative IPC
                     // has already established it.
+                    // Sentinel reading — NOT a clean power level. Mark the probe
+                    // untrustworthy so the ACC-ON disarm watchdog won't act on it
+                    // (a sentinel that defaults to ACC-ON must never disarm a parked
+                    // session; a real ignition-on reads cleanly below).
+                    lastProbeTrustworthy = false;
                     if (!accOnAuthoritative) {
                         CameraDaemon.log("AccMonitor: sentinel + cold cache — returning ACC ON (safe default, not sentry)");
                         return false;
@@ -297,6 +315,9 @@ public class AccMonitor {
             boolean isAccOn = level >= POWER_LEVEL_ON;
             accOn = isAccOn;
             inSentryMode = !isAccOn;
+            // Clean power level (0-3, possibly settled from a retry) — this reading
+            // is trustworthy. The disarm watchdog may act on it.
+            lastProbeTrustworthy = true;
             notifyAccEdge(isAccOn);
 
             String levelStr;
@@ -313,8 +334,19 @@ public class AccMonitor {
             return !isAccOn;  // true if ACC is OFF
         } catch (Exception e) {
             CameraDaemon.log("AccMonitor: hardware probe failed: " + e.getMessage());
+            lastProbeTrustworthy = false;  // error path → untrustworthy reading
             return false;  // assume ACC ON (safe default — don't enter sentry on error)
         }
+    }
+
+    /**
+     * @return true iff the MOST RECENT {@link #probeAccState} call landed on a
+     * clean bodywork power level (0-3). False after a sentinel/error/default
+     * reading. The ACC-ON disarm watchdog gates on this so it never disarms a
+     * parked session on a HAL bluff that merely defaulted to ACC-ON.
+     */
+    public static boolean wasLastProbeTrustworthy() {
+        return lastProbeTrustworthy;
     }
 
     /**

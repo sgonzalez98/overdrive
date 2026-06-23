@@ -741,12 +741,14 @@
     <string name="settings_security_overline_lock">App lås</string>
     <string name="roadsense_sev_moderate">Moderat</string>
     <string name="settings_security_dialog_change_step1_title">Bekreft gjeldende PIN-kode</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">Tokenet lagres sikkert og deles mellom app- og daemon-prosesser.</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">Tokenet lagres kryptert og deles mellom appen og daemon-prosessen.</string>
     <string name="cloudflared_token_hint">Skriv inn cloudflared-token</string>
     <string name="cloudflare_paid_version">Cloudflare betalt versjon</string>
-    <string name="dialog_cloudflared_settings_title">🌐 Cloudflared-innstillinger</string>
-    <string name="dialog_cloudflared_settings_message">Definer om du bruker betalt Cloudflare oder trycloudflare. Hvis du bruker betalt Cloudflare, skriv inn tunnel-tokenet ditt.</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">Hvis satt til betalt versjon, kan ikke tokenet være tomt</string>
+    <string name="dialog_cloudflared_settings_title">Cloudflared-innstillinger</string>
+    <string name="dialog_cloudflared_settings_message">Angi om du bruker betalt Cloudflare eller trycloudflare. Hvis du bruker betalt Cloudflare, skriv inn tunnel-tokenet ditt.</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">Hvis du angir den betalte versjonen, kan ikke tokenet være tomt</string>
+    <string name="toast_cloudflared_token_invalid">Ugyldig token: bruk kun bokstaver, tall og tegnene . _ - =</string>
     <string name="toast_cloudflared_saved_settings">Cloudflared-innstillinger lagret</string>
 </resources>

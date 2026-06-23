@@ -175,10 +175,12 @@ public class LocationSidecarService extends Service implements LocationListener 
                     }
                 }
                 
-                // SOTA: Slow down periodic sender to 15s.
-                // Its purpose is only to recover if the daemon restarts; 15s is
-                // plenty and saves CPU/IPC overhead.
-                handler.postDelayed(this, 15000);
+                // Periodic keep-alive / daemon-restart recovery. Kept at 4s
+                // (down from the original 2s for CPU/IPC savings, but well
+                // under RoadSense's 5s fix-staleness cutoff) so that when the
+                // car is truly stationary and the provider emits no callbacks,
+                // GpsMonitor.lastUpdate never ages past the consumer threshold.
+                handler.postDelayed(this, 4000);
             }
         };
         handler.postDelayed(periodicSender, 5000);
@@ -238,29 +240,34 @@ public class LocationSidecarService extends Service implements LocationListener 
                 return;
             }
             
-            // SOTA: Request updates less aggressively.
-            // 2s / 2m for GPS is enough for surveillance and trip logs.
+            // Keep GPS at 1s / 0m so RoadSense back-projection still sees the
+            // ~2 Hz distinct-fix stream its GpsRingBuffer is designed around
+            // (GPS_POLL_MS≈500, FIX_LATENCY≈700ms). The throttling that cuts
+            // IPC/disk spam happens downstream in onLocationChanged (the
+            // distance/time gate), NOT at the provider — coarsening the
+            // provider here would starve hazard approach detection.
             if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 locationManager.requestLocationUpdates(
                     LocationManager.GPS_PROVIDER,
-                    2000,  // 2 seconds
-                    2.0f,  // 2 meters
+                    1000,  // 1 second
+                    0.0f,  // every fix (no provider-side distance filter)
                     this,
                     workerThread.getLooper()  // deliver off the UI thread
                 );
-                Log.i(TAG, "GPS provider started (2s/2m)");
+                Log.i(TAG, "GPS provider started (1s/0m)");
             }
-            
-            // Also use network provider as fallback
+
+            // Also use network provider as fallback. 5s cadence is fine; keep
+            // min-distance 0 so it doesn't pre-filter fixes the gate wants.
             if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                 locationManager.requestLocationUpdates(
                     LocationManager.NETWORK_PROVIDER,
                     5000,  // 5 seconds
-                    10.0f, // 10 meters
+                    0.0f,  // every fix
                     this,
                     workerThread.getLooper()  // deliver off the UI thread
                 );
-                Log.i(TAG, "Network provider started (5s/10m)");
+                Log.i(TAG, "Network provider started (5s/0m)");
             }
             
             // Get last known location immediately
@@ -303,12 +310,19 @@ public class LocationSidecarService extends Service implements LocationListener 
         accuracy = location.hasAccuracy() ? location.getAccuracy() : 0.0f;
         altitude = location.hasAltitude() ? location.getAltitude() : 0.0;
         
-        // SOTA: Throttle Log, IPC and Disk I/O.
-        // We only "Process" (heavy lifting) if:
-        // 1. Car moved > 3 meters (ignores typical stationary GPS "jumping")
-        // 2. OR > 10 seconds passed (ensures time-accuracy in logs even if stationary)
-        // 3. OR it's the first fix ever.
-        if (lastProcessedLocation == null || distanceMoved > 3.0f || timeSinceLastProcess > 10_000) {
+        // Throttle Log, IPC and Disk I/O — but keep the distinct-fix rate as
+        // high as the provider delivers (GPS is requested at 1s/0m) so
+        // RoadSense back-projection (GpsRingBuffer ~2 Hz design, 5s max fix
+        // age) and the nav puck stay fresh. We "Process" if:
+        // 1. Car moved > 1.5 meters (drops sub-metre stationary GPS jitter), OR
+        // 2. > 500 ms passed since the last processed fix. NOTE: the time gate
+        //    is intentionally HALF the 1000 ms provider period — a >=1000 ms
+        //    gate would race the provider cadence and drop every other fix
+        //    (~2 s spacing); 500 ms lets every ~1 s provider fix through while
+        //    still keeping GpsMonitor.lastUpdate far under the 5s staleness
+        //    cutoff when stopped at a light, OR
+        // 3. it's the first fix ever.
+        if (lastProcessedLocation == null || distanceMoved > 1.5f || timeSinceLastProcess > 500) {
             boolean isFirstFix = (lastProcessedLocation == null);
             lastProcessedLocation = new Location(location);
             lastProcessedTime = now;

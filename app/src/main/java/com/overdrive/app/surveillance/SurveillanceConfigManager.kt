@@ -65,6 +65,7 @@ class SurveillanceConfigManager(
         private const val KEY_SENSITIVITY_LEVEL = "sensitivityLevel"
         private const val KEY_DETECTION_ZONE = "detectionZone"
         private const val KEY_LOITERING_TIME = "loiteringTimeSeconds"
+        private const val KEY_APPROACH_TRIGGER = "approachTriggerSeconds"
         private const val KEY_CAMERA_FRONT = "cameraFront"
         private const val KEY_CAMERA_RIGHT = "cameraRight"
         private const val KEY_CAMERA_LEFT = "cameraLeft"
@@ -196,6 +197,7 @@ class SurveillanceConfigManager(
             put(KEY_SENSITIVITY_LEVEL, config.sensitivityLevel)
             put(KEY_DETECTION_ZONE, config.detectionZone)
             put(KEY_LOITERING_TIME, config.loiteringTimeSeconds)
+            put(KEY_APPROACH_TRIGGER, config.approachTriggerSeconds)
             val cameras = config.cameraEnabled
             put(KEY_CAMERA_FRONT, cameras[0])
             put(KEY_CAMERA_RIGHT, cameras[1])
@@ -289,6 +291,7 @@ class SurveillanceConfigManager(
         if (json.has(KEY_SENSITIVITY_LEVEL)) config.setSensitivityLevel(json.optInt(KEY_SENSITIVITY_LEVEL, 3))
         if (json.has(KEY_DETECTION_ZONE)) config.setDetectionZone(json.optString(KEY_DETECTION_ZONE, "normal"))
         if (json.has(KEY_LOITERING_TIME)) config.setLoiteringTimeSeconds(json.optInt(KEY_LOITERING_TIME, 3))
+        if (json.has(KEY_APPROACH_TRIGGER)) config.setApproachTriggerSeconds(json.optInt(KEY_APPROACH_TRIGGER, 2))
         if (json.has(KEY_CAMERA_FRONT)) config.setCameraEnabled(0, json.optBoolean(KEY_CAMERA_FRONT, true))
         if (json.has(KEY_CAMERA_RIGHT)) config.setCameraEnabled(1, json.optBoolean(KEY_CAMERA_RIGHT, true))
         if (json.has(KEY_CAMERA_REAR)) config.setCameraEnabled(2, json.optBoolean(KEY_CAMERA_REAR, true))

@@ -109,9 +109,12 @@ public final class RecordingsIndex {
     private static final ThreadLocal<SimpleDateFormat> FMT_FILENAME =
             ThreadLocal.withInitial(() -> new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US));
 
-    // Schema version. Bump when the column layout changes; init() runs
-    // ALTER TABLE IF NOT EXISTS for every additive change.
-    private static final int SCHEMA_VERSION = 1;
+    // Schema version. Bump when the column layout changes; createSchema()
+    // runs ALTER TABLE ADD COLUMN IF NOT EXISTS for every additive change so
+    // existing on-disk DBs migrate forward without a wipe.
+    //   v1 → v2: added the `storage` column (INTERNAL / SD_CARD / USB), so the
+    //            recordings library can filter by physical volume.
+    private static final int SCHEMA_VERSION = 2;
 
     // Singleton — one index per daemon process.
     private static volatile RecordingsIndex INSTANCE;
@@ -255,9 +258,25 @@ public final class RecordingsIndex {
                 // /api/recordings/dates and /api/recordings GROUP-BY
                 // queries can hit a covering index instead of recomputing
                 // the date string per row.
-                "  ymd             VARCHAR(10)" +    // "yyyy-MM-dd" local
+                "  ymd             VARCHAR(10)," +    // "yyyy-MM-dd" local
+                // Physical volume the clip lives on: "INTERNAL" / "SD_CARD" /
+                // "USB", classified from abs_path at index time. NULL on rows
+                // written before v2 (the storage filter treats NULL via the
+                // path-derivation fallback in rowToJson). Appended LAST so the
+                // upsert MERGE's positional VALUES list stays append-only.
+                "  storage         VARCHAR(16)" +
                 ")"
             );
+
+            // v1 → v2 migration for DBs created before the `storage` column
+            // existed. ADD COLUMN IF NOT EXISTS is a no-op on a fresh v2 table
+            // (the CREATE above already has it) and additive on an old v1 file,
+            // so this is safe to run unconditionally on every open. Existing
+            // rows get storage=NULL and are backfilled lazily by reconcile()/
+            // upsert as files are re-touched; rowToJson also derives the tag
+            // from the path when the column is NULL, so the UI never shows a
+            // blank badge for a legacy row.
+            stmt.execute("ALTER TABLE recordings ADD COLUMN IF NOT EXISTS storage VARCHAR(16)");
 
             // Indexes — covering most common access patterns.
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_rec_ts ON recordings(ts_ms DESC)");
@@ -266,6 +285,7 @@ public final class RecordingsIndex {
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_rec_place ON recordings(place_short)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_rec_country ON recordings(place_country)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_rec_severity ON recordings(peak_severity)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_rec_storage ON recordings(storage)");
 
             // Schema version table — for future migrations.
             //
@@ -324,7 +344,7 @@ public final class RecordingsIndex {
         if (!initialized || row == null) return false;
         String sql =
             "MERGE INTO recordings KEY(filename) VALUES (" +
-            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, row.filename);
             ps.setString(2, row.absPath);
@@ -351,6 +371,7 @@ public final class RecordingsIndex {
             setNullableDouble(ps, 23, row.startLat);
             setNullableDouble(ps, 24, row.startLng);
             ps.setString(25, row.ymd);
+            setNullableString(ps, 26, row.storage);
             ps.executeUpdate();
             return true;
         } catch (Exception e) {
@@ -893,6 +914,16 @@ public final class RecordingsIndex {
          * Indexed via place_country column.
          */
         public String country;
+        /**
+         * Physical-volume filter: "INTERNAL" / "SD_CARD" / "USB". Empty/null =
+         * no narrowing (show clips from every storage location, which is the
+         * default — the index already spans internal + SD + USB). Matched
+         * against the indexed {@code storage} column. Legacy rows whose column
+         * is still NULL (written before schema v2) are matched by deriving the
+         * volume from {@code abs_path} in SQL so the filter stays correct
+         * before the lazy backfill completes.
+         */
+        public Set<String> storages;
     }
 
     /**
@@ -1125,6 +1156,32 @@ public final class RecordingsIndex {
             appendAnd(where, "LOWER(place_country) = ?");
             args.add(f.country.toLowerCase(Locale.US));
         }
+        if (f.storages != null && !f.storages.isEmpty()) {
+            // Primary match is the indexed `storage` column. For legacy rows
+            // whose column is still NULL (pre-v2, not yet backfilled), derive
+            // the volume from abs_path so the filter is correct immediately:
+            //   - under the internal base or /storage/emulated → INTERNAL
+            //   - any other /storage/ or /mnt/ subtree            → SD_CARD
+            // (USB can't be told apart from SD by path alone without the live
+            // mount root, so NULL-row USB clips surface under SD_CARD until the
+            // backfill stamps the real column — an acceptable transient for the
+            // rare legacy-USB case; fresh rows are always exact.)
+            StringBuilder clause = new StringBuilder("(");
+            clause.append("storage IN ").append(inList(f.storages.size()));
+            for (String s : f.storages) args.add(s);
+            boolean wantInternal = f.storages.contains("INTERNAL");
+            boolean wantSd = f.storages.contains("SD_CARD");
+            if (wantInternal) {
+                clause.append(" OR (storage IS NULL AND (abs_path LIKE '/storage/emulated/%'"
+                        + " OR abs_path LIKE '/storage/emulated/0/Overdrive/%'))");
+            }
+            if (wantSd) {
+                clause.append(" OR (storage IS NULL AND abs_path NOT LIKE '/storage/emulated/%'"
+                        + " AND (abs_path LIKE '/storage/%' OR abs_path LIKE '/mnt/%'))");
+            }
+            clause.append(")");
+            appendAnd(where, clause.toString());
+        }
     }
 
     private static void appendAnd(StringBuilder sb, String clause) {
@@ -1183,6 +1240,7 @@ public final class RecordingsIndex {
         c.classes = f.classes == null ? null : new HashSet<>(f.classes);
         c.severities = f.severities == null ? null : new HashSet<>(f.severities);
         c.proximities = f.proximities == null ? null : new HashSet<>(f.proximities);
+        c.storages = f.storages == null ? null : new HashSet<>(f.storages);
         return c;
     }
 
@@ -1202,6 +1260,17 @@ public final class RecordingsIndex {
         r.absPath = mp4.getAbsolutePath();
         r.sizeBytes = mp4.length();
         r.mp4Mtime = mp4.lastModified();
+        // Physical volume the clip lives on, classified from its path. Stored
+        // as an indexed column so the recordings library can filter by volume
+        // (INTERNAL / SD_CARD / USB). Best-effort — a classifier/singleton
+        // failure leaves storage NULL and rowToJson falls back to deriving the
+        // tag from the path at read time, so the row is never dropped.
+        try {
+            r.storage = com.overdrive.app.storage.StorageManager
+                    .getInstance().classifyStorageForPath(r.absPath);
+        } catch (Throwable ignored) {
+            r.storage = null;
+        }
 
         // Type + timestamp from filename pattern.
         Matcher cam = CAM_PATTERN.matcher(name);
@@ -1338,7 +1407,26 @@ public final class RecordingsIndex {
         String name = rs.getString("filename");
         long ts = rs.getLong("ts_ms");
         rec.put("filename", name);
-        rec.put("path", rs.getString("abs_path"));
+        String absPath = rs.getString("abs_path");
+        rec.put("path", absPath);
+        // Per-clip storage tag (INTERNAL / SD_CARD / USB). Makes the silent
+        // SD→internal fallback (SD bridged behind USB power) visible at the
+        // file level, and backs the storage filter. Prefer the indexed column
+        // (populated at parse time); fall back to deriving from the path for
+        // legacy rows written before the v2 column existed (column is NULL).
+        // Best-effort throughout: null/unknown is simply omitted so the badge
+        // degrades gracefully rather than mislabeling.
+        try {
+            String storage = rs.getString("storage");
+            if (storage == null || storage.isEmpty()) {
+                storage = com.overdrive.app.storage.StorageManager
+                        .getInstance().classifyStorageForPath(absPath);
+            }
+            if (storage != null) rec.put("storage", storage);
+        } catch (Throwable ignored) {
+            // Index queries must never fail because the storage classifier
+            // (or the StorageManager singleton) is unavailable in this process.
+        }
         rec.put("type", rs.getString("type"));
         rec.put("cameraId", rs.getInt("camera_id"));
         rec.put("timestamp", ts);
@@ -1495,6 +1583,7 @@ public final class RecordingsIndex {
         Double startLat;
         Double startLng;
         String ymd;
+        String storage;   // "INTERNAL" / "SD_CARD" / "USB" / null
     }
 
     private static final class DirEntry {

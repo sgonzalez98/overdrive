@@ -249,7 +249,10 @@ class TunnelLauncher(
             append("' > $CLOUDFLARED_LOG 2>&1 &")
         }
         
-        logManager.debug(TAG, "Executing: $cmd")
+        // Redact the cloudflared paid token before logging — the command can
+        // contain `--token <secret>`, and DEBUG logs are written to logcat and
+        // (in LOG_CAPTURE builds) uploaded.
+        logManager.debug(TAG, "Executing: ${cmd.replace(Regex("--token\\s+\\S+"), "--token ***")}")
         
         adbShellExecutor.execute(
             command = cmd,

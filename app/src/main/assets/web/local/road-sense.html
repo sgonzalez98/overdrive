@@ -27,7 +27,7 @@
         ];
     </script>
     <script src="../shared/app-tabs.js"></script>
-    <link rel="stylesheet" href="../shared/styles.css?v=15">
+    <link rel="stylesheet" href="../shared/styles.css?v=16">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
 </head>
@@ -208,6 +208,39 @@
                                     <option value="29" data-i18n="road_sense.bs_layout_88">8.8&quot; cluster</option>
                                 </select>
                             </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Detection sensitivity: a multiplier on the EventDetector speed-aware
+                     amplitude threshold, applied LIVE by the daemon (no restart). This
+                     tunes how easily a hazard is DETECTED (distinct from the Warnings
+                     "Minimum Confidence" slider, which only gates whether you're alerted
+                     about an already-detected hazard). 50% = the default; lower = less
+                     sensitive (fewer false positives), higher = more sensitive. -->
+                <div class="card" data-tab="general">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg>
+                            <span data-i18n="road_sense.detect_title">Detection</span>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="setting-row" style="border-bottom:none;">
+                            <div class="setting-info">
+                                <div class="setting-name" data-i18n="road_sense.detect_sensitivity">Detection Sensitivity</div>
+                                <div class="setting-desc" data-i18n="road_sense.detect_sensitivity_desc">How easily RoadSense flags a bump, pothole or speed breaker. 50% is the default tuning. Slide toward More to catch gentler features (and a few more false detections); slide toward Less to only flag clear, hard hits. This changes what gets detected — not the same as the warning Minimum Confidence below.</div>
+                            </div>
+                            <div class="setting-control">
+                                <div class="slider-control">
+                                    <span class="slider-value" id="rsDetectSensValue">50%</span>
+                                    <input type="range" class="slider" id="rsDetectSensSlider" min="0" max="100" step="5" value="50" oninput="RoadSenseSettings.updateDetectSensitivity(this.value)">
+                                </div>
+                            </div>
+                        </div>
+                        <div class="slider-range-labels" style="width:120px;margin-left:auto;padding:0;">
+                            <span data-i18n="road_sense.detect_sensitivity_min">Less</span>
+                            <span data-i18n="road_sense.detect_sensitivity_max">More</span>
                         </div>
                     </div>
                 </div>
@@ -479,7 +512,7 @@
                         <span class="status-badge inactive" id="bsStatusBadge" data-i18n="status.off">OFF</span>
                     </div>
                     <div class="card-body">
-                        <div class="setting-row" style="border-bottom:none;">
+                        <div class="setting-row">
                             <div class="setting-info">
                                 <div class="setting-name" data-i18n="road_sense.bs_enable">Enable Blind Spot</div>
                                 <div class="setting-desc" data-i18n="road_sense.bs_enable_desc">Shows a merged rear + side camera view in a floating window when you turn on the indicator. Size and position are set below. Left signal shows rear + left; right signal shows right + rear.</div>
@@ -489,6 +522,18 @@
                                     <input type="checkbox" id="bsEnabled" onchange="RoadSenseSettings.bsToggleEnabled()">
                                     <span class="toggle-slider"></span>
                                 </label>
+                            </div>
+                        </div>
+                        <!-- Camera selection: merge both, or show a single camera. -->
+                        <div class="setting-row" style="border-bottom:none;">
+                            <div class="setting-info">
+                                <div class="setting-name" data-i18n="road_sense.bs_merge_title">Cameras shown</div>
+                                <div class="setting-desc" data-i18n="road_sense.bs_merge_desc">Merge the rear and side cameras into one view, or show just one camera. Single-camera views fill the window with that camera's full field of view; the Blend point and Blend softness sliders only apply to the merged view.</div>
+                            </div>
+                            <div class="setting-control" style="display:flex;flex-wrap:wrap;">
+                                <button class="btn btn-secondary" id="bsMergeBoth" style="margin:0 8px 8px 0;" onclick="RoadSenseSettings.bsSetMergeMode('both')" data-i18n="road_sense.bs_merge_both">Rear + side</button>
+                                <button class="btn btn-secondary" id="bsMergeSide" style="margin:0 8px 8px 0;" onclick="RoadSenseSettings.bsSetMergeMode('side')" data-i18n="road_sense.bs_merge_side">Side only</button>
+                                <button class="btn btn-secondary" id="bsMergeRear" style="margin:0 0 8px 0;" onclick="RoadSenseSettings.bsSetMergeMode('rear')" data-i18n="road_sense.bs_merge_rear">Rear only</button>
                             </div>
                         </div>
                     </div>
@@ -652,7 +697,7 @@
     <script src="../shared/auth.js"></script>
     <script src="../shared/core.js"></script>
     <script src="../shared/update-flow.js"></script>
-    <script src="../shared/road-sense.js?v=3"></script>
+    <script src="../shared/road-sense.js?v=5"></script>
     <script>
         function toggleSidebar() {
             document.getElementById('sidebar').classList.toggle('open');

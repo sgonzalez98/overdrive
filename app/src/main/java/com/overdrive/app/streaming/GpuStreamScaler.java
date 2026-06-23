@@ -40,6 +40,11 @@ public class GpuStreamScaler {
     private int uBsRadiusLocation;
     private int uBsAspectLocation;
     private int uBsFeatherLocation;
+    // Blind-spot merge mode (views 7/8): 0 = both (rear+side stitch), 1 = side
+    // camera only, 2 = rear camera only. Single-camera modes fill the whole card
+    // from one tap's full FOV (see buildFragmentShader view 7/8 branch).
+    private int uBsMergeModeLocation = -1;
+    private volatile int bsMergeMode = 0;
     // Rounded-corner card mask for the blind-spot views (7/8 only). Radius as a
     // fraction of the shorter half-axis (0 = square, ~0.12 = SOTA card corners).
     // Native SurfaceControl path composites the transparent corners directly.
@@ -284,6 +289,7 @@ public class GpuStreamScaler {
         uBsRadiusLocation = GLES20.glGetUniformLocation(programId, "uBsRadius");
         uBsAspectLocation = GLES20.glGetUniformLocation(programId, "uBsAspect");
         uBsFeatherLocation = GLES20.glGetUniformLocation(programId, "uBsFeather");
+        uBsMergeModeLocation = GLES20.glGetUniformLocation(programId, "uBsMergeMode");
         uBsMarginLocation     = GLES20.glGetUniformLocation(programId, "uBsMargin");
         uBsBevelWLocation     = GLES20.glGetUniformLocation(programId, "uBsBevelW");
         uBsBevelLightLocation = GLES20.glGetUniformLocation(programId, "uBsBevelLight");
@@ -404,6 +410,9 @@ public class GpuStreamScaler {
             if (uBsFeatherLocation >= 0) {
                 GLES20.glUniform1f(uBsFeatherLocation,
                     outputHeight > 0 ? 1.5f / (float) outputHeight : 0.003f);
+            }
+            if (uBsMergeModeLocation >= 0) {
+                GLES20.glUniform1i(uBsMergeModeLocation, bsMergeMode);
             }
             // 3D curved-glass-card framing params. Gate margin to 0 on non-BS views
             // so the framing branch (only reached on 7/8 anyway) is fully inert
@@ -795,6 +804,16 @@ public class GpuStreamScaler {
         this.uniformsDirty.set(true);
     }
 
+    /** Blind-spot merge mode (views 7/8): 0 = both (rear+side stitch, default),
+     *  1 = side camera only, 2 = rear camera only. Out-of-range values clamp to
+     *  "both" so a corrupt config can't blank the view. Idempotent. */
+    public void setBlindSpotMergeMode(int mode) {
+        int m = (mode == 1 || mode == 2) ? mode : 0;
+        if (m == this.bsMergeMode) return;
+        this.bsMergeMode = m;
+        this.uniformsDirty.set(true);
+    }
+
     /** Set which side (view 7 = -1, view 8 = +1) the coefficients resolve for,
      *  then re-resolve. Called when the view mode changes to 7/8. */
     public void setBlindSpotSide(float sign) {
@@ -1027,6 +1046,10 @@ public class GpuStreamScaler {
             "uniform float uBsRadius;\n" +
             "uniform float uBsAspect;\n" +
             "uniform float uBsFeather;\n" +
+            // Blind-spot merge mode (views 7/8): 0 = both (rear+side stitch, default),
+            // 1 = side camera only, 2 = rear camera only. Single-camera modes bypass
+            // odBlend's two-tap blend and fill the whole card from one tap's full FOV.
+            "uniform int uBsMergeMode;\n" +
             // ── 3D "curved glass card" framing (views 7/8) ───────────────────────
             // The video stays flat + uniform-scale; only the EDGE reads as 3D.
             // One analytic rounded-box SDF (IQ form) drives card coverage + a lit,
@@ -1159,12 +1182,45 @@ public class GpuStreamScaler {
             "        float bsCov = 1.0 - smoothstep(-uBsFeather, uBsFeather, sd);\n" +
             "        vec3 rgb = vec3(0.0);\n" +
             "        float vidCov = 0.0;\n" +    // od coverage; 0 where the projection has no pixels
-            "        if (bsCov > 0.0029) {\n" +  // skip odBlend outside the card body
+            "        if (bsCov > 0.0029) {\n" +  // skip the sampler outside the card body
             "            vec2 cardUv = clamp((vTexCoord - uBsMargin) / max(1.0 - 2.0 * uBsMargin, 1e-4), 0.0, 1.0);\n" +
-            "            vec4 bsCol = odBlend(uProducerForRear, uFlipForRear,\n" +
+            "            vec4 bsCol = vec4(0.0);\n" +
+            // Merge mode 1 = SIDE only, 2 = REAR only: bypass the two-tap stitch and
+            // fill the whole card from ONE tap swept across its FULL FOV. Reuses the
+            // identical odMap projection as the merged taps (same tH / roll / pitch
+            // coefficients) — only the angle ramp differs, so a single view is the
+            // same dewarp, just standalone. Coverage is full (the one camera fills
+            // the card; the rounded-corner / od-edge transparency still comes from
+            // bsCov below). Default (0) keeps the merged rear+side blend.
+            // Both taps sweep the angle DECREASING as cardUv.x increases — the same
+            // direction the merged blend uses for each tap (th and th-ctr both fall
+            // as xOut rises) — so a single view reads with the identical orientation
+            // it has inside "both", just widened to fill the card. The per-camera
+            // flip flags handle any mirror, so this is side-independent.
+            "            if (uBsMergeMode == 1) {\n" +
+            // SIDE camera only. h1 = uOd1.x is the side tap half-angle; sweep its
+            // full +h1..-h1 field across the card. Coverage = step(h1>0): full in
+            // normal operation (h1 >= ~0.5), but TRANSPARENT if the coefficients are
+            // degenerate/zeroed (unauthorized native resolve) — same map-shows-through
+            // contract odBlend has, so single-cam never paints a solid block.
+            "                float angS = (1.0 - cardUv.x * 2.0) * uOd1.x;\n" +
+            "                bsCol = vec4(texture2D(uCameraTex, odMap(sideCorner, vec2(0.5), sideFlip,\n" +
+            "                                 0.5, angS, uOd2.y, cardUv.y, 1.0, uOd3.z, uOd3.x, uOd3.y)).rgb,\n" +
+            "                             step(0.001, uOd1.x));\n" +
+            "            } else if (uBsMergeMode == 2) {\n" +
+            // REAR camera only. h0 = uOd0.w is the rear tap half-angle; full +h0..-h0
+            // field shows the whole rear (not the half the blend uses), identical
+            // regardless of turn side. Coverage gated on h0>0 (see mode 1 note).
+            "                float angR = (1.0 - cardUv.x * 2.0) * uOd0.w;\n" +
+            "                bsCol = vec4(texture2D(uCameraTex, odMap(uProducerForRear, vec2(0.5), uFlipForRear,\n" +
+            "                                 0.5, angR, uOd2.x, cardUv.y, 1.0, uOd4.z, uOd4.x, uOd4.y)).rgb,\n" +
+            "                             step(0.001, uOd0.w));\n" +
+            "            } else {\n" +
+            "                bsCol = odBlend(uProducerForRear, uFlipForRear,\n" +
             "                               sideCorner, sideFlip,\n" +
             "                               vec2(0.5), 0.5,\n" +
             "                               sideSign, cardUv.x, cardUv.y);\n" +
+            "            }\n" +
             "            vidCov = bsCol.a;\n" +   // 1 where video covers, 0 where it doesn't
             "            rgb = bsApplyRim(bsCol.rgb, p, cardHe, cardR, sd);\n" +
             "        }\n" +
@@ -1230,10 +1286,27 @@ public class GpuStreamScaler {
             "        float vidCov = 0.0;\n" +
             "        if (bsCov > 0.0029) {\n" +
             "            vec2 cardUv = clamp((vTexCoord - uBsMargin) / max(1.0 - 2.0 * uBsMargin, 1e-4), 0.0, 1.0);\n" +
-            "            vec4 bsCol = odBlend(vec2(rearOffset, 0.0), vec2(0.0),\n" +
+            "            vec4 bsCol = vec4(0.0);\n" +
+            // Same merge-mode switch as the DiLink-4 branch — single-cam modes fill
+            // the card from ONE tap's full FOV (legacy 4-strip corners: rear strip at
+            // rearOffset, side strip at sideX, each 0.25 wide × full height). Mode 0
+            // (default) keeps the merged rear+side blend.
+            "            if (uBsMergeMode == 1) {\n" +
+            "                float angS = (1.0 - cardUv.x * 2.0) * uOd1.x;\n" +
+            "                bsCol = vec4(texture2D(uCameraTex, odMap(vec2(sideX, 0.0), vec2(0.25, 1.0), vec2(0.0),\n" +
+            "                                 0.5, angS, uOd2.y, cardUv.y, 1.0, uOd3.z, uOd3.x, uOd3.y)).rgb,\n" +
+            "                             step(0.001, uOd1.x));\n" +   // transparent if coeffs degenerate (see DiLink-4 branch note)
+            "            } else if (uBsMergeMode == 2) {\n" +
+            "                float angR = (1.0 - cardUv.x * 2.0) * uOd0.w;\n" +
+            "                bsCol = vec4(texture2D(uCameraTex, odMap(vec2(rearOffset, 0.0), vec2(0.25, 1.0), vec2(0.0),\n" +
+            "                                 0.5, angR, uOd2.x, cardUv.y, 1.0, uOd4.z, uOd4.x, uOd4.y)).rgb,\n" +
+            "                             step(0.001, uOd0.w));\n" +
+            "            } else {\n" +
+            "                bsCol = odBlend(vec2(rearOffset, 0.0), vec2(0.0),\n" +
             "                               vec2(sideX, 0.0),      vec2(0.0),\n" +
             "                               vec2(0.25, 1.0), 0.5,\n" +
             "                               sideSign, cardUv.x, cardUv.y);\n" +
+            "            }\n" +
             "            vidCov = bsCol.a;\n" +
             "            rgb = bsApplyRim(bsCol.rgb, p, cardHe, cardR, sd);\n" +
             "        }\n" +

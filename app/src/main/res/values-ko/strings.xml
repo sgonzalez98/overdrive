@@ -1155,12 +1155,14 @@
     <string name="roadsense_map_search_to_save">%1$s으로 설정할 장소 검색</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">경로 복원됨</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">토큰은 안전하게 저장되며 앱과 데몬 프로세스 간에 공유됩니다.</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">토큰은 암호화되어 저장되며 앱과 데몬 프로세스 간에 공유됩니다.</string>
     <string name="cloudflared_token_hint">cloudflared 토큰 입력</string>
     <string name="cloudflare_paid_version">Cloudflare 유료 버전</string>
-    <string name="dialog_cloudflared_settings_title">🌐 Cloudflared 설정</string>
-    <string name="dialog_cloudflared_settings_message">유료 Cloudflare 또는 trycloudflare 중 어느 것을 사용할지 정의하십시오. 유료 Cloudflare를 사용하는 경우 터널 토큰을 입력하십시오.</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">유료 버전으로 설정할 경우 토큰은 비어 있을 수 없습니다.</string>
-    <string name="toast_cloudflared_saved_settings">Cloudflared 설정 저장됨</string>
+    <string name="dialog_cloudflared_settings_title">Cloudflared 설정</string>
+    <string name="dialog_cloudflared_settings_message">유료 Cloudflare를 사용할지 trycloudflare를 사용할지 정의하세요. 유료 Cloudflare를 사용하는 경우 터널 토큰을 입력하세요.</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">유료 버전을 설정하면 토큰을 비워 둘 수 없습니다</string>
+    <string name="toast_cloudflared_token_invalid">잘못된 토큰: 문자, 숫자 및 . _ - = 문자만 사용하세요</string>
+    <string name="toast_cloudflared_saved_settings">Cloudflared 설정이 저장되었습니다</string>
 </resources>

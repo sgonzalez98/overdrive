@@ -766,6 +766,14 @@ public class HttpServer {
             return CarPropertyDebugApiHandler.handle(method, path, body, out);
         }
 
+        // Hazard / turn-signal / fog actuation probe — tests whether the BYD
+        // light HAL accepts a generic set() from our uid-2000 daemon.
+        // Light-only, self-resetting, confirm=YES gated.
+        // See LightDebugApiHandler / HazardLightProbe.
+        if (path.startsWith("/api/debug/light/")) {
+            return LightDebugApiHandler.handle(method, path, body, out);
+        }
+
         // THROWAWAY de-risk spike for the native SurfaceControl blind-spot path:
         // proves whether a non-fullscreen, GL-fed, positioned SurfaceControl layer
         // composites on this firmware. Renders a red 400x300 box at (100,100) for
@@ -795,6 +803,13 @@ public class HttpServer {
         // App Update API (check, preview, install, progress)
         if (path.startsWith("/api/update/")) {
             return UpdateApiHandler.handle(method, path, body, out);
+        }
+
+        // Settings backup / restore (export + import). Auth-gated by
+        // AuthMiddleware (non-public path); the handler additionally rejects
+        // PUBLIC/tunnel mode because the bundle carries device key material.
+        if (path.startsWith("/api/backup/")) {
+            return ConfigBackupApiHandler.handle(method, path, body, out);
         }
 
         // Diagnostics log API (list daemons + upload a daemon log) — braveheart only

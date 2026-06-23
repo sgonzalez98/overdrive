@@ -281,6 +281,27 @@ object UnifiedConfigManager {
         }
     }
     
+    /**
+     * Public entry to [applyDefaults] for callers that build a config object
+     * outside the normal load path (e.g. ConfigBackupService overlaying a
+     * restored bundle) and need every section backfilled with current-app
+     * defaults before persisting. Idempotent — only fills absent keys.
+     */
+    @JvmStatic
+    fun ensureDefaults(config: JSONObject) = applyDefaults(config)
+
+    /**
+     * Run [body] while holding the SAME cross-process advisory lock that
+     * [updateSection]/[updateValues] use, so a bulk read-modify-write done
+     * outside this object (ConfigBackupService.applyBundle restoring a backup)
+     * can't be interleaved by a peer daemon JVM's section write (stale-snapshot
+     * lost update). Inside [body], call [forceReload] to get a fresh under-lock
+     * read, then [saveConfig]; the lock is reentrant per-thread so saveConfig's
+     * own paths nest harmlessly.
+     */
+    @JvmStatic
+    fun <T> runUnderConfigLock(body: () -> T): T = withConfigFileLock(body)
+
     private fun applyDefaults(config: JSONObject) {
         // optJSONObject (not getJSONObject) for these three: a partially-formed
         // config missing any of them must NOT throw here. applyDefaults runs
@@ -306,7 +327,17 @@ object UnifiedConfigManager {
         val blindspot = config.optJSONObject("blindspot") ?: JSONObject().also {
             config.put("blindspot", it)
         }
-        
+        // Ensure the telegram section exists (createDefaultConfig seeds it, but
+        // applyDefaults must also work on a partial config built elsewhere — e.g.
+        // a restored backup whose telegram section was skipped on a key
+        // mismatch). No default keys to seed (token/owner are user-set); just
+        // guarantee the empty object is present so the persisted config is
+        // never missing the whole section. Same for telegram as for bydCloud/
+        // navMap below.
+        config.optJSONObject("telegram") ?: JSONObject().also {
+            config.put("telegram", it)
+        }
+
         // Surveillance defaults
         if (!surveillance.has("minObjectSize")) surveillance.put("minObjectSize", 0.08)
         if (!surveillance.has("aiConfidence")) surveillance.put("aiConfidence", 0.25)
@@ -426,6 +457,10 @@ object UnifiedConfigManager {
         if (!blindspot.has("projExp")) blindspot.put("projExp", 1.0)
         if (!blindspot.has("rearRoll")) blindspot.put("rearRoll", 0.0)
         if (!blindspot.has("rearPitch")) blindspot.put("rearPitch", 0.0)
+        // Camera merge mode for the view: "both" (default — rear+side stitch),
+        // "side" (side camera only), or "rear" (rear camera only). The single-camera
+        // modes show one full-FOV feed instead of the merged panorama.
+        if (!blindspot.has("mergeMode")) blindspot.put("mergeMode", "both")
 
         // Telemetry Overlay defaults.
         //

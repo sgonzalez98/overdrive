@@ -286,8 +286,12 @@
 
             <div id="deviceInfo" class="device-info">
                 <div class="device-info-label" data-i18n="login.device_id">Device ID</div>
-                <div class="device-info-value" id="deviceIdDisplay" data-i18n="common.loading">Loading...</div>
-                <div class="device-info-value" id="deviceIdDisplay">...</div>
+                <!-- No data-i18n here: the device ID is written by JS. A
+                     data-i18n binding would let the i18n hydrate() pass
+                     overwrite the device ID with the localized "Loading..."
+                     on every locale change. setInitialLoadingText() seeds
+                     the localized placeholder once instead. -->
+                <div class="device-info-value" id="deviceIdDisplay">Loading...</div>
             </div>
 
             <div id="statusMessage" class="status-message"></div>

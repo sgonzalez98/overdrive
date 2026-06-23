@@ -1155,12 +1155,14 @@
     <string name="roadsense_map_search_to_save">搜索要设置为 %1$s 的地点</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">旅行已恢复</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">令牌被安全存储并在应用程序和守护进程之间共享。</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">令牌以加密方式存储，并在应用与守护进程之间共享。</string>
     <string name="cloudflared_token_hint">输入 cloudflared 令牌</string>
-    <string name="cloudflare_paid_version">Cloudflare 付费版本</string>
-    <string name="dialog_cloudflared_settings_title">🌐 Cloudflared 设置</string>
-    <string name="dialog_cloudflared_settings_message">定义您使用的是付费 Cloudflare 还是 trycloudflare。如果您使用的是付费 Cloudflare，请输入您的隧道令牌。</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">如果设置为付费版本，令牌不能为空</string>
+    <string name="cloudflare_paid_version">Cloudflare 付费版</string>
+    <string name="dialog_cloudflared_settings_title">Cloudflared 设置</string>
+    <string name="dialog_cloudflared_settings_message">定义您使用的是付费 Cloudflare 还是 trycloudflare。如果您使用付费 Cloudflare，请输入您的隧道令牌。</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">如果设置为付费版，令牌不能为空</string>
+    <string name="toast_cloudflared_token_invalid">无效令牌：仅可使用字母、数字以及 . _ - = 字符</string>
     <string name="toast_cloudflared_saved_settings">Cloudflared 设置已保存</string>
 </resources>

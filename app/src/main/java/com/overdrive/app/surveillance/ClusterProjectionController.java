@@ -988,7 +988,10 @@ public final class ClusterProjectionController {
                 m.invoke(pipe);
             }
         } catch (Throwable t) {
-            logger.debug("notifyPipelineReady: " + t.getMessage());
+            // INFO not debug: a reflection failure here (e.g. R8 renaming getGpuPipeline /
+            // onClusterProjectionReady without a keep rule) silently kills the cluster
+            // re-tag → BS card black. Make it visible at INFO so it never hides again.
+            logger.info("notifyPipelineReady FAILED (reflection): " + t.getMessage());
         }
     }
 
@@ -1002,7 +1005,7 @@ public final class ClusterProjectionController {
                 m.invoke(pipe);
             }
         } catch (Throwable t) {
-            logger.debug("notifyPipelineClosed: " + t.getMessage());
+            logger.info("notifyPipelineClosed FAILED (reflection): " + t.getMessage());
         }
     }
 

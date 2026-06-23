@@ -914,6 +914,12 @@ public class StreamingApiHandler {
                         (float) bs.optDouble("pitch",  -0.275),
                         (float) bs.optDouble("rearRoll",  0.0),
                         (float) bs.optDouble("rearPitch", 0.0));
+                    // Merge mode (both/side/rear) — apply alongside the stitch calib so
+                    // a browser switching the live stream to 7/8 matches the persisted
+                    // selection (and the on-car overlay), not the scaler's "both" default.
+                    String mm = bs.optString("mergeMode", "both");
+                    pipeline.setBlindSpotMergeMode(
+                        "side".equals(mm) ? 1 : ("rear".equals(mm) ? 2 : 0));
                 }
             } catch (Throwable t) {
                 CameraDaemon.log("blindspot calib apply failed: " + t.getMessage());

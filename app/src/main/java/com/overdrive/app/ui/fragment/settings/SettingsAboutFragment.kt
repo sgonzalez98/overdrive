@@ -94,6 +94,14 @@ class SettingsAboutFragment : Fragment() {
             (activity as? MainActivity)?.invokeCheckForUpdates()
         }
 
+        view.findViewById<View>(R.id.cardBackupExport).setOnClickListener {
+            startBackupExport()
+        }
+
+        view.findViewById<View>(R.id.cardBackupImport).setOnClickListener {
+            startBackupImport()
+        }
+
         view.findViewById<View>(R.id.cardLicense).setOnClickListener {
             openExternal(getString(R.string.settings_about_license_url))
         }
@@ -203,6 +211,460 @@ class SettingsAboutFragment : Fragment() {
         super.onDestroyView()
         avatarExecutor?.shutdownNow()
         avatarExecutor = null
+        // Don't retain the export bundle (device-id + encrypted credentials) in
+        // memory after teardown if the user navigated away before the SAF
+        // save-location picker returned. appContext is just the app context
+        // (not sensitive) but clear it too so a torn-down fragment holds nothing.
+        pendingExportText = null
+        appContext = null
+    }
+
+    // ==================== Backup & Restore ====================
+    //
+    // Same core as the web + Telegram surfaces: the daemon (UID 2000) owns the
+    // EXPORT_CONFIG / REPLACE_CONFIG IPC commands and does the atomic write. The
+    // app only moves bytes between the daemon and a user-picked file via SAF.
+    // Liveness gate: if the daemon doesn't answer, we tell the user to start it
+    // (the "camera daemon must be running" popup the design calls for).
+
+    /** Cached bundle text awaiting a SAF create-document destination. */
+    private var pendingExportText: String? = null
+
+    /**
+     * Application context captured for background backup I/O. Survives the
+     * fragment teardown, so a SAF read/write or IPC call that finishes after
+     * onDestroyView never touches a destroyed fragment via requireContext()
+     * (the executor-shutdown race). Lazily initialised on first backup action.
+     */
+    private var appContext: android.content.Context? = null
+
+    private fun ioContext(): android.content.Context? {
+        if (appContext == null && isAdded) appContext = requireContext().applicationContext
+        return appContext
+    }
+
+    /**
+     * Submit backup I/O. Reuses avatarExecutor but tolerates the destroy race:
+     * if the executor was shut down in onDestroyView between this call and the
+     * submit, swallow the RejectedExecutionException (the work is moot — the
+     * fragment is gone) instead of crashing.
+     */
+    private fun submitIo(task: Runnable) {
+        val exec = avatarExecutor ?: Executors.newSingleThreadExecutor().also { avatarExecutor = it }
+        try {
+            exec.execute(task)
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // Fragment torn down mid-action; nothing to do.
+        }
+    }
+
+    /** Tap → ask whether to include trip history, then build the bundle. */
+    private fun startBackupExport() {
+        if (!isAdded) return   // getString / dialog need an attached context
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.settings_backup_export_title)
+            .setMessage(R.string.settings_backup_trips_prompt)
+            .setNeutralButton(android.R.string.cancel, null)
+            // "Settings only" is the safe default (left/negative); including
+            // trip history (with its location data) is the explicit opt-in.
+            .setNegativeButton(R.string.settings_backup_settings_only) { _, _ -> runBackupExport(false) }
+            .setPositiveButton(R.string.settings_backup_with_trips) { _, _ -> runBackupExport(true) }
+            .show()
+    }
+
+    /** Tap → restore. Use SAF open-document when a real picker exists; else
+     *  show an in-app list of backup files found in the public Overdrive
+     *  folders (the BYD unit's only "picker" is an image gallery). */
+    private fun startBackupImport() {
+        if (!isAdded) return
+        if (safAvailable(Intent.ACTION_OPEN_DOCUMENT)) {
+            try {
+                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                    putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/json", "text/plain", "*/*"))
+                }
+                startActivityForResult(intent, REQ_IMPORT_PICK)
+                return
+            } catch (e: Exception) {
+                // Fall through to the in-app picker.
+            }
+        }
+        showInAppBackupPicker()
+    }
+
+    /**
+     * In-app file chooser used when no SAF picker is installed. Scans the
+     * public Overdrive backups folder plus Download for *.json bundles and
+     * lets the user pick one; reads it via direct file I/O. If nothing is
+     * found we tell the user where to drop a file.
+     */
+    private fun showInAppBackupPicker() {
+        if (!isAdded) return
+        submitIo {
+            val files = scanForBackupFiles()
+            mainHandler.post {
+                if (!isAdded) return@post
+                if (files.isEmpty()) {
+                    com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+                        .setTitle(R.string.settings_backup_import_title)
+                        .setMessage(getString(R.string.settings_backup_no_files,
+                            publicBackupDir().absolutePath))
+                        .setPositiveButton(android.R.string.ok, null)
+                        .show()
+                    return@post
+                }
+                // Label each as "<filename>  ·  <date>" for disambiguation.
+                val labels = files.map { f ->
+                    f.name + "\n" + android.text.format.DateFormat.getDateFormat(requireContext())
+                        .format(java.util.Date(f.lastModified())) + " " +
+                        android.text.format.DateFormat.getTimeFormat(requireContext())
+                            .format(java.util.Date(f.lastModified()))
+                }.toTypedArray()
+                com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+                    .setTitle(R.string.settings_backup_pick_file)
+                    .setItems(labels) { _, which ->
+                        readBackupFile(files[which])
+                    }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+            }
+        }
+    }
+
+    /**
+     * Find candidate backup files: *.json (newest first) under the Overdrive
+     * backups dir and the public Download dir. De-duplicated by absolute path.
+     */
+    private fun scanForBackupFiles(): List<File> {
+        val found = LinkedHashMap<String, File>()
+        val dirs = listOf(
+            publicBackupDir(),
+            File(android.os.Environment.getExternalStorageDirectory(), "Overdrive"),
+            android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_DOWNLOADS)
+        )
+        for (dir in dirs) {
+            val kids = try { dir.listFiles() } catch (e: Exception) { null } ?: continue
+            for (f in kids) {
+                if (f.isFile && f.name.endsWith(".json", ignoreCase = true) &&
+                    f.length() in 1..MAX_IMPORT_CHARS.toLong()) {
+                    found[f.absolutePath] = f
+                }
+            }
+        }
+        return found.values.sortedByDescending { it.lastModified() }
+    }
+
+    /** Read a picked backup file directly off disk, then validate + confirm. */
+    private fun readBackupFile(file: File) {
+        submitIo {
+            var tooLarge = false
+            val text = try {
+                if (file.length() > MAX_IMPORT_CHARS.toLong()) { tooLarge = true; null }
+                else file.readText(Charsets.UTF_8)
+            } catch (e: Exception) { null }
+            mainHandler.post {
+                if (!isAdded) return@post
+                if (tooLarge) { toast(getString(R.string.settings_backup_invalid_file)); return@post }
+                if (text.isNullOrBlank()) { toast(getString(R.string.settings_backup_read_failed)); return@post }
+                val parsed = try { JSONObject(text) } catch (e: Exception) { null }
+                if (parsed == null || parsed.optJSONObject("manifest") == null) {
+                    toast(getString(R.string.settings_backup_invalid_file)); return@post
+                }
+                confirmAndRestore(text)
+            }
+        }
+    }
+
+    /** Ask the daemon to build the bundle, then save it — via SAF when a real
+     *  document picker exists, else by writing straight to the public Overdrive
+     *  backups folder (the BYD head unit ships no DocumentsUI, so SAF
+     *  CREATE_DOCUMENT resolves to nothing and would throw). */
+    private fun runBackupExport(includeTrips: Boolean) {
+        if (!isAdded) return
+        toast(getString(R.string.settings_backup_exporting))
+        submitIo {
+            val req = JSONObject().put("command", "EXPORT_CONFIG").put("includeTrips", includeTrips)
+            val resp = com.overdrive.app.server.DaemonIpcClient.send(req, 15_000)
+            // The bundle build is the slow part; do the file write on this same
+            // IO thread (no SAF round-trip in the direct path).
+            val bundle = resp?.optJSONObject("bundle")
+            val ok = resp != null && resp.optBoolean("success", false) && bundle != null
+            if (ok && !safAvailable(Intent.ACTION_CREATE_DOCUMENT)) {
+                // Direct path: write to /sdcard/Overdrive/backups/<name>.json.
+                val name = suggestedBackupName(bundle)
+                val savedPath = writeBundleToPublicDir(bundle!!.toString(2), name)
+                mainHandler.post {
+                    if (!isAdded) return@post
+                    if (savedPath != null) {
+                        toast(getString(R.string.settings_backup_saved_to, savedPath))
+                    } else {
+                        toast(getString(R.string.settings_backup_save_failed))
+                    }
+                }
+                return@submitIo
+            }
+            mainHandler.post {
+                if (!isAdded) return@post
+                if (resp == null) {
+                    toast(getString(R.string.settings_backup_daemon_down))
+                    return@post
+                }
+                if (!ok) {
+                    toast(getString(R.string.settings_backup_export_failed))
+                    return@post
+                }
+                // SAF path (some hosts do have a document UI): pick a destination.
+                pendingExportText = bundle!!.toString(2)
+                try {
+                    val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = "application/json"
+                        putExtra(Intent.EXTRA_TITLE, suggestedBackupName(bundle))
+                    }
+                    startActivityForResult(intent, REQ_EXPORT_SAVE)
+                } catch (e: Exception) {
+                    // Last-ditch: SAF claimed to resolve but the launch threw —
+                    // fall back to the public-dir write rather than just failing.
+                    val text = pendingExportText
+                    pendingExportText = null
+                    submitIo {
+                        val savedPath = if (text != null) writeBundleToPublicDir(text, suggestedBackupName(bundle)) else null
+                        mainHandler.post {
+                            if (!isAdded) return@post
+                            if (savedPath != null) toast(getString(R.string.settings_backup_saved_to, savedPath))
+                            else toast(getString(R.string.settings_backup_export_failed))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * True when a real activity handles [action] for our JSON document MIME —
+     * i.e. a usable Storage Access Framework picker is installed. On the BYD
+     * head unit DocumentsUI is absent: CREATE_DOCUMENT resolves to nothing and
+     * OPEN_DOCUMENT/GET_CONTENT resolve only to BYD's image-only picker
+     * (com.byd.auto_photo), which can't pick or save a .json. In that case we
+     * use direct file I/O instead. Resolution is cheap (PackageManager lookup),
+     * so it's fine to call on the UI thread.
+     */
+    private fun safAvailable(action: String): Boolean {
+        val ctx = context ?: appContext ?: return false
+        return try {
+            val intent = Intent(action).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "application/json"
+            }
+            val ri = ctx.packageManager.resolveActivity(intent, 0) ?: return false
+            // A resolver that points at BYD's photo picker is NOT a usable
+            // JSON document picker — treat it as "no SAF".
+            val pkg = ri.activityInfo?.packageName ?: return false
+            pkg != "com.byd.auto_photo"
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Public directory where backups are written when SAF is unavailable:
+     * {@code /sdcard/Overdrive/backups}. Same external root the app already
+     * uses for recordings/trips, so it's user-reachable from the BYD file
+     * manager. Created on demand.
+     */
+    private fun publicBackupDir(): File {
+        val base = File(android.os.Environment.getExternalStorageDirectory(), "Overdrive")
+        val dir = File(base, "backups")
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
+
+    /**
+     * Write [text] to [name] under {@link #publicBackupDir}, returning the
+     * absolute path on success or null on failure. Runs on an IO thread.
+     */
+    private fun writeBundleToPublicDir(text: String, name: String): String? {
+        return try {
+            val dir = publicBackupDir()
+            if (!dir.exists()) return null
+            val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                .ifEmpty { "overdrive-backup.json" }
+            val out = File(dir, safeName)
+            FileOutputStream(out).use { it.write(text.toByteArray(Charsets.UTF_8)) }
+            out.absolutePath
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun suggestedBackupName(bundle: JSONObject?): String {
+        return try {
+            val m = bundle?.optJSONObject("manifest")
+            val ver = (m?.optString("appVersion") ?: "").replace(Regex("[^A-Za-z0-9._-]"), "")
+            val model = (m?.optString("deviceModel") ?: "").replace(Regex("[^A-Za-z0-9._-]"), "")
+            val parts = listOfNotNull("overdrive-backup",
+                model.ifEmpty { null }, ver.ifEmpty { null })
+            parts.joinToString("-") + ".json"
+        } catch (e: Exception) {
+            getString(R.string.settings_backup_default_filename)
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != android.app.Activity.RESULT_OK) {
+            if (requestCode == REQ_EXPORT_SAVE) pendingExportText = null
+            return
+        }
+        val uri: Uri = data?.data ?: run {
+            if (requestCode == REQ_EXPORT_SAVE) pendingExportText = null
+            return
+        }
+        when (requestCode) {
+            REQ_EXPORT_SAVE -> writeExportToUri(uri)
+            REQ_IMPORT_PICK -> readAndRestoreFromUri(uri)
+        }
+    }
+
+    private fun writeExportToUri(uri: Uri) {
+        val text = pendingExportText
+        pendingExportText = null
+        if (text == null) { toast(getString(R.string.settings_backup_export_failed)); return }
+        val ctx = ioContext()
+        submitIo {
+            val ok = try {
+                ctx?.contentResolver?.openOutputStream(uri)?.use { os ->
+                    os.write(text.toByteArray(Charsets.UTF_8)); true
+                } ?: false
+            } catch (e: Exception) { false }
+            mainHandler.post {
+                if (!isAdded) return@post
+                toast(getString(if (ok) R.string.settings_backup_saved
+                                else R.string.settings_backup_save_failed))
+            }
+        }
+    }
+
+    private fun readAndRestoreFromUri(uri: Uri) {
+        val ctx = ioContext()
+        submitIo {
+            // Cap the read so a huge/garbage file can't OOM the head unit. A real
+            // bundle is a few KB; 16 MB matches the web import body cap. Read
+            // bounded and treat overflow as an invalid file. tooLarge is tracked
+            // separately so the user gets a precise message.
+            var tooLarge = false
+            val text = try {
+                ctx?.contentResolver?.openInputStream(uri)?.use { ins ->
+                    val reader = BufferedReader(InputStreamReader(ins))
+                    val sb = StringBuilder()
+                    val buf = CharArray(8192)
+                    var total = 0
+                    while (true) {
+                        val n = reader.read(buf)
+                        if (n < 0) break
+                        total += n
+                        if (total > MAX_IMPORT_CHARS) { tooLarge = true; break }
+                        sb.append(buf, 0, n)
+                    }
+                    sb.toString()
+                }
+            } catch (e: Exception) { null }
+            mainHandler.post {
+                if (!isAdded) return@post
+                if (tooLarge) { toast(getString(R.string.settings_backup_invalid_file)); return@post }
+                if (text.isNullOrBlank()) { toast(getString(R.string.settings_backup_read_failed)); return@post }
+                // Validate it parses + looks like our bundle before prompting.
+                val parsed = try { JSONObject(text) } catch (e: Exception) { null }
+                if (parsed == null || parsed.optJSONObject("manifest") == null) {
+                    toast(getString(R.string.settings_backup_invalid_file)); return@post
+                }
+                confirmAndRestore(text)
+            }
+        }
+    }
+
+    private fun confirmAndRestore(bundleText: String) {
+        if (!isAdded) return   // requireContext()/getString need an attached context
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.settings_backup_restore_confirm_title)
+            .setMessage(R.string.settings_backup_restore_confirm_msg)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.settings_backup_restore_confirm_btn) { _, _ ->
+                doRestore(bundleText)
+            }
+            .show()
+    }
+
+    private fun doRestore(bundleText: String) {
+        // Runs synchronously from the confirm-dialog callback. getString() needs
+        // an attached context, so bail if the fragment detached between showing
+        // the dialog and the user confirming (back button / backgrounded).
+        if (!isAdded) return
+        toast(getString(R.string.settings_backup_restoring))
+        submitIo {
+            val bundle = try { JSONObject(bundleText) } catch (e: Exception) { null }
+            val resp = if (bundle == null) null else {
+                val req = JSONObject().put("command", "REPLACE_CONFIG").put("bundle", bundle)
+                com.overdrive.app.server.DaemonIpcClient.send(req, 20_000)
+            }
+            mainHandler.post {
+                if (!isAdded) return@post
+                when {
+                    resp == null -> toast(getString(R.string.settings_backup_daemon_down))
+                    resp.optBoolean("success", false) -> {
+                        val msg = resp.optString("message", getString(R.string.settings_backup_restored))
+                        toast(msg.ifEmpty { getString(R.string.settings_backup_restored) })
+                        // Restored settings are on disk, but already-running
+                        // pipelines (camera/surveillance/recording) read most of
+                        // their config at start — a restart guarantees every
+                        // restored value is actually applied. Surface this as a
+                        // dialog so the user sees it (toasts can stack/expire).
+                        showRestartPrompt(resp.optJSONArray("warnings"))
+                    }
+                    else -> {
+                        val msg = resp.optString("message", getString(R.string.settings_backup_restore_failed))
+                        toast(msg.ifEmpty { getString(R.string.settings_backup_restore_failed) })
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Post-restore advisory: tell the user to restart the camera daemon so the
+     * restored settings take full effect, and append any warnings the daemon
+     * returned (e.g. firmware-change credential loss). Shown as a dialog so it
+     * isn't missed.
+     */
+    private fun showRestartPrompt(warnings: org.json.JSONArray?) {
+        if (!isAdded) return
+        val sb = StringBuilder(getString(R.string.settings_backup_restart_hint))
+        if (warnings != null && warnings.length() > 0) {
+            sb.append("\n")
+            for (i in 0 until warnings.length()) {
+                val w = warnings.optString(i, "")
+                if (w.isNotEmpty()) sb.append("\n• ").append(w)
+            }
+        }
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+            .setTitle(R.string.settings_backup_restored)
+            .setMessage(sb.toString())
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun toast(msg: String) {
+        if (isAdded) Toast.makeText(requireContext(), msg, Toast.LENGTH_LONG).show()
+    }
+
+    companion object {
+        private const val REQ_EXPORT_SAVE = 4801
+        private const val REQ_IMPORT_PICK = 4802
+        // Bound the SAF import read so a malformed/huge file can't OOM the head
+        // unit. 16 MB worth of chars; a real bundle is a few KB.
+        private const val MAX_IMPORT_CHARS = 16 * 1024 * 1024
     }
 
     private fun populateThanks(root: View) {

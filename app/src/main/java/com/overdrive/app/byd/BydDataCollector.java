@@ -89,6 +89,12 @@ public class BydDataCollector {
     // failing it (a half value implies ~9 kWh and would be rejected).
     private static final double PHEV_ENERGY_HALF_SCALE_CORRECTION = 2.0;
 
+    // Throttle for the INFO-level PHEV energy diagnostic (all raw getters + SOC).
+    // Lets a captured on-device log prove which getter tracks SOC and which is
+    // stale, without spamming every 5s poll.
+    private volatile long lastPhevEnergyDiagMs = 0;
+    private static final long PHEV_ENERGY_DIAG_INTERVAL_MS = 60_000;
+
     private final List<String> availableDevices = new ArrayList<>();
     private final List<String> unavailableDevices = new ArrayList<>();
 
@@ -586,7 +592,7 @@ public class BydDataCollector {
         }
     }
 
-        private void startPolling() {
+    private void startPolling() {
         pollScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "BydDataPoll");
             t.setDaemon(true);
@@ -1097,7 +1103,21 @@ public class BydDataCollector {
             // vs 28.6 (doubled): both ~7 off nominal, neither clean → skip.
             return Double.NaN;
         }
-        return halfWins ? rawKwh * PHEV_ENERGY_HALF_SCALE_CORRECTION : rawKwh;
+        double chosen = halfWins ? rawKwh * PHEV_ENERGY_HALF_SCALE_CORRECTION : rawKwh;
+
+        // Hard physical ceiling: a pack cannot hold more than its nameplate (plus a
+        // little top-balancing / measurement slop). A STALE getter that froze at a
+        // full-charge value while SOC has since dropped implies a capacity far above
+        // nominal (field bug: 22.4 kWh frozen at 77% SOC → implies 29 kWh on a 21.5
+        // pack, ratio 1.35). The fit tolerance above can let such a value through as
+        // "already gross", so enforce the ceiling explicitly: if the CHOSEN frame
+        // still implies > ~1.12× nominal, reject it (return NaN) so the caller keeps
+        // last-good and the SOC-synthesized remaining (which tracks live) takes over.
+        double chosenImpliedCap = chosen / socFraction;
+        if (chosenImpliedCap > 1.12 * nominal) {
+            return Double.NaN;
+        }
+        return chosen;
     }
 
     private void collectBodywork(BydVehicleData.Builder b) {
@@ -1394,6 +1414,53 @@ public class BydDataCollector {
                     // Plausible remaining energy range for any BYD model: 1-120 kWh
                     if (kwhFromCap > 1.0 && kwhFromCap < 120.0) {
                         b.remainKwh(kwhFromCap);
+                    }
+                }
+            }
+
+            // ── PHEV energy diagnostic (INFO, throttled) ───────────────────
+            // Dumps every remaining-energy getter's RAW value side-by-side with
+            // SOC and the resolved remainKwh, so a captured log proves which
+            // getter tracks SOC live and which goes stale (the frozen-22.4 bug).
+            // PHEV-only, ~once/min, never on the hot path otherwise.
+            if (isPhevForKwh) {
+                long nowDiag = System.currentTimeMillis();
+                if (nowDiag - lastPhevEnergyDiagMs >= PHEV_ENERGY_DIAG_INTERVAL_MS) {
+                    lastPhevEnergyDiagMs = nowDiag;
+                    try {
+                        String evStr = "n/a", rbpStr = "n/a", hevStr = "n/a", capStr = "n/a";
+                        if (powerDevice != null) {
+                            Object o = BydDeviceHelper.callGetter(powerDevice, "getBatteryRemainPowerEV");
+                            if (o instanceof Number) evStr = String.format("%.2f", ((Number) o).doubleValue());
+                        }
+                        if (statisticDevice != null) {
+                            Object o = BydDeviceHelper.callGetter(statisticDevice, "getRemainingBatteryPower");
+                            if (o instanceof Number) rbpStr = ((Number) o).intValue() + " (raw/10=" + String.format("%.1f", ((Number) o).intValue() / 10.0) + ")";
+                        }
+                        if (bodyworkDevice != null) {
+                            Object o = BydDeviceHelper.callGetter(bodyworkDevice, "getBatteryPowerHEV");
+                            if (o instanceof Number) hevStr = String.format("%.2f", ((Number) o).doubleValue());
+                            Object c = BydDeviceHelper.callGetter(bodyworkDevice, "getBatteryCapacity");
+                            if (c instanceof Number) capStr = String.format("%.2f", ((Number) c).doubleValue());
+                        }
+                        double socNow = b.socPercent;
+                        double nominalNow = 0;
+                        try {
+                            com.overdrive.app.abrp.SohEstimator se =
+                                com.overdrive.app.monitor.SocHistoryDatabase.getInstance().getSohEstimator();
+                            if (se != null) nominalNow = se.getNominalCapacityKwh();
+                        } catch (Throwable ignored) {}
+                        logger.info("[phev-energy] SOC=" + String.format("%.1f", socNow)
+                            + "% nominal=" + String.format("%.1f", nominalNow)
+                            + " | getBatteryRemainPowerEV=" + evStr
+                            + " | getRemainingBatteryPower=" + rbpStr
+                            + " | getBatteryPowerHEV=" + hevStr
+                            + " | getBatteryCapacity=" + capStr
+                            + " | RESOLVED remainKwh=" + (Double.isNaN(b.remainKwh) ? "NaN" : String.format("%.2f", b.remainKwh))
+                            + " (impliedCap=" + (socNow > 5 && !Double.isNaN(b.remainKwh)
+                                ? String.format("%.1f", b.remainKwh / (socNow / 100.0)) : "n/a") + ")");
+                    } catch (Throwable t) {
+                        logger.debug("[phev-energy] diagnostic failed: " + t.getMessage());
                     }
                 }
             }
@@ -3584,8 +3651,19 @@ public class BydDataCollector {
             logger.info("  Engine listener registered (generic fallback)");
             count++;
         }
-        if (BydDeviceHelper.registerListener(instrumentDevice, this::onInstrumentCallback)) {
-            logger.info("  Instrument listener registered (external charging power)");
+        // Instrument listener: MUST be typed. onExternalChargingPowerChanged
+        // (live charging power in kW) is a concrete method on
+        // AbsBYDAutoInstrumentListener, not on the IBYDAutoListener marker
+        // interface — the generic Proxy path can never receive it (the HAL
+        // dispatches it only to typed AbsBYDAutoInstrumentListener subscribers),
+        // so charging power silently never arrived and the UI fell back to a
+        // nominal estimate. Typed first; generic fallback kept for any firmware
+        // that only exposes the bare 1-arg registerListener.
+        if (BydDeviceHelper.registerInstrumentListener(instrumentDevice, this::onInstrumentCallback)) {
+            logger.info("  Instrument listener registered (typed — external charging power)");
+            count++;
+        } else if (BydDeviceHelper.registerListener(instrumentDevice, this::onInstrumentCallback)) {
+            logger.info("  Instrument listener registered (generic fallback)");
             count++;
         }
         if (BydDeviceHelper.registerListener(statisticDevice, this::onGenericCallback)) {
@@ -3978,18 +4056,29 @@ public class BydDataCollector {
             try {
                 double power = ((Number) args[0]).doubleValue();
                 // Listener callback delivers kW directly (SDK converts from CAN bus internally).
-                if (power > 0.1 && power <= 500) {
+                boolean accepted = (power > 0.1 && power <= 500);
+                if (accepted) {
                     BydVehicleData current = snapshot.get();
                     if (current != null) {
                         snapshot.set(current.toBuilder().externalChargingPowerKw(power).build());
-                        long now = System.currentTimeMillis();
-                        if (now - lastChargingPowerLogTime > 30_000) {
-                            lastChargingPowerLogTime = now;
-                            logger.info("External charging power: " + String.format("%.1f", power) + " kW");
-                        }
                     }
                 }
-            } catch (Exception e) { /* ignore */ }
+                // DIAGNOSTIC: log EVERY callback arrival — this is the proof the
+                // typed AbsBYDAutoInstrumentListener registration actually delivers
+                // onExternalChargingPowerChanged while parked-charging (the generic
+                // IBYDAutoListener-Proxy path never could). Logs the raw value AND
+                // whether it passed the accept gate, so a dropped/out-of-range value
+                // (e.g. 0.0 → "Charging" fallback) is visible instead of silent.
+                // Throttled to once / 30s to avoid spam on a chatty firmware.
+                long now = System.currentTimeMillis();
+                if (now - lastChargingPowerLogTime > 30_000) {
+                    lastChargingPowerLogTime = now;
+                    logger.info("onExternalChargingPowerChanged fired: raw=" + power + " kW"
+                        + (accepted ? " (accepted)" : " (DROPPED — outside 0.1..500 gate)"));
+                }
+            } catch (Exception e) {
+                logger.debug("onExternalChargingPowerChanged parse error: " + e.getMessage());
+            }
         }
         // Listener-driven: the specific event value was already captured above.
         // Skip full device re-collection — the 5s polling timer handles periodic refresh.

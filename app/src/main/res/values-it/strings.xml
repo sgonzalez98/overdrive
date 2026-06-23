@@ -1167,12 +1167,14 @@ Questa azione non puo essere annullata.</string>
     <string name="roadsense_map_search_to_save">Cerca un posto da impostare come %1$s</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">Viaggio ripristinato</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">Il token è memorizzato in modo sicuro e condiviso tra i processi dell\'app e del demone.</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">Il token viene memorizzato in forma crittografata e condiviso tra l\'app e il processo daemon.</string>
     <string name="cloudflared_token_hint">Inserisci il token cloudflared</string>
     <string name="cloudflare_paid_version">Versione a pagamento di Cloudflare</string>
-    <string name="dialog_cloudflared_settings_title">🌐 Impostazioni Cloudflared</string>
-    <string name="dialog_cloudflared_settings_message">Definisci se stai usando Cloudflare a pagamento o trycloudflare. Se stai usando Cloudflare a pagamento, inserisci il tuo token del tunnel.</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">Se imposti la versione a pagamento, il token non può essere vuoto</string>
+    <string name="dialog_cloudflared_settings_title">Impostazioni Cloudflared</string>
+    <string name="dialog_cloudflared_settings_message">Definisci se stai usando Cloudflare a pagamento o trycloudflare. Se usi Cloudflare a pagamento, inserisci il token del tuo tunnel.</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">Se imposti la versione a pagamento il token non può essere vuoto</string>
+    <string name="toast_cloudflared_token_invalid">Token non valido: usa solo lettere, numeri e i caratteri . _ - =</string>
     <string name="toast_cloudflared_saved_settings">Impostazioni Cloudflared salvate</string>
 </resources>

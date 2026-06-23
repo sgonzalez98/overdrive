@@ -195,6 +195,13 @@ public class SurveillanceConfig {
     private String environmentPreset = "outdoor";  // outdoor, garage, street
     private String detectionZone = "normal";        // close, normal, extended
     private int loiteringTimeSeconds = 3;           // 1-10 seconds
+    // Sustained-motion seconds required to record an APPROACH (THREAT_MEDIUM)
+    // once YOLO has confirmed a real in-zone object (person/car/...). This is the
+    // short, responsive path for someone walking up to / past the car — distinct
+    // from loiteringTimeSeconds (the long dwell required for a loiter / for
+    // motion-only events with no AI confirmation). 0 = disabled (fall back to
+    // loiteringTimeSeconds, i.e. the legacy behavior).
+    private int approachTriggerSeconds = 2;         // 0 (off) or 1-10 seconds
     private int sensitivityLevel = 3;               // 1-5
     private boolean[] cameraEnabled = {true, true, true, true};  // front, right, rear, left (matches quadrant order: Q0=front, Q1=right, Q2=rear, Q3=left)
     private boolean motionHeatmapEnabled = false;
@@ -265,6 +272,7 @@ public class SurveillanceConfig {
     public String getEnvironmentPreset() { return environmentPreset; }
     public String getDetectionZone() { return detectionZone; }
     public int getLoiteringTimeSeconds() { return loiteringTimeSeconds; }
+    public int getApproachTriggerSeconds() { return approachTriggerSeconds; }
     public int getSensitivityLevel() { return sensitivityLevel; }
     public boolean[] getCameraEnabled() { return cameraEnabled; }
     public boolean isCameraEnabled(int quadrant) { 
@@ -277,8 +285,12 @@ public class SurveillanceConfig {
     // V2 setters
     public void setEnvironmentPreset(String preset) { this.environmentPreset = preset; }
     public void setDetectionZone(String zone) { this.detectionZone = zone; }
-    public void setLoiteringTimeSeconds(int seconds) { 
-        this.loiteringTimeSeconds = Math.max(1, Math.min(10, seconds)); 
+    public void setLoiteringTimeSeconds(int seconds) {
+        this.loiteringTimeSeconds = Math.max(1, Math.min(10, seconds));
+    }
+    /** 0 disables the fast approach path; otherwise clamped to 1-10s. */
+    public void setApproachTriggerSeconds(int seconds) {
+        this.approachTriggerSeconds = (seconds <= 0) ? 0 : Math.max(1, Math.min(10, seconds));
     }
     public void setSensitivityLevel(int level) { 
         this.sensitivityLevel = Math.max(1, Math.min(5, level)); 

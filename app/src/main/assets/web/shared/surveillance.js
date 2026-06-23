@@ -33,6 +33,7 @@ BYD.surveillance = {
         sensitivityLevel: 3,
         detectionZone: 'normal',
         loiteringTime: 3,
+        approachTrigger: 2,
         shadowFilter: 2,
         cameraFront: true,
         cameraRight: true,
@@ -288,6 +289,14 @@ BYD.surveillance = {
             if (data.success) {
                 this.config.surveillanceLimitMb = data.surveillanceLimitMb || 500;
                 this.config.surveillanceStorageType = data.surveillanceStorageType || 'INTERNAL';
+                // Active = where surveillance ACTUALLY writes right now. Differs
+                // from the configured type when the chosen external volume isn't
+                // mounted (the SD card is bridged behind the USB power rail, so
+                // cutting USB power unmounts it) or is full — both fall back to
+                // internal. Captured so updateStorageTypeUI can warn the user
+                // their clips are NOT landing on the SD/USB they picked.
+                this.storageInfo.surveillanceStorageTypeActive =
+                    data.surveillanceStorageTypeActive || this.config.surveillanceStorageType;
 
                 // SD card info
                 this.storageInfo.sdCardAvailable = data.sdCardAvailable || false;
@@ -476,15 +485,24 @@ BYD.surveillance = {
         document.querySelectorAll('#survStorageTypeBtns .btn-toggle').forEach(btn =>
             btn.classList.toggle('active', btn.dataset.value === this.config.surveillanceStorageType));
 
+        // SD/USB both ride the USB power rail; when "Keep USB powered" is OFF they're
+        // unpowered while parked, so disable both regardless of physical presence.
+        const usbOff = (this.config.keepUsbPowerOnAccOff === false);
+        const usbOffTitle = BYD.i18n && BYD.i18n.t
+            ? (BYD.i18n.t('surveillance.storage_blocked_usb_off') || 'Turn "Keep USB powered" on to use SD/USB while parked')
+            : 'Turn "Keep USB powered" on to use SD/USB while parked';
+
         const sdCardBtn = document.getElementById('btnSurvSdCard');
         if (sdCardBtn) {
-            sdCardBtn.disabled = !this.storageInfo.sdCardAvailable;
-            sdCardBtn.title = this.storageInfo.sdCardAvailable ? '' : BYD.i18n.t('recording.sd_card_unavailable');
+            sdCardBtn.disabled = !this.storageInfo.sdCardAvailable || usbOff;
+            sdCardBtn.title = usbOff ? usbOffTitle
+                : (this.storageInfo.sdCardAvailable ? '' : BYD.i18n.t('recording.sd_card_unavailable'));
         }
         const usbBtn = document.getElementById('btnSurvUsb');
         if (usbBtn) {
-            usbBtn.disabled = !this.storageInfo.usbAvailable;
-            usbBtn.title = this.storageInfo.usbAvailable ? '' : BYD.i18n.t('recording.usb_unavailable');
+            usbBtn.disabled = !this.storageInfo.usbAvailable || usbOff;
+            usbBtn.title = usbOff ? usbOffTitle
+                : (this.storageInfo.usbAvailable ? '' : BYD.i18n.t('recording.usb_unavailable'));
         }
 
         // SD card status block
@@ -499,8 +517,10 @@ BYD.surveillance = {
                 if (textEl) textEl.textContent = BYD.i18n.t('recording.sd_card_available');
                 if (spaceEl) {
                     spaceEl.style.display = 'block';
-                    document.getElementById('survSdFree').textContent = BYD.i18n.t('recording.size_free', {size: this.formatSize(this.storageInfo.sdCardFreeSpace)});
-                    document.getElementById('survSdTotal').textContent = BYD.i18n.t('recording.size_total', {size: this.formatSize(this.storageInfo.sdCardTotalSpace)});
+                    const sdFreeEl = document.getElementById('survSdFree');
+                    const sdTotalEl = document.getElementById('survSdTotal');
+                    if (sdFreeEl) sdFreeEl.textContent = BYD.i18n.t('recording.size_free', {size: this.formatSize(this.storageInfo.sdCardFreeSpace)});
+                    if (sdTotalEl) sdTotalEl.textContent = BYD.i18n.t('recording.size_total', {size: this.formatSize(this.storageInfo.sdCardTotalSpace)});
                 }
             } else {
                 if (dotEl) dotEl.className = 'sd-status-dot offline';
@@ -521,8 +541,10 @@ BYD.surveillance = {
                 if (textEl) textEl.textContent = BYD.i18n.t('recording.usb_available');
                 if (spaceEl) {
                     spaceEl.style.display = 'block';
-                    document.getElementById('survUsbFree').textContent = BYD.i18n.t('recording.size_free', {size: this.formatSize(this.storageInfo.usbFreeSpace)});
-                    document.getElementById('survUsbTotal').textContent = BYD.i18n.t('recording.size_total', {size: this.formatSize(this.storageInfo.usbTotalSpace)});
+                    const usbFreeEl = document.getElementById('survUsbFree');
+                    const usbTotalEl = document.getElementById('survUsbTotal');
+                    if (usbFreeEl) usbFreeEl.textContent = BYD.i18n.t('recording.size_free', {size: this.formatSize(this.storageInfo.usbFreeSpace)});
+                    if (usbTotalEl) usbTotalEl.textContent = BYD.i18n.t('recording.size_total', {size: this.formatSize(this.storageInfo.usbTotalSpace)});
                 }
             } else {
                 if (dotEl) dotEl.className = 'sd-status-dot offline';
@@ -535,6 +557,28 @@ BYD.surveillance = {
         if (pathEl && this.storageInfo.surveillancePath) {
             const shortPath = this.storageInfo.surveillancePath.replace('/storage/emulated/0/', '');
             pathEl.textContent = BYD.i18n.t('surveillance.events_saved_to', {path: shortPath});
+        }
+
+        // Fallback warning. When the configured external volume isn't the one
+        // we're actually writing to (unmounted SD/USB — typically because USB
+        // power is off and the SD rides that rail — or a full external volume),
+        // surface it so the user knows their clips are silently landing on
+        // internal instead of the SD/USB they selected. Per-clip badges in the
+        // recordings library reinforce this at the file level.
+        const fallbackEl = document.getElementById('survStorageFallbackWarning');
+        if (fallbackEl) {
+            const configured = this.config.surveillanceStorageType || 'INTERNAL';
+            const active = this.storageInfo.surveillanceStorageTypeActive || configured;
+            if (configured !== 'INTERNAL' && active === 'INTERNAL') {
+                const volName = configured === 'SD_CARD'
+                    ? (BYD.i18n.t('events.storage_sd_card') || 'SD card')
+                    : (BYD.i18n.t('events.storage_usb') || 'USB');
+                fallbackEl.textContent = BYD.i18n.t('surveillance.storage_fallback_warning', {volume: volName})
+                    || (volName + ' unavailable — saving to internal storage');
+                fallbackEl.style.display = 'block';
+            } else {
+                fallbackEl.style.display = 'none';
+            }
         }
     },
     
@@ -552,6 +596,18 @@ BYD.surveillance = {
         }
         if (type === 'USB' && !this.storageInfo.usbAvailable) {
             if (BYD.utils && BYD.utils.toast) BYD.utils.toast(BYD.i18n.t('recording.usb_unavailable'), 'error');
+            return;
+        }
+        // SD/USB both ride the USB power rail, which is unpowered while parked when
+        // "Keep USB powered" is OFF. Block the selection and tell the user to turn
+        // USB power back on first, so we never persist a storage target that silently
+        // can't be written to during a parked session.
+        if ((type === 'SD_CARD' || type === 'USB') && this.config.keepUsbPowerOnAccOff === false) {
+            const t = (k, fb) => (BYD.i18n && BYD.i18n.t ? (BYD.i18n.t(k) || fb) : fb);
+            if (BYD.utils && BYD.utils.toast) {
+                BYD.utils.toast(t('surveillance.storage_blocked_usb_off',
+                    'Turn "Keep USB powered" on to use SD/USB while parked'), 'warning');
+            }
             return;
         }
 
@@ -1281,44 +1337,213 @@ BYD.surveillance = {
     },
 
     /**
-     * Toggle "Keep USB powered while parked". Governs ONLY the USB/data rail on the
-     * daemon side — cameras / parked surveillance are unaffected. Optimistic UI +
-     * immediate persist (same pattern as setAccOffMode), reverting the checkbox if
-     * the save fails. The daemon reads this on the NEXT ACC-OFF cycle.
+     * Toggle "Keep USB powered while parked".
+     *
+     * On this platform the SD-card slot shares the USB power domain, so turning USB
+     * power OFF lets the head unit sleep on the next ACC-OFF cycle and the SD card
+     * loses power while parked. Surveillance therefore CANNOT use the SD card when
+     * USB power is off — it must record to Internal storage.
+     *
+     * Flow when turning OFF while surveillance storage is SD/USB: show a SOTA confirm
+     * explaining the consequence; on confirm, switch surveillance storage to Internal
+     * and persist BOTH changes together; on cancel, revert the toggle. Turning ON, or
+     * turning OFF when already on Internal, persists directly (no prompt).
      */
     toggleKeepUsbPower() {
         const el = document.getElementById('survKeepUsbPower');
         if (!el) return;
         const on = el.checked;
-        const prev = !on;
-        this.config.keepUsbPowerOnAccOff = on;
         const self = this;
+        const t = (k, fb) => (BYD.i18n && BYD.i18n.t ? (BYD.i18n.t(k) || fb) : fb);
+
+        // Storage that depends on the shared USB/SD power rail. INTERNAL is safe.
+        const storage = this.config.surveillanceStorageType || 'INTERNAL';
+        const storageNeedsUsbPower = (storage === 'SD_CARD' || storage === 'USB');
+
+        // Turning OFF while surveillance records to SD/USB → confirm + auto-switch.
+        if (!on && storageNeedsUsbPower) {
+            // The confirmation dialog is the user's consent for the silent storage
+            // switch to Internal. If it's unavailable (core.js failed to load /
+            // BYD.utils corrupted), fail safe: do NOT auto-confirm — revert the
+            // toggle to ON and warn, so storage is never switched without consent.
+            if (!BYD.utils || !BYD.utils.confirmDialog) {
+                el.checked = true;
+                self.config.keepUsbPowerOnAccOff = true;
+                if (BYD.utils && BYD.utils.toast) {
+                    BYD.utils.toast(t('surveillance.usb_off_confirm_unavailable',
+                        'Confirmation unavailable — cannot turn off USB power safely'), 'error');
+                }
+                return;
+            }
+
+            const proceed = BYD.utils.confirmDialog({
+                title: t('surveillance.usb_off_confirm_title', 'Turn off USB power?'),
+                body: t('surveillance.usb_off_confirm_body',
+                    'The SD card shares the USB power rail, so it will be unpowered while parked. '
+                    + 'Surveillance will be switched to Internal storage so recording keeps working. '
+                    + 'You can switch back to the SD card after turning USB power on again.'),
+                confirmLabel: t('surveillance.usb_off_confirm_ok', 'Turn off & use Internal'),
+                cancelLabel: t('common.cancel', 'Cancel'),
+                danger: false
+            });
+
+            Promise.resolve(proceed).then(function (ok) {
+                if (!ok) {
+                    // Reverted — restore toggle to ON, no persist. Guard el in case
+                    // it was removed from the DOM while the dialog was open (mirrors
+                    // the defensive check in _persistKeepUsbPower's catch).
+                    if (el) el.checked = true;
+                    self.config.keepUsbPowerOnAccOff = true;
+                    return;
+                }
+                // Switch surveillance storage to Internal in the UI/config, then
+                // persist USB-off + storage together. Set the flag on config first so
+                // the notice/button-state refresh inside persist reflects USB-off.
+                self.config.keepUsbPowerOnAccOff = false;
+                const prevStorageType = self._applyInternalStorageForUsbOff();
+                self._persistKeepUsbPower(false, el, /*alsoStorage*/ true, prevStorageType);
+            }).catch(function () {
+                // Dialog threw / rejected — leave USB power ON and keep the toggle in
+                // sync so el.checked (OFF) doesn't diverge from config. Guard el in
+                // case it was removed from the DOM while the dialog was open.
+                if (el) el.checked = true;
+                self.config.keepUsbPowerOnAccOff = true;
+                if (BYD.utils && BYD.utils.toast) {
+                    BYD.utils.toast(t('surveillance.keep_usb_save_failed', 'Could not save setting'), 'error');
+                }
+            });
+            return;
+        }
+
+        // Direct persist (ON, or OFF-while-Internal — no consequence to warn about).
+        this.config.keepUsbPowerOnAccOff = on;
+        this._persistKeepUsbPower(on, el, /*alsoStorage*/ false);
+    },
+
+    /**
+     * Force surveillance storage to Internal (used when USB power is turned off).
+     * Mirrors the relevant side effects of setStorageType('INTERNAL') without its
+     * availability guards, and refreshes the dependent UI.
+     */
+    _applyInternalStorageForUsbOff() {
+        const prevStorageType = this.config.surveillanceStorageType || 'INTERNAL';
+        this.config.surveillanceStorageType = 'INTERNAL';
+        document.querySelectorAll('#survStorageTypeBtns .btn-toggle').forEach(function (btn) {
+            btn.classList.toggle('active', btn.dataset.value === 'INTERNAL');
+        });
+        const newMax = this.effectiveMaxLimitMb();
+        if (this.config.surveillanceLimitMb > newMax) this.config.surveillanceLimitMb = newMax;
+        this.updateStorageLimitUI();
+        this.updateCdrCleanupVisibility();
+        // Flag the storage tab dirty via the standard diff so the Apply button and
+        // per-tab "unsaved" markers stay consistent (mirrors setStorageType()).
+        this.markChanged();
+        // Return the prior storage type so the caller can revert if persist fails.
+        return prevStorageType;
+    },
+
+    /**
+     * Persist the USB-power flag (and optionally the storage switch) to the daemon.
+     * Optimistic UI with revert-on-failure. Updates the inline notice + toast.
+     *
+     * The USB-power flag lives in /api/surveillance/config; the surveillance storage
+     * type lives in /api/settings/storage (handled by QualitySettingsApiHandler), so
+     * the storage switch is a SEPARATE request chained after the flag persists.
+     */
+    _persistKeepUsbPower(on, el, alsoStorage, prevStorageType) {
+        const self = this;
+        const t = (k, fb) => (BYD.i18n && BYD.i18n.t ? (BYD.i18n.t(k) || fb) : fb);
+
+        const persistStorage = function () {
+            if (!alsoStorage) return Promise.resolve();
+            return fetch('/api/settings/storage', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ surveillanceStorageType: 'INTERNAL' })
+            }).then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+              .then(function (data) {
+                  // The daemon answers HTTP 200 with {success:false} when the
+                  // requested storage type change is rejected (target volume
+                  // unavailable). Treat that as a failure so the caller's catch
+                  // reverts the optimistic config instead of diverging on reload.
+                  if (data && data.success === false) {
+                      return Promise.reject(new Error(data.error || 'storage change rejected'));
+                  }
+                  return data;
+              });
+        };
+
         fetch('/api/surveillance/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ keepUsbPowerOnAccOff: on })
         }).then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+          .then(persistStorage)
           .then(() => {
-              if (self.savedConfig) self.savedConfig.keepUsbPowerOnAccOff = on;
+              if (self.savedConfig) {
+                  self.savedConfig.keepUsbPowerOnAccOff = on;
+                  if (alsoStorage) self.savedConfig.surveillanceStorageType = 'INTERNAL';
+              }
               self.markChanged();
+              self.updateUsbPowerStorageNotice();
               if (BYD.utils && BYD.utils.toast) {
-                  const k = on ? 'surveillance.keep_usb_saved_on' : 'surveillance.keep_usb_saved_off';
-                  const fallback = on
-                      ? 'USB will stay powered while parked'
-                      : 'USB will sleep while parked (next ACC-OFF)';
-                  const localized = BYD.i18n && BYD.i18n.t ? BYD.i18n.t(k) : null;
-                  BYD.utils.toast(localized || fallback, 'success');
+                  if (alsoStorage) {
+                      BYD.utils.toast(t('surveillance.usb_off_switched_internal',
+                          'USB power off — surveillance now records to Internal storage'), 'success');
+                  } else {
+                      const msg = on
+                          ? t('surveillance.keep_usb_saved_on', 'USB will stay powered while parked')
+                          : t('surveillance.keep_usb_saved_off', 'USB will sleep while parked (next ACC-OFF)');
+                      BYD.utils.toast(msg, 'success');
+                  }
+              }
+              // Refresh storage stats from the daemon so the UI doesn't show stale
+              // free/total/availability after the storage type was switched server-side.
+              if (alsoStorage && typeof self.loadStorageSettings === 'function') {
+                  return Promise.resolve(self.loadStorageSettings())
+                      .then(function () { self.updateUsbPowerStorageNotice(); })
+                      .catch(function () {});
               }
           })
           .catch(() => {
-              self.config.keepUsbPowerOnAccOff = prev;
-              el.checked = prev;
+              // Revert toggle + config on failure.
+              self.config.keepUsbPowerOnAccOff = !on;
+              if (el) el.checked = !on;
+              // Also revert the storage type if we switched it to INTERNAL before
+              // persisting, so storage doesn't stay changed while the USB flag rolls
+              // back (state desync). Re-sync dependent UI + dirty markers.
+              if (alsoStorage && self.config && prevStorageType) {
+                  self.config.surveillanceStorageType = prevStorageType;
+                  document.querySelectorAll('#survStorageTypeBtns .btn-toggle').forEach(function (btn) {
+                      btn.classList.toggle('active', btn.dataset.value === prevStorageType);
+                  });
+                  if (typeof self.updateStorageLimitUI === 'function') self.updateStorageLimitUI();
+                  if (typeof self.updateCdrCleanupVisibility === 'function') self.updateCdrCleanupVisibility();
+              }
+              // Recalculate the dirty-diff after reverting config so the Apply button
+              // and per-tab "unsaved" markers reflect the rolled-back state. Must run
+              // on every revert path (not just alsoStorage), otherwise the direct
+              // OFF-while-Internal / ON path leaves the button state stale.
+              self.markChanged();
+              self.updateUsbPowerStorageNotice();
               if (BYD.utils && BYD.utils.toast) {
-                  const localized = BYD.i18n && BYD.i18n.t
-                      ? BYD.i18n.t('surveillance.keep_usb_save_failed') : null;
-                  BYD.utils.toast(localized || 'Could not save setting', 'error');
+                  BYD.utils.toast(t('surveillance.keep_usb_save_failed', 'Could not save setting'), 'error');
               }
           });
+    },
+
+    /**
+     * Show/hide the inline "recording to Internal because USB power is off" warning.
+     * Visible only when keepUsbPowerOnAccOff is explicitly false. Safe to call any
+     * time (load, toggle, storage change).
+     */
+    updateUsbPowerStorageNotice() {
+        const note = document.getElementById('survUsbPowerStorageNotice');
+        if (note) {
+            note.style.display = (this.config.keepUsbPowerOnAccOff === false) ? 'flex' : 'none';
+        }
+        // Keep the SD/USB storage buttons' disabled state in sync with the toggle.
+        try { this.updateStorageTypeUI(); } catch (e) {}
     },
 
     setEnvironmentPreset(preset) {
@@ -1418,7 +1643,16 @@ BYD.surveillance = {
         this._deselectPresetIfCustom();
         this.markChanged();
     },
-    
+
+    updateApproachTrigger(value) {
+        const n = parseInt(value);
+        this.config.approachTrigger = n;
+        const label = document.getElementById('approachTriggerValue');
+        if (label) label.textContent = (n === 0) ? BYD.i18n.t('surveillance.approach_off') || 'Off' : n + 's';
+        // Independent of the environment presets — does not deselect one.
+        this.markChanged();
+    },
+
     updateShadowFilter(value) {
         this.config.shadowFilter = parseInt(value);
         const hint = document.getElementById('shadowFilterHint');
@@ -1982,6 +2216,8 @@ BYD.surveillance = {
         // field (older daemon build) so the switch shows the real out-of-box default.
         const keepUsb = document.getElementById('survKeepUsbPower');
         if (keepUsb) keepUsb.checked = (this.config.keepUsbPowerOnAccOff !== false);
+        // Reflect the "recording to Internal because USB power is off" notice.
+        this.updateUsbPowerStorageNotice();
 
         // Environment preset — check if current values match the saved preset
         // If user customized sliders after selecting a preset, don't highlight any preset
@@ -2043,6 +2279,16 @@ BYD.surveillance = {
         if (loiterSlider) loiterSlider.value = this.config.loiteringTime;
         const loiterValue = document.getElementById('loiteringTimeValue');
         if (loiterValue) loiterValue.textContent = this.config.loiteringTime + 's';
+
+        // Approach trigger (0 = Off)
+        if (this.config.approachTrigger !== undefined) {
+            const apSlider = document.getElementById('approachTriggerSlider');
+            if (apSlider) apSlider.value = this.config.approachTrigger;
+            const apValue = document.getElementById('approachTriggerValue');
+            if (apValue) apValue.textContent = (this.config.approachTrigger === 0)
+                ? (BYD.i18n.t('surveillance.approach_off') || 'Off')
+                : this.config.approachTrigger + 's';
+        }
 
         // Shadow filter
         const shadowSelect = document.getElementById('shadowFilterSelect');
@@ -2171,7 +2417,7 @@ BYD.surveillance = {
         detection: [
             'environmentPreset',
             'sensitivityLevel', 'detectionZone',
-            'loiteringTime', 'shadowFilter',
+            'loiteringTime', 'approachTrigger', 'shadowFilter',
             'cameraFront', 'cameraRight', 'cameraLeft', 'cameraRear',
             'quadrantOverrides',
             'detectPerson', 'detectCar', 'detectBike',

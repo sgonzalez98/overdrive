@@ -1306,6 +1306,14 @@ select.md-input ~ .md-label {
     color: var(--text-secondary);
 }
 
+/* Same flat text line inside a WARNING box — keep the size/leading but
+   carry the warning tint so it reads as a caution, matching the icon. */
+.info-box-warning .info-note {
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--warning);
+}
+
 .info-row {
     display: flex;
     justify-content: space-between;
@@ -3945,5 +3953,16 @@ select.md-input ~ .md-label {
     color: var(--text-secondary);
     margin-top: 6px;
     line-height: 1.35;
+}
+
+/* Storage fallback warning — shown under the storage-usage line when the
+   configured external volume (SD/USB) isn't the one we're actually writing
+   to (unmounted because USB power is off and the SD rides that rail, or the
+   volume is full), so clips silently land on internal storage. Tinted with
+   the warning token to draw the eye without alarming red. */
+.storage-fallback-warning {
+    color: var(--warning);
+    font-weight: 600;
+    margin-top: 4px;
 }
 

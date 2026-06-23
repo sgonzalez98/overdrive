@@ -35,10 +35,18 @@
 #define V2_TOTAL_BLOCKS      (V2_GRID_COLS * V2_GRID_ROWS)        // 70
 #define V2_FRAME_HISTORY     4    // Ring buffer depth (N vs N-3 = 300ms at 10 FPS)
 #define V2_COMPARE_OFFSET    3    // Compare current frame with N-3
-#define V2_CENTROID_HISTORY  30   // 3 seconds at 10 FPS
+#define V2_CENTROID_HISTORY  100  // 10 seconds at 10 FPS — MUST cover the full
+                                  // loiteringFrames range (10-100, see PipelineConfigV2).
+                                  // Previously 30 (3s): with loiter>3s, loiteringFrames
+                                  // exceeded this ceiling so stage5's
+                                  // `centroidCount < loiteringFrames` gate was permanently
+                                  // true, making THREAT_HIGH(loiter) UNREACHABLE and
+                                  // pinning every detection at MEDIUM(approach).
 #define V2_BYTES_PER_PIXEL   3    // RGB
 #define V2_QUADRANT_SIZE     (V2_QUADRANT_WIDTH * V2_QUADRANT_HEIGHT * V2_BYTES_PER_PIXEL)
 #define V2_OSCILLATION_WINDOW 10  // Track last 10 frames for oscillation detection
+#define V2_FLOW_NET_WINDOW    10  // Stage 4b: net-displacement window (~1s at 10 FPS)
+#define V2_FLOW_SEARCH_RADIUS 6   // Stage 4b: block-match search half-window (px)
 
 // Threat levels
 #define THREAT_NONE          0
@@ -100,6 +108,26 @@ struct PipelineConfigV2 {
     // Tracks per-block activation history and suppresses oscillating blocks.
     // Threshold: number of on→off transitions in last 10 frames to classify as oscillation.
     int   oscillationThreshold;        // 3 default (3+ transitions in 10 frames = shadow)
+
+    // ---- Stage 4b: Motion-direction flow coherence (flag/shadow rejection) ----
+    // A near-stationary connected-component centroid is classified as loitering
+    // (THREAT_HIGH) on geometry alone — which a waving flag / sweeping shadow
+    // trivially satisfies. Flow coherence is the discriminator: a real intruder
+    // TRANSLATES (per-block flow vectors agree → coherence ratio C → 1), while a
+    // flag/foliage/shadow OSCILLATES in place (vectors cancel → C → 0) and never
+    // accumulates net displacement. An incoherent loiter is demoted to
+    // THREAT_MEDIUM so it must clear the YOLO gate; a coherent one keeps HIGH.
+    //
+    // coherenceRatioMin: below this |net|/|gross| ratio the component flow is
+    //   "incoherent" (oscillating in place). 0.35 default.
+    // coherenceNetMin: windowed cumulative net drift (in blocks) above which the
+    //   motion is coherent translation regardless of the instantaneous ratio
+    //   (a slow but steady real approach). 1.5 default.
+    // coherenceMinFrames: flow-history frames required before the signal is
+    //   trusted; until then flowCoherence is reported as -1 (fail-open).
+    float coherenceRatioMin;           // 0.35 default
+    float coherenceNetMin;             // 1.5 default (blocks)
+    int   coherenceMinFrames;          // 12 default
 };
 
 // ============================================================================
@@ -117,7 +145,15 @@ struct QuadrantResultV2 {
     float meanLuma;             // Current mean luma (for debug/UI)
     bool  brightnessSuppressed; // Was this quadrant suppressed by Stage 1
     bool  shadowFiltered;       // Were blocks suppressed by shadow discrimination
-    
+
+    // Stage 4b flow coherence. Declared BEFORE blockConfidence[] so the Java
+    // deserializer (MotionPipelineV2.deserializeResult) reads these two floats
+    // immediately before the trailing 70-float array — keep this order in sync.
+    // -1 = "not computed" (warmup, no component, or coherence stage absent):
+    //   Java treats <0 as unavailable and falls back to the person-tracker test.
+    float flowCoherence;        // |net flow| / |gross flow| over largest component, EMA-smoothed
+    float netDriftBlocks;       // windowed cumulative net displacement magnitude (blocks)
+
     // Per-block confidence (for heatmap overlay)
     float blockConfidence[V2_TOTAL_BLOCKS];
 };
@@ -166,6 +202,18 @@ struct QuadrantState {
     // Per-quadrant adaptive exposure mode (hysteresis state machine)
     // 0=NORMAL, 1=NIGHT, 2=GLARE — transitions use deadband to prevent jitter
     int   exposureMode;  // Initialized to 0 in v2_initPipeline
+
+    // Stage 4b: motion-direction flow coherence state.
+    // EMA-smoothed coherence ratio (init 1.0 so a real translation isn't
+    // demoted during the first frames before history accrues — see
+    // coherenceMinFrames). netRing holds the per-frame net displacement vector
+    // (block units) of the largest component, summed over the window to detect
+    // sustained translation (a flag random-walks to ~0; a walker accumulates).
+    float lastFlowCoherence;     // init 1.0
+    float netRingX[V2_FLOW_NET_WINDOW];
+    float netRingY[V2_FLOW_NET_WINDOW];
+    int   netRingIndex;
+    int   netRingCount;
 };
 
 struct PipelineStateV2 {

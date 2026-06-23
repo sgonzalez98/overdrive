@@ -793,8 +793,10 @@ public class DaemonCommandHandler implements TelegramCommandHandler {
                 String token = com.overdrive.app.config.CloudflaredPaidConfig.getToken();
 
                 if (isPaid && !token.isEmpty()) {
-                    String grepResult = ctx.execShell("grep --line-buffered -iE 'ingress|hostname' /data/local/tmp/cloudflared.log 2>>/dev/null | grep --line-buffered -oE '[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}' | grep -vE '127.0.0.1' | tail -1");
-                    if (grepResult != null) {
+                    String grepResult = ctx.execShell("grep -iE 'ingress|hostname' /data/local/tmp/cloudflared.log 2>/dev/null | grep -oE '[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}' | grep -vE '127\\.0\\.0\\.1' | tail -1");
+                    // execShell returns "" (not null) on no match — require a real host
+                    // (non-empty + contains a dot) so we never persist a bare "https://".
+                    if (grepResult != null && !grepResult.trim().isEmpty() && grepResult.contains(".")) {
                         tunnelUrl = "https://" + grepResult.trim();
                         ctx.log("Tunnel URL (Paid): " + tunnelUrl);
                         // Save URL to file for /url command

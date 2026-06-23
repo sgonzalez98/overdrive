@@ -99,7 +99,30 @@ class EventDetector(
      * timing jitter without matching unrelated bumps.
      */
     private val axlePairTolerance: Float = DEFAULT_AXLE_PAIR_TOLERANCE,
+    /**
+     * Seed for the live detection-sensitivity multiplier on the speed-aware open
+     * threshold (the user-facing "Detection Sensitivity" slider). 1.0 = the data-fit
+     * default thresholds unchanged; <1 lowers the bar (MORE sensitive — catches
+     * gentler features at the cost of more false positives); >1 raises it (LESS
+     * sensitive). The live value is re-pushed at runtime via [setThresholdScale]
+     * from RoadSenseController's ~2 Hz vehicle poll when the config changes, so this
+     * constructor arg is only the initial value.
+     */
+    initialThresholdScale: Float = DEFAULT_THRESHOLD_SCALE,
 ) {
+    /**
+     * Live-tunable detection-sensitivity multiplier applied to the speed-aware open
+     * threshold: `threshold = (base + slope·speedKmh) * thresholdScale`. @Volatile
+     * because it is WRITTEN by the ~2 Hz vehicle-poll thread (via [setThresholdScale]
+     * when [com.overdrive.app.roadsense.config.RoadSenseConfig] changes) and READ on
+     * the 100 Hz IPC/sensor thread inside [onSample]. A single-field volatile
+     * hand-off that NEVER touches the detector's stateful ring buffers / event
+     * accumulators / debounce, so changing it mid-drive is safe and loses no in-flight
+     * event (cf. rebuilding the detector, which would). Clamped to the supported band.
+     */
+    @Volatile private var thresholdScale: Float =
+        initialThresholdScale.coerceIn(MIN_THRESHOLD_SCALE, MAX_THRESHOLD_SCALE)
+
     // ---- Ring buffer (fixed-size, no allocation after construction) ----------
     // Parallel arrays: aVert[i] is the residual, tMs[i] its timestamp. We keep
     // raw samples so a completed event can report exact peaks and timings; the
@@ -220,7 +243,10 @@ class EventDetector(
             return null
         }
 
-        val threshold = thresholdBase + thresholdSpeedSlope * speedKmh
+        // Speed-aware open threshold, scaled by the live detection-sensitivity knob.
+        // Read the volatile once per sample so a mid-event config change can't shift
+        // the bar between the magnitude test below and any later use this sample.
+        val threshold = (thresholdBase + thresholdSpeedSlope * speedKmh) * thresholdScale
 
         val mag = abs(s.aVert)
         val settled = mag < (NOISE_FLOOR + NOISE_BAND_MARGIN)
@@ -520,6 +546,23 @@ class EventDetector(
         }
     }
 
+    /**
+     * Push a new live detection-sensitivity multiplier (the user's slider). Safe to
+     * call from another thread at any time — it only assigns the @Volatile
+     * [thresholdScale], never touching the stateful detector machinery, so an
+     * in-flight event is unaffected and the new bar takes effect on the next sample.
+     * Clamped to the supported band so a bad config value can't invert the threshold.
+     * Idempotent. Returns the value actually applied (post-clamp).
+     */
+    fun setThresholdScale(scale: Float): Float {
+        val clamped = scale.coerceIn(MIN_THRESHOLD_SCALE, MAX_THRESHOLD_SCALE)
+        thresholdScale = clamped
+        return clamped
+    }
+
+    /** Current live detection-sensitivity multiplier (diagnostics / change-detection). */
+    val currentThresholdScale: Float get() = thresholdScale
+
     /** Drop all state — call on a sensor restart / large time gap. */
     fun reset() {
         head = 0; filled = 0
@@ -565,6 +608,25 @@ class EventDetector(
          */
         const val DEFAULT_THRESHOLD_BASE = 0.8f
         const val DEFAULT_THRESHOLD_SPEED_SLOPE = 0.015f
+
+        /**
+         * Detection-sensitivity multiplier band for the user-facing slider, applied to
+         * the speed-aware open threshold (`(base + slope·v) * scale`).
+         *
+         * 1.0 = the data-fit default (Session 32) unchanged — the out-of-box behaviour.
+         * The band is deliberately TIGHT (±30%): the base/slope were fit against the
+         * only trustworthy on-device labels we have, and recall is otherwise
+         * unmeasurable (a missed bump leaves no row), so a wide-open slider could
+         * silently destroy precision (FP storm at the low end) or recall (missed
+         * hazards at the high end) with no feedback. ±30% lets a user nudge toward
+         * "catch more / nag less" while staying within the fit's headroom (the noise
+         * floor + settle band still clear the scaled threshold across the band, since
+         * the lowest scaled bar 0.7·0.95≈0.67 @10 km/h is still well above the 0.40
+         * settle band). [MIN_THRESHOLD_SCALE] is the MOST sensitive end (lowest bar).
+         */
+        const val MIN_THRESHOLD_SCALE = 0.7f
+        const val MAX_THRESHOLD_SCALE = 1.3f
+        const val DEFAULT_THRESHOLD_SCALE = 1.0f
 
         /**
          * Near-stationary NUMERICAL guard — NOT a hazard speed floor (Session 34, per the

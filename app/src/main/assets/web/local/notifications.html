@@ -53,7 +53,7 @@
             : __OT_ALL_TABS;
     </script>
     <script src="../shared/app-tabs.js"></script>
-    <link rel="stylesheet" href="../shared/styles.css?v=15">
+    <link rel="stylesheet" href="../shared/styles.css?v=16">
     <link rel="manifest" href="/manifest.json">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
@@ -571,7 +571,7 @@
                             <div class="notif-row">
                                 <div class="notif-row-text">
                                     <div class="notif-row-label" data-i18n="telegram.motion_text">Motion text alerts</div>
-                                    <div class="notif-row-note" data-i18n="telegram.motion_text_desc">Send a short text message when surveillance detects motion. Photos / videos are governed by the toggles below.</div>
+                                    <div class="notif-row-note" data-i18n="telegram.motion_text_desc">Send a motion alert (text, plus the snapshot photo when one is available) when surveillance detects motion. Video clips have their own toggle below.</div>
                                 </div>
                                 <label class="toggle-switch">
                                     <input type="checkbox" id="tgPrefMotionText" onchange="TelegramPrefs.save()">

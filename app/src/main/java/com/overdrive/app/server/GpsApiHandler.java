@@ -39,16 +39,39 @@ public class GpsApiHandler {
     
     private static void sendGpsLocation(OutputStream out) throws Exception {
         GpsMonitor gps = GpsMonitor.getInstance();
-        
+
         // Auto-start GPS if not running
         if (!gps.isRunning()) {
             CameraDaemon.log("GPS: Auto-starting GPS tracking");
             gps.start();
         }
-        
+
         JSONObject response = new JSONObject();
         response.put("success", true);
-        response.put("location", gps.getLocationJson());
+        JSONObject location = gps.getLocationJson();
+        // Fuse in the real BYD CAN motion signals. GPS speed (location.speed) is noisy
+        // — multipath, dilution of precision, ~1-2s cadence — so the map's puck
+        // dead-reckoning over-travels then snaps back when the next fix lands. The CAN
+        // bus exposes the true wheel/inverter speed (smooth, high-rate) plus pedal
+        // positions; the nav puck smoother prefers canSpeedKmh when present and can use
+        // brakePercent to anticipate decel. Collected daemon-side (BydDataCollector runs
+        // here as UID 2000); best-effort so a missing/absent collector never breaks the
+        // GPS payload. UNAVAILABLE sentinels / NaN are simply omitted (the app treats an
+        // absent key as "no CAN signal" and falls back to GPS speed).
+        try {
+            com.overdrive.app.byd.BydVehicleData vd =
+                    com.overdrive.app.byd.BydDataCollector.getInstance().getData();
+            if (vd != null) {
+                if (!Double.isNaN(vd.speedKmh)) location.put("canSpeedKmh", vd.speedKmh);
+                if (vd.accelPercent != com.overdrive.app.byd.BydVehicleData.UNAVAILABLE)
+                    location.put("accelPercent", vd.accelPercent);
+                if (vd.brakePercent != com.overdrive.app.byd.BydVehicleData.UNAVAILABLE)
+                    location.put("brakePercent", vd.brakePercent);
+            }
+        } catch (Throwable ignored) {
+            // No CAN collector / not initialized — GPS-only payload, as before.
+        }
+        response.put("location", location);
         response.put("googleMapsUrl", gps.getGoogleMapsUrl());
         
         CameraDaemon.log("GPS: Sending location - lat=" + gps.getLatitude() + 

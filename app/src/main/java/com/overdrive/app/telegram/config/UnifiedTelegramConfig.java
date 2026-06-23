@@ -134,6 +134,42 @@ public final class UnifiedTelegramConfig {
         return t != null && !t.isEmpty();
     }
 
+    /**
+     * True when a bot-token ciphertext IS stored but it currently decrypts to
+     * empty — i.e. the field is set but unrecoverable (device-id file missing,
+     * or written under a key we can no longer reproduce). Distinct from "no
+     * token configured" so the daemon can log a precise diagnostic instead of
+     * the misleading "bot_token not set". Cheap: reads the section once.
+     */
+    public static boolean botTokenPresentButUndecryptable() {
+        String cipher = load().optString(K_BOT_TOKEN, "");
+        if (cipher.isEmpty()) return false;
+        String plain = CredentialCipher.decrypt(cipher);
+        return plain == null || plain.isEmpty();
+    }
+
+    /**
+     * One-shot upgrade: if the stored bot token was written under the LEGACY
+     * firmware-fingerprint-bound key, re-encrypt it under the stable
+     * (device-id-only) key so a future OTA can't strand it. No-op when there's
+     * no token, when it's already stable, or when it can't be decrypted at all.
+     * Returns true only when a re-encrypt write actually happened.
+     *
+     * <p>Must be called from a UID that can write the config (the UID-2000
+     * daemon path); a failed write is harmless — decrypt() keeps reading the
+     * legacy value via its fallback, and the next privileged run retries.
+     */
+    public static boolean reEncryptBotTokenIfLegacy() {
+        // Shared single-key-delta + CAS upgrade (legacy fingerprint key →
+        // stable device-id key). The helper re-reads fresh and bails if the
+        // token changed under us (concurrent clear/rotate), and writes only the
+        // botToken key so other telegram fields aren't clobbered. Returns false
+        // when nothing should change (not legacy / unrecoverable / fail-open
+        // encrypt guard inside upgradeToStableOrNull).
+        return com.overdrive.app.byd.cloud.crypto.CredentialUpgrade
+                .reEncryptKeyIfLegacy(SECTION, K_BOT_TOKEN);
+    }
+
     public static long getOwnerChatId() {
         return load().optLong(K_OWNER_CHAT_ID, -1);
     }
@@ -230,7 +266,12 @@ public final class UnifiedTelegramConfig {
                 delta.put(K_BOT_USERNAME, "");
                 delta.put(K_BOT_FIRST_NAME, "");
             } else {
-                delta.put(K_BOT_TOKEN, CredentialCipher.encrypt(token));
+                String enc = CredentialCipher.encrypt(token);
+                // encrypt() is fail-open (returns plaintext on JCE error). Never
+                // persist a bare token to the world-readable 0666 config —
+                // abort the save instead (same invariant as the migration paths).
+                if (!CredentialCipher.isEncrypted(enc)) return false;
+                delta.put(K_BOT_TOKEN, enc);
                 delta.put(K_BOT_ID, botId);
                 delta.put(K_BOT_USERNAME, botUsername == null ? "" : botUsername);
                 delta.put(K_BOT_FIRST_NAME, botFirstName == null ? "" : botFirstName);

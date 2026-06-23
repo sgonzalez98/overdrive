@@ -262,11 +262,6 @@
     <string name="zrok_reset_environment">Reset Zrok Environment</string>
     <string name="zrok_reset_environment_desc">Removes environment and token. You will need to re-enable with your token (uses a device slot).</string>
 
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">Token is stored securely and shared between app and daemon processes.</string>
-    <string name="cloudflared_token_hint">Enter cloudflared token</string>
-    <string name="cloudflare_paid_version">Cloudflare Paid Version</string>
-
     <!-- dialog_reset_data -->
     <string name="reset_title">Reset Data</string>
     <string name="reset_subtitle">Wipe accumulated data by category</string>
@@ -313,6 +308,12 @@
     <string name="recording_lib_filter_section_severity">Severity</string>
     <string name="recording_lib_filter_section_type">Type</string>
     <string name="recording_lib_filter_section_place">Place</string>
+    <string name="recording_lib_filter_section_storage">Storage</string>
+    <!-- Storage filter chip labels (full words; the tile badge uses the short
+         SD/USB/INT forms above). -->
+    <string name="recording_lib_storage_filter_internal">Internal</string>
+    <string name="recording_lib_storage_filter_sd">SD card</string>
+    <string name="recording_lib_storage_filter_usb">USB</string>
     <string name="recording_lib_place_search_hint">Search places…</string>
     <string name="recording_lib_chip_type_normal">Normal</string>
     <string name="recording_lib_chip_type_proximity">Proximity</string>
@@ -354,6 +355,11 @@
     <string name="recording_lib_type_event">EVENT</string>
     <string name="recording_lib_type_proximity">PROX</string>
     <string name="recording_lib_type_oem">OEM</string>
+    <!-- Per-clip storage tag — where the clip actually landed. Surfaces the
+         silent SD→internal fallback (SD bridged behind the USB power rail). -->
+    <string name="recording_lib_storage_sd">SD</string>
+    <string name="recording_lib_storage_usb">USB</string>
+    <string name="recording_lib_storage_internal">INT</string>
     <!-- Toast shown when a multi-select share is dispatched. -->
     <string name="toast_share_recordings">Sharing %1$d recordings</string>
 
@@ -592,10 +598,6 @@
     <!-- ABRP -->
 
     <!-- Daemons fragment -->
-    <string name="dialog_cloudflared_settings_title">🌐 Cloudflared Settings</string>
-    <string name="dialog_cloudflared_settings_message">Define whether you are using paid Cloudflare or trycloudflare. If you are using paid Cloudflare, enter your tunnel token.</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">If you set to paid version the token cannot be empty</string>
-    <string name="toast_cloudflared_saved_settings">Cloudflared settings saved</string>
     <string name="toast_no_config_needed">No configuration needed for %1$s</string>
     <string name="dialog_zrok_token_title">Zrok Tunnel Token</string>
     <string name="dialog_zrok_token_message">Enter your Zrok enable token.\nGet one at: zrok.io</string>
@@ -763,6 +765,33 @@
     <string name="settings_about_version_label">Version</string>
     <string name="settings_about_package_label">Build</string>
     <string name="settings_about_check_update_value">Check the latest GitHub release and install if newer.</string>
+    <!-- Backup & Restore (same-device). The backup file contains credentials +
+         the device key, so the copy warns the user to keep it private. -->
+    <string name="settings_backup_export_title">Export settings</string>
+    <string name="settings_backup_export_value">Save a backup file of your current settings. Keep it private — it holds your credentials.</string>
+    <string name="settings_backup_import_title">Restore settings</string>
+    <string name="settings_backup_import_value">Load a backup file made on this same head unit.</string>
+    <string name="settings_backup_default_filename">overdrive-backup.json</string>
+    <string name="settings_backup_exporting">Building backup…</string>
+    <string name="settings_backup_export_failed">Backup export failed</string>
+    <string name="settings_backup_saved">Backup saved</string>
+    <string name="settings_backup_saved_to">Backup saved to %1$s</string>
+    <string name="settings_backup_save_failed">Could not save the backup file</string>
+    <string name="settings_backup_pick_file">Pick a backup to restore</string>
+    <string name="settings_backup_no_files">No backup files found. Export one first, or copy a backup .json into %1$s, then try again.</string>
+    <string name="settings_backup_read_failed">Could not read the file</string>
+    <string name="settings_backup_invalid_file">That file is not a valid Overdrive backup</string>
+    <string name="settings_backup_restoring">Restoring…</string>
+    <string name="settings_backup_restored">Settings restored</string>
+    <string name="settings_backup_restore_failed">Restore failed</string>
+    <string name="settings_backup_daemon_down">The camera service must be running to back up or restore. Start it from Daemons, then try again.</string>
+    <string name="settings_backup_restore_confirm_title">Restore settings?</string>
+    <string name="settings_backup_restore_confirm_msg">This replaces your current Overdrive settings with the backup and reloads services. It only works on the same head unit the backup was made on.</string>
+    <string name="settings_backup_restore_confirm_btn">Restore</string>
+    <string name="settings_backup_restart_hint">Settings restored. Restart the camera daemon (Daemons → Camera → Restart) to make sure every restored setting is applied.</string>
+    <string name="settings_backup_trips_prompt">Include your trip history (distance, energy, cost, scores, start/end locations)? Detailed per-trip telemetry is not included. The file will contain your location history — keep it private.</string>
+    <string name="settings_backup_settings_only">Settings only</string>
+    <string name="settings_backup_with_trips">Include trips</string>
     <!-- Support-development section: tiered options, low-cost first.
          star → spread → coffee, in that visual order. Copy aims for
          personality without being corny — short, warm, specific. -->
@@ -1232,6 +1261,9 @@
     <string name="roadsense_map_routing">Finding route…</string>
     <string name="roadsense_map_route_failed">Could not find a route. Try again.</string>
     <string name="roadsense_map_need_key">Add a routing key in RoadSense settings to navigate.</string>
+    <string name="roadsense_map_route_key_rejected">Routing key rejected. Check your key in RoadSense settings.</string>
+    <string name="roadsense_map_route_network">Network too slow to find a route. Check your connection and try again.</string>
+    <string name="roadsense_map_route_http">Routing service error (%1$d). Try again shortly.</string>
     <string name="roadsense_map_rerouting">Off route — recalculating…</string>
     <string name="roadsense_map_arrived">You have arrived.</string>
     <string name="roadsense_map_nav_started">Navigating to %1$s</string>
@@ -1329,5 +1361,15 @@
     <string name="roadsense_map_search_to_save">Search a place to set as %1$s</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">Trip restored</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">Token is stored encrypted and shared between the app and daemon processes.</string>
+    <string name="cloudflared_token_hint">Enter cloudflared token</string>
+    <string name="cloudflare_paid_version">Cloudflare Paid Version</string>
+    <string name="dialog_cloudflared_settings_title">Cloudflared Settings</string>
+    <string name="dialog_cloudflared_settings_message">Define whether you are using paid Cloudflare or trycloudflare. If you are using paid Cloudflare, enter your tunnel token.</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">If you set the paid version the token cannot be empty</string>
+    <string name="toast_cloudflared_token_invalid">Invalid token: use only letters, numbers and . _ - = characters</string>
+    <string name="toast_cloudflared_saved_settings">Cloudflared settings saved</string>
 
 </resources>

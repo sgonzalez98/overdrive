@@ -12,7 +12,7 @@
     <meta name="theme-color" content="#00876C">
     <script src="../shared/theme.js?v=5"></script>
     <script src="../shared/app-shell.js"></script>
-    <link rel="stylesheet" href="../shared/styles.css?v=15">
+    <link rel="stylesheet" href="../shared/styles.css?v=16">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
     <style>
@@ -783,6 +783,12 @@
         .filter-chip.sev-notice.active   { background: rgba(160,160,160,0.20); }
         .filter-chip.sev-alert.active    { background: rgba(255,136,0,0.20);   color: #ff9b3d; }
         .filter-chip.sev-critical.active { background: rgba(239,68,68,0.25);   color: #ff6b6b; }
+        /* Storage chips — when active, tint to match the per-clip storage
+           badge palette (SD green, USB blue, internal neutral) so the filter
+           selection and the badges read as the same vocabulary. */
+        .filter-chip.storage-internal.active { background: rgba(255,255,255,0.10); }
+        .filter-chip.storage-sd.active       { background: rgba(16,185,129,0.18);  color: #34d399; border-color: rgba(16,185,129,0.38); }
+        .filter-chip.storage-usb.active      { background: rgba(59,130,246,0.18);  color: #60a5fa; border-color: rgba(59,130,246,0.38); }
 
         /* Place chips can carry user-edited SafeLocation labels and
            Nominatim strings — both can be arbitrarily long ("Wonderfully
@@ -899,8 +905,44 @@
             display: flex;
             gap: 10px;
             flex-wrap: wrap;
+            align-items: center;
         }
-        
+
+        /* Per-clip storage tag (INTERNAL / SD_CARD / USB). Makes the silent
+           SD→internal fallback visible per file: the SD card on this BYD
+           fleet is bridged behind the USB power rail, so cutting USB power
+           unmounts the SD and clips fall back to internal storage. The SD/USB
+           variants use the brand accent (external = intended target), while
+           INTERNAL is muted so it reads as the "fell back / default" state and
+           draws the eye to the externals it was supposed to be on. */
+        .storage-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            padding: 1px 7px 1px 5px;
+            border-radius: 999px;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            line-height: 1.5;
+            border: 1px solid var(--border-subtle);
+        }
+        .storage-chip svg { flex: 0 0 auto; opacity: 0.9; }
+        .storage-chip.storage-internal {
+            background: rgba(255,255,255,0.05);
+            color: var(--text-muted);
+        }
+        .storage-chip.storage-sd {
+            background: rgba(16,185,129,0.14);
+            border-color: rgba(16,185,129,0.38);
+            color: #34d399;
+        }
+        .storage-chip.storage-usb {
+            background: rgba(59,130,246,0.14);
+            border-color: rgba(59,130,246,0.38);
+            color: #60a5fa;
+        }
+
         .recording-actions {
             display: flex;
             flex-direction: column;
@@ -1954,6 +1996,20 @@
                         <button class="filter-chip" data-proximity="FAR"        onclick="BYD.events.setActorFilter('proximity','FAR')" data-i18n="events.proximity_far">Far</button>
                     </div>
                     <!--
+                      Storage chip row — narrow the library to one physical
+                      volume. Clips already span internal + SD + USB in the
+                      index; this filters by where each clip actually landed
+                      (the per-clip storage badge shows the same tag). "Any"
+                      is the default and shows every location.
+                    -->
+                    <div class="filter-tabs filter-tabs-row2" data-filter-row="storage">
+                        <span class="filter-row-label" data-i18n="events.filter_storage">Storage:</span>
+                        <button class="filter-chip active" data-storage="" onclick="BYD.events.setStorageFilter('')" data-i18n="events.actor_any">Any</button>
+                        <button class="filter-chip storage-internal" data-storage="INTERNAL" onclick="BYD.events.setStorageFilter('INTERNAL')" data-i18n="events.storage_internal">Internal</button>
+                        <button class="filter-chip storage-sd" data-storage="SD_CARD" onclick="BYD.events.setStorageFilter('SD_CARD')" data-i18n="events.storage_sd_card">SD card</button>
+                        <button class="filter-chip storage-usb" data-storage="USB" onclick="BYD.events.setStorageFilter('USB')" data-i18n="events.storage_usb">USB</button>
+                    </div>
+                    <!--
                       Place chip row — dynamically populated from
                       `rec.place.short` of the currently loaded recordings
                       (descending count, alpha-tiebreak, capped at 8).
@@ -2224,7 +2280,7 @@
     <script src="../shared/pwa-init.js?v=index1"></script>
     <script src="../shared/core.js"></script>
     <script src="../shared/update-flow.js"></script>
-    <script src="../shared/events.js?v=placesearch2"></script>
+    <script src="../shared/events.js?v=storagefilter1"></script>
     <script>
         function toggleSidebar() {
             document.getElementById('sidebar').classList.toggle('open');

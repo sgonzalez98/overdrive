@@ -44,6 +44,7 @@ object RoadSenseConfig {
     private const val K_WARN_LEAD_S = "warnLeadSeconds"        // t_w (D-010)
     private const val K_WARN_FLOOR_M = "warnFloorMeters"
     private const val K_WARN_CONF = "warnConfidenceThreshold"  // 0..1, default 0 (D-015)
+    private const val K_DETECT_SENSITIVITY = "detectionSensitivity"  // EventDetector threshold multiplier, default 1.0
     private const val K_SEV_MINOR = "warnSeverityMinor"        // per-severity chime gates (R-SET-4)
     private const val K_SEV_MODERATE = "warnSeverityModerate"
     private const val K_SEV_SEVERE = "warnSeveritySevere"
@@ -81,6 +82,16 @@ object RoadSenseConfig {
         val warnLeadSeconds: Float,
         val warnFloorMeters: Float,
         val warnConfidenceThreshold: Float,
+        /**
+         * User-facing DETECTION sensitivity (distinct from [warnConfidenceThreshold],
+         * which only gates WARNINGS). A multiplier on the EventDetector speed-aware
+         * open threshold: `threshold = (base + slope·v) * detectionSensitivity`.
+         * 1.0 = the data-fit default (out-of-box). <1 = MORE sensitive (lower bar,
+         * catches gentler bumps, more false positives); >1 = LESS sensitive. Clamped
+         * to EventDetector's supported band so a stray config value can't invert the
+         * threshold. Applied LIVE by RoadSenseController (no daemon restart).
+         */
+        val detectionSensitivity: Float,
         val severityMinor: Boolean,
         val severityModerate: Boolean,
         val severitySevere: Boolean,
@@ -149,6 +160,17 @@ object RoadSenseConfig {
             warnLeadSeconds = s.optDouble(K_WARN_LEAD_S, 4.0).toFloat(),
             warnFloorMeters = s.optDouble(K_WARN_FLOOR_M, 30.0).toFloat(),
             warnConfidenceThreshold = s.optDouble(K_WARN_CONF, 0.0).toFloat(),
+            // Default 1.0 (= data-fit thresholds unchanged); the EventDetector consts are
+            // the single source of truth for the default + the clamp band, so a missing
+            // key behaves exactly like the shipped detector. coerceIn guards a hand-edited
+            // config from inverting the threshold.
+            detectionSensitivity = s.optDouble(
+                K_DETECT_SENSITIVITY,
+                com.overdrive.app.roadsense.detect.EventDetector.DEFAULT_THRESHOLD_SCALE.toDouble()
+            ).toFloat().coerceIn(
+                com.overdrive.app.roadsense.detect.EventDetector.MIN_THRESHOLD_SCALE,
+                com.overdrive.app.roadsense.detect.EventDetector.MAX_THRESHOLD_SCALE
+            ),
             severityMinor = s.optBoolean(K_SEV_MINOR, true),
             severityModerate = s.optBoolean(K_SEV_MODERATE, true),
             severitySevere = s.optBoolean(K_SEV_SEVERE, true),

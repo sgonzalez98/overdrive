@@ -102,6 +102,7 @@ class RecordingAdapter(
         private val tvFilename: TextView? = itemView.findViewById(R.id.tvFilename)
         private val tvSeverity: TextView? = itemView.findViewById(R.id.tvSeverity)
         private val tvTypeBadge: TextView? = itemView.findViewById(R.id.tvTypeBadge)
+        private val tvStorageBadge: TextView? = itemView.findViewById(R.id.tvStorageBadge)
         private val tvActorSummary: TextView? = itemView.findViewById(R.id.tvActorSummary)
         private val severityStripe: View? = itemView.findViewById(R.id.severityStripe)
         private val tvLocation: TextView? = itemView.findViewById(R.id.tvLocation)
@@ -129,6 +130,35 @@ class RecordingAdapter(
                         ctx.getString(R.string.recording_lib_type_oem)
                 }
                 badge.visibility = View.VISIBLE
+            }
+
+            // Storage tag — where the clip ACTUALLY landed (INTERNAL / SD_CARD /
+            // USB). Surfaces the silent SD→internal fallback at the file level
+            // (the SD card is bridged behind the USB power rail, so cutting USB
+            // power unmounts it and clips fall back to internal). SD/USB use the
+            // accent tints (the externals the user intended); INTERNAL stays a
+            // neutral dark scrim so a fell-back clip stands out against the
+            // green/blue ones. Hidden when the type couldn't be classified.
+            tvStorageBadge?.let { sb ->
+                val ctx = sb.context
+                when (recording.storageType?.uppercase()) {
+                    "SD_CARD" -> {
+                        sb.text = ctx.getString(R.string.recording_lib_storage_sd)
+                        sb.setBackgroundColor(0xCC10B981.toInt())
+                        sb.visibility = View.VISIBLE
+                    }
+                    "USB" -> {
+                        sb.text = ctx.getString(R.string.recording_lib_storage_usb)
+                        sb.setBackgroundColor(0xCC3B82F6.toInt())
+                        sb.visibility = View.VISIBLE
+                    }
+                    "INTERNAL" -> {
+                        sb.text = ctx.getString(R.string.recording_lib_storage_internal)
+                        sb.setBackgroundColor(0x99000000.toInt())
+                        sb.visibility = View.VISIBLE
+                    }
+                    else -> sb.visibility = View.GONE
+                }
             }
 
             // Severity badge + stripe (item 7) — only when v3 sidecar provided severity

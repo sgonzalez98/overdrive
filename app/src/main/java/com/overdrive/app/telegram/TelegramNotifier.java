@@ -36,10 +36,36 @@ public class TelegramNotifier {
     
     private static final String TAG = "TelegramNotifier";
     private static final int IPC_PORT = 19880;  // Telegram daemon IPC (moved from 19878 to free up that port for BydEventDaemon)
+    /** Bounds the connect() so a backlogged daemon can't park the executor past the read timeout. */
+    private static final int CONNECT_TIMEOUT_MS = 1500;
     
-    // Background executor for IPC calls
+    // Background executor for the text/photo IPC calls (notifyMotion,
+    // notifyMotionFinalized, notifyTunnelUrl). Single-thread, FIFO.
     private static final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "TelegramNotifierIPC");
+        t.setDaemon(true);
+        return t;
+    });
+
+    // Dedicated lane for VIDEO uploads. A surveillance clip is the slowest send
+    // in the system (multi-MB multipart + up to a 60s 429 sleep daemon-side),
+    // and its IPC response is discarded. Keeping it OUT of `executor` means a
+    // slow clip never sits in front of the NEXT event's motion text / hero
+    // photo — the head-of-line block that made notifications late & stale when
+    // video sending is on. Single-thread so clips stay FIFO among themselves.
+    private static final ExecutorService videoExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "TelegramNotifierVideo");
+        t.setDaemon(true);
+        return t;
+    });
+
+    // Dedicated lane for time-critical alerts (CRITICAL category: proximity,
+    // low-battery, manual). A burst of motion notifications on the main
+    // `executor` (each blocking up to the connect+read timeout when the daemon
+    // is slow) must not delay a collision/critical alert behind it — head-of-
+    // line isolation. Single-thread so CRITICAL alerts stay mutually ordered.
+    private static final ExecutorService criticalExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "TelegramNotifierCrit");
         t.setDaemon(true);
         return t;
     });
@@ -97,8 +123,9 @@ public class TelegramNotifier {
                 new VideoEvent(filePath, aiDetection, durationSeconds)
         );
 
-        // Send via IPC to daemon
-        executor.execute(() -> {
+        // Send via IPC to daemon on the dedicated VIDEO lane so a slow clip
+        // upload can't delay the next event's motion text / hero photo.
+        videoExecutor.execute(() -> {
             try {
                 if (!isEnabled(Category.VIDEO)) {
                     Log.d(TAG, "notifyVideoRecorded skipped — videoUploads disabled");
@@ -111,7 +138,10 @@ public class TelegramNotifier {
                         ? Messages.get("telegram.recording_caption", aiDetection, durationSeconds)
                         : Messages.get("telegram.recording_caption_no_label", durationSeconds);
                 cmd.put("caption", caption);
-                sendIpc(cmd);
+                // Fire-and-forget: the response is unused, and the upload can
+                // take tens of seconds — don't tie up even this lane waiting on
+                // a reply we'd discard.
+                sendIpcFireAndForget(cmd);
             } catch (Exception e) {
                 Log.e(TAG, "notifyVideoRecorded IPC error", e);
             }
@@ -195,6 +225,11 @@ public class TelegramNotifier {
                 new MotionEvent(aiDetection, confidence)
         );
 
+        // Capture the detection time NOW (call moment), not inside the lambda
+        // which runs later once the executor drains — so a delayed send still
+        // reports when the event actually happened.
+        final long eventTimeMs = System.currentTimeMillis();
+
         // Send via IPC to daemon (legacy + new fields)
         executor.execute(() -> {
             try {
@@ -206,6 +241,7 @@ public class TelegramNotifier {
                 cmd.put("cmd", "notifyMotion");
                 cmd.put("detection", aiDetection != null ? aiDetection : "motion");
                 cmd.put("confidence", confidence);
+                cmd.put("eventTimeMs", eventTimeMs);
                 if (videoFilename != null && !videoFilename.isEmpty()) {
                     cmd.put("videoFilename", videoFilename);
                 }
@@ -237,6 +273,8 @@ public class TelegramNotifier {
                                              String severity,
                                              int personCount, int vehicleCount, int bikeCount, int animalCount,
                                              String closestProximity, String camera) {
+        // Capture the finalization time at the call moment (see notifyMotion).
+        final long eventTimeMs = System.currentTimeMillis();
         executor.execute(() -> {
             try {
                 if (!isEnabled(Category.MOTION)) {
@@ -245,6 +283,7 @@ public class TelegramNotifier {
                 }
                 JSONObject cmd = new JSONObject();
                 cmd.put("cmd", "notifyMotionFinalized");
+                cmd.put("eventTimeMs", eventTimeMs);
                 if (videoFilename != null && !videoFilename.isEmpty()) {
                     cmd.put("videoFilename", videoFilename);
                 }
@@ -258,7 +297,13 @@ public class TelegramNotifier {
                 if (animalCount > 0)  cmd.put("animalCount", animalCount);
                 if (closestProximity != null) cmd.put("closestProximity", closestProximity);
                 if (camera != null)   cmd.put("camera", camera);
-                JSONObject resp = sendIpc(cmd);
+                // Spool on daemon-down (the ACC-on teardown race: stopRecording
+                // finalizes after AccSentryDaemon already SIGKILL'd the bot).
+                // The hero JPEG persists on disk and the daemon re-checks
+                // exists() on replay, so a late delivery still ships the photo
+                // (or falls back to text). A connect-refused returns null, so
+                // the legacy fallback below correctly does NOT fire for it.
+                JSONObject resp = sendIpc(cmd, /*spoolOnDaemonDown=*/true);
                 // FIX (C3): if the daemon predates this command (returns
                 // "error" with "Unknown command"), retry once via the legacy
                 // notifyMotion path so a stale daemon still ships a Telegram
@@ -272,6 +317,7 @@ public class TelegramNotifier {
                     legacy.put("cmd", "notifyMotion");
                     legacy.put("detection", choosePrimaryDetection(personCount, vehicleCount, bikeCount, animalCount));
                     legacy.put("confidence", 1.0f);
+                    legacy.put("eventTimeMs", eventTimeMs);
                     if (videoFilename != null && !videoFilename.isEmpty()) {
                         legacy.put("videoFilename", videoFilename);
                     }
@@ -312,8 +358,9 @@ public class TelegramNotifier {
                 new CriticalEvent(type, details)
         );
 
-        // Send via IPC to daemon
-        executor.execute(() -> {
+        // Send via IPC to daemon — on the dedicated critical lane so a motion/
+        // video burst can't delay it.
+        criticalExecutor.execute(() -> {
             try {
                 if (!isEnabled(Category.CRITICAL)) {
                     Log.d(TAG, "notifyCritical skipped — critical alerts disabled");
@@ -323,7 +370,10 @@ public class TelegramNotifier {
                 cmd.put("cmd", "notifyCritical");
                 cmd.put("type", type.name());
                 cmd.put("details", details);
-                sendIpc(cmd);
+                // Critical alerts are worth delivering late: spool if the
+                // daemon is down (ACC ON). Replay re-applies the criticalAlerts
+                // + owner gate on the daemon side.
+                sendIpc(cmd, /*spoolOnDaemonDown=*/true);
             } catch (Exception e) {
                 Log.e(TAG, "notifyCritical IPC error", e);
             }
@@ -351,11 +401,17 @@ public class TelegramNotifier {
      *                 unknown values fall back to CRITICAL
      */
     public static void sendMessage(String text, String category) {
-        executor.execute(() -> {
+        // Resolve category up front so we can pick the lane: CRITICAL gets the
+        // dedicated criticalExecutor so it can't queue behind a motion/video
+        // burst on the shared executor.
+        final Category cat;
+        Category parsed;
+        try { parsed = (category != null) ? Category.valueOf(category) : Category.CRITICAL; }
+        catch (IllegalArgumentException iae) { parsed = Category.CRITICAL; }
+        cat = parsed;
+        ExecutorService lane = (cat == Category.CRITICAL) ? criticalExecutor : executor;
+        lane.execute(() -> {
             try {
-                Category cat;
-                try { cat = (category != null) ? Category.valueOf(category) : Category.CRITICAL; }
-                catch (IllegalArgumentException iae) { cat = Category.CRITICAL; }
                 if (!isEnabled(cat)) {
                     Log.d(TAG, "sendMessage skipped — " + cat + " disabled");
                     return;
@@ -364,7 +420,11 @@ public class TelegramNotifier {
                 cmd.put("cmd", "sendMessage");
                 cmd.put("text", text);
                 cmd.put("category", cat.name());
-                sendIpc(cmd);
+                // CRITICAL-category messages (proximity collision alert,
+                // install-failure) are worth delivering late if the daemon was
+                // down (ACC ON). MOTION/CONNECTIVITY/VIDEO ad-hoc text is not
+                // spooled — it's either low-value-if-late or rotates.
+                sendIpc(cmd, /*spoolOnDaemonDown=*/cat == Category.CRITICAL);
             } catch (Exception e) {
                 Log.e(TAG, "sendMessage IPC error", e);
             }
@@ -378,7 +438,9 @@ public class TelegramNotifier {
      * @param triggerLevel Trigger level ("RED" or "YELLOW")
      */
     public static void sendProximityAlert(long timestamp, String triggerLevel) {
-        executor.execute(() -> {
+        // Critical lane — a collision warning must not queue behind a motion
+        // burst.
+        criticalExecutor.execute(() -> {
             try {
                 if (!isEnabled(Category.CRITICAL)) {
                     Log.d(TAG, "sendProximityAlert skipped — critical alerts disabled");
@@ -397,7 +459,10 @@ public class TelegramNotifier {
                 cmd.put("cmd", "sendMessage");
                 cmd.put("text", message);
                 cmd.put("category", "CRITICAL");
-                sendIpc(cmd);
+                // Proximity Guard is an ACC-ON feature, so the daemon is
+                // usually DOWN when this fires — spool so the collision alert
+                // is delivered when the car next parks instead of vanishing.
+                sendIpc(cmd, /*spoolOnDaemonDown=*/true);
 
                 Log.i(TAG, "Proximity alert sent: " + triggerLevel);
             } catch (Exception e) {
@@ -406,21 +471,43 @@ public class TelegramNotifier {
         });
     }
     
-    /**
-     * Send IPC command to TelegramBotDaemon.
-     */
+    /** Default send: no spooling (response-bearing / non-spoolable callers). */
     private static JSONObject sendIpc(JSONObject command) {
+        return sendIpc(command, /*spoolOnDaemonDown=*/false);
+    }
+
+    /**
+     * Send an IPC command to TelegramBotDaemon.
+     *
+     * <p>The connect is bounded independently of the read so a backlogged
+     * daemon (accept queue full) can't park the calling executor past the
+     * read timeout: {@code connect()} gets {@value #CONNECT_TIMEOUT_MS}ms,
+     * {@code read} gets 5s via soTimeout.
+     *
+     * @param spoolOnDaemonDown when true, a definitive "daemon not listening"
+     *        (connection refused) persists the command to {@link TelegramSpool}
+     *        for replay on the daemon's next startup. Only set this for
+     *        commands that are safe to deliver late and where a refused connect
+     *        proves nothing was sent (so no duplicate) — e.g. proximity /
+     *        critical / finalized-motion. A read timeout is NOT spooled: the
+     *        daemon may have already processed the send.
+     */
+    private static JSONObject sendIpc(JSONObject command, boolean spoolOnDaemonDown) {
         Socket socket = null;
+        boolean connected = false;
         try {
-            socket = new Socket("127.0.0.1", IPC_PORT);
+            socket = new Socket();
+            socket.connect(new java.net.InetSocketAddress("127.0.0.1", IPC_PORT),
+                    CONNECT_TIMEOUT_MS);
+            connected = true;  // past this point a failure is AFTER the request may have been sent
             socket.setSoTimeout(5000);
-            
+
             PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
             BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            
+
             writer.println(command.toString());
             String response = reader.readLine();
-            
+
             if (response != null) {
                 JSONObject json = new JSONObject(response);
                 String status = json.optString("status", "");
@@ -431,16 +518,80 @@ public class TelegramNotifier {
             }
             return null;
         } catch (java.net.ConnectException e) {
-            // Daemon not running - this is expected if telegram is disabled
-            Log.d(TAG, "Telegram daemon not running");
+            // Daemon not listening — it only runs during ACC OFF, so this is the
+            // ACC-ON / teardown-race drop. A refused connect means nothing was
+            // sent (no dup risk), so spool when the caller said it's safe.
+            spoolOrLog(command, spoolOnDaemonDown);
+            return null;
+        } catch (java.net.SocketTimeoutException e) {
+            // A connect-phase timeout (daemon alive but accept backlog full) is
+            // ALSO pre-write — nothing was sent — so it's dup-safe to spool just
+            // like a refused connect. A POST-connect read timeout is NOT spooled
+            // (the daemon may already have processed the command).
+            if (!connected) {
+                spoolOrLog(command, spoolOnDaemonDown);
+            } else {
+                Log.w(TAG, "IPC read timeout (not spooling — may have been processed): "
+                        + command.optString("cmd", "?"));
+            }
             return null;
         } catch (Exception e) {
-            Log.e(TAG, "IPC error: " + e.getMessage());
+            Log.w(TAG, "IPC error: " + e.getMessage());
             return null;
         } finally {
             if (socket != null) {
                 try { socket.close(); } catch (Exception ignored) {}
             }
+        }
+    }
+
+    /**
+     * Fire-and-forget IPC send: deliver the command, do NOT block on the
+     * response. Used for sendVideo, whose response is discarded and whose
+     * upload can take tens of seconds daemon-side.
+     *
+     * <p>The daemon reads exactly one line then dispatches the work to a worker
+     * pool and performs the upload independently of whether the client reads the
+     * reply — so writing the line + a clean half-close is sufficient to trigger
+     * the send. We {@code shutdownOutput()} (flush + FIN) so the daemon's
+     * {@code readLine()} returns the full command promptly, then return without
+     * waiting. A refused connect is logged (video is intentionally NOT spooled —
+     * a stale multi-MB clip replayed after a drive is undesirable).
+     */
+    private static void sendIpcFireAndForget(JSONObject command) {
+        Socket socket = null;
+        try {
+            socket = new Socket();
+            socket.connect(new java.net.InetSocketAddress("127.0.0.1", IPC_PORT),
+                    CONNECT_TIMEOUT_MS);
+            PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
+            writer.println(command.toString());
+            writer.flush();
+            // Half-close the write side: flushes the bytes and sends a FIN so the
+            // daemon's readLine() sees a clean end-of-request. We never read the
+            // reply — the daemon uploads regardless, and a later daemon write to
+            // our closed socket fails harmlessly on its side.
+            try { socket.shutdownOutput(); } catch (Exception ignored) {}
+        } catch (java.net.ConnectException e) {
+            Log.d(TAG, "Telegram daemon not running (video send dropped)");
+        } catch (Exception e) {
+            Log.w(TAG, "IPC fire-and-forget error: " + e.getMessage());
+        } finally {
+            if (socket != null) {
+                try { socket.close(); } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    /** Spool the command if the caller opted in, else just log the daemon-down drop. */
+    private static void spoolOrLog(JSONObject command, boolean spoolOnDaemonDown) {
+        if (spoolOnDaemonDown) {
+            boolean ok = TelegramSpool.offer(command);
+            Log.w(TAG, "Telegram daemon unreachable; "
+                    + (ok ? "spooled for later delivery: " : "spool failed, dropped: ")
+                    + command.optString("cmd", "?"));
+        } else {
+            Log.d(TAG, "Telegram daemon not running");
         }
     }
 }

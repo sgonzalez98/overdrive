@@ -41,7 +41,15 @@ data class RecordingFile(
     // skip its own date math when results come from the API. Null when the
     // row originated from the direct-FS fallback path — decoration falls
     // back to its in-process grouping in that case.
-    val bucketLabel: String? = null
+    val bucketLabel: String? = null,
+    // ---- Per-clip storage tag ----
+    // "INTERNAL" / "SD_CARD" / "USB" — where the clip ACTUALLY landed. Set
+    // server-side (RecordingsIndex via StorageManager.classifyStorageForPath)
+    // and also derivable locally for the direct-FS fallback path. Surfaces the
+    // silent SD→internal fallback (the SD card is bridged behind the USB power
+    // rail, so cutting USB power unmounts it and clips fall back to internal).
+    // Null = unknown/unclassified; the adapter omits the badge.
+    val storageType: String? = null
 ) {
     // Secondary constructor for MediaStore results
     constructor(
@@ -144,7 +152,25 @@ data class RecordingFile(
 
             // If type-specific parsing failed, try fallback parsing
             // This handles any .mp4 file that doesn't match expected patterns
-            return result ?: parseFallbackRecording(file, type)
+            val parsed = result ?: parseFallbackRecording(file, type)
+            // Tag the clip with where it actually lives, derived from its path.
+            // Done once here (rather than in each per-type parser) so every
+            // direct-FS row carries the storage badge, matching the API path's
+            // server-side classification. Best-effort: a classifier/singleton
+            // failure must never drop the row.
+            return parsed?.copy(storageType = classifyStorage(file))
+        }
+
+        /** Classify a clip's storage volume from its path. Mirrors the
+         *  server-side StorageManager.classifyStorageForPath so API rows and
+         *  direct-FS fallback rows tag identically. Null on any failure. */
+        private fun classifyStorage(file: File): String? {
+            return try {
+                com.overdrive.app.storage.StorageManager.getInstance()
+                    .classifyStorageForPath(file.absolutePath)
+            } catch (_: Throwable) {
+                null
+            }
         }
         
         /**

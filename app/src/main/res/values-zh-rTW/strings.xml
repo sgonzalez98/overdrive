@@ -1155,12 +1155,14 @@
     <string name="roadsense_map_search_to_save">搜尋地點以設定為 %1$s</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">行程已恢復</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">令牌被安全存儲並在應用程式和守護進程之間共享。</string>
-    <string name="cloudflared_token_hint">輸入 cloudflared 令牌</string>
-    <string name="cloudflare_paid_version">Cloudflare 付費版本</string>
-    <string name="dialog_cloudflared_settings_title">🌐 Cloudflared 設置</string>
-    <string name="dialog_cloudflared_settings_message">定義您使用的是付費 Cloudflare 還是 trycloudflare。如果您使用的是付費 Cloudflare，請輸入您的隧道令牌。</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">如果設置為付費版本，令牌不能為空</string>
-    <string name="toast_cloudflared_saved_settings">Cloudflared 設置已保存</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">權杖以加密方式儲存，並在應用程式與守護程序之間共享。</string>
+    <string name="cloudflared_token_hint">輸入 cloudflared 權杖</string>
+    <string name="cloudflare_paid_version">Cloudflare 付費版</string>
+    <string name="dialog_cloudflared_settings_title">Cloudflared 設定</string>
+    <string name="dialog_cloudflared_settings_message">定義您使用的是付費 Cloudflare 還是 trycloudflare。如果您使用付費 Cloudflare，請輸入您的通道權杖。</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">如果設定為付費版，權杖不可為空</string>
+    <string name="toast_cloudflared_token_invalid">無效權杖：僅可使用字母、數字以及 . _ - = 字元</string>
+    <string name="toast_cloudflared_saved_settings">Cloudflared 設定已儲存</string>
 </resources>

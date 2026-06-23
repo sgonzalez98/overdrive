@@ -65,11 +65,28 @@ class DaemonLauncher(
         // ACC Sentry daemon MUST run via ADB shell (UID 2000) for screen control
         private const val USE_ADB_SHELL_FOR_ACC_SENTRY = true
         
-        // Flag to prevent concurrent launch attempts (shared across all instances)
+        // Guards to prevent concurrent launch attempts (shared across all instances).
+        //
+        // These are TIMESTAMPED, not plain booleans: a launch sets the guard to
+        // the current time, and the guard is considered "held" only while it is
+        // both non-zero AND younger than LAUNCH_GUARD_TIMEOUT_MS. This makes the
+        // guard self-healing — if a launch path drops its async callback (e.g.
+        // the ADB-shell executor never invokes onSuccess/onError, which wedged
+        // CameraDaemon restarts), the stale guard expires instead of blocking
+        // every future launch forever. 0 == not held.
+        private const val LAUNCH_GUARD_TIMEOUT_MS = 60_000L
         @Volatile
-        private var accSentryLaunchInProgress = false
+        private var accSentryLaunchStartedAt = 0L
         @Volatile
-        private var cameraLaunchInProgress = false
+        private var cameraLaunchStartedAt = 0L
+
+        /** True if a launch guard set at [startedAt] is still active (held + unexpired). */
+        private fun guardHeld(startedAt: Long): Boolean {
+            if (startedAt == 0L) return false
+            val age = System.currentTimeMillis() - startedAt
+            // age < 0 (clock moved back) is treated as expired, not held.
+            return age in 0 until LAUNCH_GUARD_TIMEOUT_MS
+        }
 
         /**
          * Build a shell snippet that ps+greps for [pattern], filters out the
@@ -464,14 +481,16 @@ class DaemonLauncher(
      * The daemon will run independently of this app as shell user (UID 2000).
     */
     fun launchCameraDaemon(outputDir: String, nativeLibDir: String, callback: LaunchCallback) {
-        // Prevent concurrent launch attempts
-        if (cameraLaunchInProgress) {
+        // Prevent concurrent launch attempts (self-healing: a stale guard from a
+        // dropped callback expires after LAUNCH_GUARD_TIMEOUT_MS instead of
+        // wedging every future launch).
+        if (guardHeld(cameraLaunchStartedAt)) {
             logManager.info(TAG, "CameraDaemon launch already in progress, skipping")
             callback.onLog("Launch already in progress")
             callback.onLaunched()
             return
         }
-        cameraLaunchInProgress = true
+        cameraLaunchStartedAt = System.currentTimeMillis()
         
         logManager.info(TAG, "Launching CameraDaemon...")
         callback.onLog("Launching CameraDaemon...")
@@ -493,14 +512,14 @@ class DaemonLauncher(
                     callback = object : AdbShellExecutor.ShellCallback {
                         override fun onSuccess(o: String) {
                             callback.onLaunched()
-                            cameraLaunchInProgress = false
+                            cameraLaunchStartedAt = 0L
                         }
                         override fun onError(e: String) {
                             // rm failure is non-fatal but log it — better to
                             // proceed than wedge the launcher.
                             logManager.warn(TAG, "Sentinel rm failed on already-running short-circuit: $e")
                             callback.onLaunched()
-                            cameraLaunchInProgress = false
+                            cameraLaunchStartedAt = 0L
                         }
                     }
                 )
@@ -508,11 +527,11 @@ class DaemonLauncher(
                 launchCameraDaemonInternal(outputDir, nativeLibDir, object : LaunchCallback {
                     override fun onLog(message: String) = callback.onLog(message)
                     override fun onLaunched() {
-                        cameraLaunchInProgress = false
+                        cameraLaunchStartedAt = 0L
                         callback.onLaunched()
                     }
                     override fun onError(error: String) {
-                        cameraLaunchInProgress = false
+                        cameraLaunchStartedAt = 0L
                         callback.onError(error)
                     }
                 })
@@ -902,14 +921,15 @@ class DaemonLauncher(
      * System whitelisting is handled by SentryDaemon (UID 1000) separately.
      */
     fun launchAccSentryDaemon(callback: LaunchCallback) {
-        // Prevent concurrent launch attempts
-        if (accSentryLaunchInProgress) {
+        // Prevent concurrent launch attempts (self-healing timestamped guard;
+        // see launchCameraDaemon for the dropped-callback rationale).
+        if (guardHeld(accSentryLaunchStartedAt)) {
             logManager.info(TAG, "AccSentryDaemon launch already in progress, skipping")
             callback.onLog("Launch already in progress")
             callback.onLaunched()
             return
         }
-        accSentryLaunchInProgress = true
+        accSentryLaunchStartedAt = System.currentTimeMillis()
         
         logManager.info(TAG, "Launching AccSentryDaemon (UID 2000)...")
         callback.onLog("Launching AccSentryDaemon (UID 2000 for screen control)...")
@@ -941,12 +961,12 @@ class DaemonLauncher(
                             callback = object : AdbShellExecutor.ShellCallback {
                                 override fun onSuccess(o: String) {
                                     callback.onLaunched()
-                                    accSentryLaunchInProgress = false
+                                    accSentryLaunchStartedAt = 0L
                                 }
                                 override fun onError(e: String) {
                                     logManager.warn(TAG, "Sentinel rm failed on already-running short-circuit: $e")
                                     callback.onLaunched()
-                                    accSentryLaunchInProgress = false
+                                    accSentryLaunchStartedAt = 0L
                                 }
                             }
                         )
@@ -1111,7 +1131,7 @@ class DaemonLauncher(
                 }
                 
                 override fun onError(error: String) {
-                    accSentryLaunchInProgress = false  // Reset flag
+                    accSentryLaunchStartedAt = 0L  // Reset flag
                     logManager.error(TAG, "Failed to launch AccSentryDaemon (fallback): $error")
                     callback.onError("Launch failed: $error")
                 }
@@ -1124,7 +1144,7 @@ class DaemonLauncher(
             command = "ps -A -o PID,UID,ARGS | grep $ACC_SENTRY_DAEMON_PROCESS | grep -v grep | head -1",
             callback = object : AdbShellExecutor.ShellCallback {
                 override fun onSuccess(output: String) {
-                    accSentryLaunchInProgress = false  // Reset flag
+                    accSentryLaunchStartedAt = 0L  // Reset flag
                     if (output.trim().isNotEmpty()) {
                         val parts = output.trim().split(Regex("\\s+"))
                         val pid = parts.getOrNull(0) ?: "?"
@@ -1162,7 +1182,7 @@ class DaemonLauncher(
                 }
                 
                 override fun onError(error: String) {
-                    accSentryLaunchInProgress = false  // Reset flag
+                    accSentryLaunchStartedAt = 0L  // Reset flag
                     callback.onError("Failed to verify AccSentryDaemon: $error")
                 }
             }

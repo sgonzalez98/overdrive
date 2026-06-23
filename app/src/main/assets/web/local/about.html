@@ -11,7 +11,7 @@
     <link rel="icon" type="image/webp" href="../shared/app-icon-dark.webp">
     <script src="../shared/theme.js?v=5"></script>
     <script src="../shared/app-shell.js"></script>
-    <link rel="stylesheet" href="../shared/styles.css?v=15">
+    <link rel="stylesheet" href="../shared/styles.css?v=16">
     <link rel="manifest" href="/manifest.json">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
@@ -201,6 +201,10 @@
                         <div class="credits-card" id="supportersList"></div>
                     </section>
 
+                    <!-- Backup & Restore: settings export/import (same device).
+                         Rendered by backup-flow.js into #backupMount. -->
+                    <div id="backupMount"></div>
+
                     <!-- Diagnostics: per-daemon log send. Hidden unless the
                          backend reports log upload is available (braveheart
                          build). Populated by send-logs.js. -->
@@ -287,6 +291,7 @@
     <script src="../shared/pwa-init.js?v=index1"></script>
     <script src="../shared/core.js"></script>
     <script src="../shared/update-flow.js"></script>
+    <script src="../shared/backup-flow.js"></script>
     <script src="../shared/send-logs.js"></script>
     <script>
         function toggleSidebar() {

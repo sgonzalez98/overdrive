@@ -212,6 +212,19 @@ public class TripDetector {
                 if (dr != null && dr.hasFuelPercent()) {
                     activeTrip.fuelPctStart = dr.fuelPercent;
                 }
+                // Cumulative HAL fuel counter (litres). Captured independently
+                // of the range/pct snapshot so a missing elec-range can't drop
+                // it. The end delta is the metered litres burned this trip.
+                //
+                // Require strictly > 0: a lifetime fuel counter on any PHEV
+                // that has ever run its engine is positive, so an exact 0 means
+                // the trim doesn't populate this accumulator. Leaving it at the
+                // -1 sentinel makes the analytics cascade fall back to the
+                // fuelPct×tank estimate rather than silently reporting 0 L.
+                double fuelConStart = vdm.getTotalFuelCon();
+                if (!Double.isNaN(fuelConStart) && fuelConStart > 0) {
+                    activeTrip.fuelConStart = fuelConStart;
+                }
                 startIceSampler();
             }
         } catch (Exception e) {
@@ -331,6 +344,13 @@ public class TripDetector {
                 com.overdrive.app.monitor.DrivingRangeData dr = vdm.getDrivingRange();
                 if (dr != null && dr.hasFuelPercent()) {
                     activeTrip.fuelPctEnd = dr.fuelPercent;
+                }
+                // Strictly > 0: see startTrip — an exact 0 means the trim
+                // doesn't populate the accumulator, so leave the -1 sentinel
+                // and let the analytics cascade use the pct×tank fallback.
+                double fuelConEnd = vdm.getTotalFuelCon();
+                if (!Double.isNaN(fuelConEnd) && fuelConEnd > 0) {
+                    activeTrip.fuelConEnd = fuelConEnd;
                 }
             }
         } catch (Exception e) {

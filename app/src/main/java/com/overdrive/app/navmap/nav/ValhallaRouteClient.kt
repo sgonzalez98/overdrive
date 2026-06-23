@@ -40,7 +40,12 @@ object ValhallaRouteClient {
     private val http: OkHttpClient by lazy {
         MapNetworking.builder()
             .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(10, TimeUnit.SECONDS)
+            // readTimeout matched to the geocoder's 12s: a Valhalla compute round-trip
+            // THROUGH the sing-box proxy on in-car mobile data can exceed 10s for a
+            // long/alternates route; the old 10s tipped those into a read timeout that
+            // surfaced as the generic "route_failed" (now logged as TIMEOUT). Still
+            // bounded so a hung endpoint fails gracefully.
+            .readTimeout(12, TimeUnit.SECONDS)
             .writeTimeout(8, TimeUnit.SECONDS)
             .retryOnConnectionFailure(false)
             .build()
@@ -65,6 +70,39 @@ object ValhallaRouteClient {
         routesWithAlternates(startLat, startLng, endLat, endLng, 0).firstOrNull()
 
     /**
+     * Why the LAST route attempt failed, so the caller can show a SPECIFIC message
+     * instead of the catch-all "Could not find a route." Set on every routing path
+     * (route / routeVia / routesWithAlternates) before it returns, read by the
+     * Activity right after an empty result. Volatile + a single foreground routing
+     * call at a time, so a plain field is sufficient (no per-call token needed).
+     *
+     *   NONE        — never attempted / last attempt SUCCEEDED
+     *   NO_KEY      — no BYOK routing key configured
+     *   AUTH        — provider rejected the key (HTTP 401/403) → the key is wrong/expired
+     *   HTTP        — provider returned another non-2xx (4xx request / 5xx provider)
+     *   TIMEOUT     — connect/read timed out (slow network or proxy CONNECT handshake)
+     *   NETWORK     — other transport failure (DNS / connection reset / proxy down)
+     *   EMPTY       — HTTP 200 but no usable route in the body (no path between points)
+     */
+    enum class RouteError { NONE, NO_KEY, AUTH, HTTP, TIMEOUT, NETWORK, EMPTY }
+
+    @Volatile
+    var lastError: RouteError = RouteError.NONE
+        private set
+
+    /** HTTP status of the last non-2xx routing response (0 if the failure wasn't an
+     *  HTTP error). Surfaced in the snackbar so a 401 vs 404 vs 503 is distinguishable. */
+    @Volatile
+    var lastHttpCode: Int = 0
+        private set
+
+    /** Classify a caught transport throwable into TIMEOUT vs NETWORK for [lastError]. */
+    private fun classify(t: Throwable): RouteError =
+        if (t is java.net.SocketTimeoutException ||
+            (t.message?.contains("timeout", ignoreCase = true) == true)
+        ) RouteError.TIMEOUT else RouteError.NETWORK
+
+    /**
      * Compute a route through an ORDERED list of locations: origin, optional
      * intermediate stops (waypoints), then destination. The first point is the
      * start and the last is the final destination; everything between is a
@@ -83,6 +121,7 @@ object ValhallaRouteClient {
             val key = cfg.routingApiKey
             if (key.isEmpty()) {
                 Log.w(TAG, "routeVia skipped: no routing API key configured")
+                fail(RouteError.NO_KEY)
                 return emptyList()
             }
             val url = buildRouteUrl(cfg.routingEndpoint, key)
@@ -90,14 +129,14 @@ object ValhallaRouteClient {
             val req = Request.Builder().url(url).post(body.toRequestBody(JSON)).build()
             http.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) {
-                    Log.w(TAG, "POST routeVia -> HTTP ${resp.code}")
+                    logHttpFailure("routeVia", resp)
                     return emptyList()
                 }
-                val bodyStr = resp.body?.string() ?: return emptyList()
-                parseRoutes(bodyStr)
+                val bodyStr = resp.body?.string() ?: run { fail(RouteError.EMPTY); return emptyList() }
+                finish(parseRoutes(bodyStr))
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "routeVia failed: ${t.message}")
+            logThrowable("routeVia", t)
             emptyList()
         }
     }
@@ -121,6 +160,7 @@ object ValhallaRouteClient {
             val key = cfg.routingApiKey
             if (key.isEmpty()) {
                 Log.w(TAG, "route skipped: no routing API key configured")
+                fail(RouteError.NO_KEY)
                 return emptyList()
             }
 
@@ -134,16 +174,60 @@ object ValhallaRouteClient {
 
             http.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) {
-                    Log.w(TAG, "POST route -> HTTP ${resp.code}")
+                    logHttpFailure("route", resp)
                     return emptyList()
                 }
-                val bodyStr = resp.body?.string() ?: return emptyList()
-                parseRoutes(bodyStr)
+                val bodyStr = resp.body?.string() ?: run { fail(RouteError.EMPTY); return emptyList() }
+                finish(parseRoutes(bodyStr))
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "route failed: ${t.message}")
+            logThrowable("route", t)
             emptyList()
         }
+    }
+
+    // ── Error-state bookkeeping + diagnostic logging ─────────────────────────────
+    // The old client swallowed every failure into an empty list and logged only
+    // "HTTP <code>", so a wrong key (401), a malformed request (4xx), a provider
+    // outage (5xx), and a proxy/network timeout were INDISTINGUISHABLE — both in the
+    // log and to the user (always "Could not find a route"). These helpers (a) record
+    // a typed [lastError] + [lastHttpCode] the Activity reads to show a SPECIFIC
+    // message, and (b) log the response body / throwable class so the next on-car
+    // session is a definitive diagnosis, not another guessing round.
+
+    private fun fail(err: RouteError, httpCode: Int = 0): List<NavRoute> {
+        lastError = err
+        lastHttpCode = httpCode
+        return emptyList()
+    }
+
+    /** Record success / empty-but-200 from a parsed result list, then return it. */
+    private fun finish(routes: List<NavRoute>): List<NavRoute> {
+        if (routes.isEmpty()) { lastError = RouteError.EMPTY; lastHttpCode = 200 }
+        else { lastError = RouteError.NONE; lastHttpCode = 200 }
+        return routes
+    }
+
+    /** Log + classify a non-2xx routing response: 401/403 → AUTH (bad/expired key),
+     *  anything else → HTTP. Logs the first ~300 chars of the body (the provider's
+     *  error message — e.g. Stadia's "Invalid API key") which the old code discarded. */
+    private fun logHttpFailure(tag: String, resp: okhttp3.Response) {
+        val code = resp.code
+        val snippet = try { resp.body?.string()?.take(300) } catch (_: Throwable) { null }
+        Log.w(TAG, "POST $tag -> HTTP $code; body=${snippet ?: "<none>"}")
+        when (code) {
+            401, 403 -> fail(RouteError.AUTH, code)
+            else -> fail(RouteError.HTTP, code)
+        }
+    }
+
+    /** Log + classify a caught transport throwable (TIMEOUT vs NETWORK), including the
+     *  exception CLASS so a SocketTimeoutException is distinguishable from a connect
+     *  failure / reset in the log. */
+    private fun logThrowable(tag: String, t: Throwable) {
+        Log.w(TAG, "$tag failed: ${t.javaClass.simpleName}: ${t.message}")
+        lastError = classify(t)
+        lastHttpCode = 0
     }
 
     /**

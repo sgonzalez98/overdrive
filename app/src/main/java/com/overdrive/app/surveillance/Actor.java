@@ -93,6 +93,13 @@ public final class Actor {
     public final int lastBboxY;
     public final int lastBboxW;
     public final int lastBboxH;
+    // Quadrant of the MOST RECENT observation. peakCamera is a lifetime
+    // high-water latch (the quadrant where peak severity / closest approach
+    // hit, never moved back), which makes it wrong for "where is the actor
+    // NOW" — captions must use lastCamera so they name the live quadrant, not
+    // a quadrant the actor has since left. Thumbnail/forensic paths still use
+    // peakCamera.
+    public final int lastCamera;
 
     public Actor(long actorId, ClassGroup classGroup,
                  long firstSeenWallMs, long lastSeenWallMs,
@@ -104,7 +111,8 @@ public final class Actor {
                  float peakConfidence,
                  int peakBboxX, int peakBboxY, int peakBboxW, int peakBboxH,
                  int peakBboxQuadW, int peakBboxQuadH, int peakCamera,
-                 int lastBboxX, int lastBboxY, int lastBboxW, int lastBboxH) {
+                 int lastBboxX, int lastBboxY, int lastBboxW, int lastBboxH,
+                 int lastCamera) {
         this.actorId = actorId;
         this.classGroup = classGroup;
         this.firstSeenWallMs = firstSeenWallMs;
@@ -131,6 +139,7 @@ public final class Actor {
         this.lastBboxY = lastBboxY;
         this.lastBboxW = lastBboxW;
         this.lastBboxH = lastBboxH;
+        this.lastCamera = lastCamera;
     }
 
     /** Map a COCO class ID to a coarse group. */

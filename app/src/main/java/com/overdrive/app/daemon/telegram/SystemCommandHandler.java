@@ -115,10 +115,10 @@ public class SystemCommandHandler implements TelegramCommandHandler {
                 String url = null;
                 boolean isPaid = com.overdrive.app.config.CloudflaredPaidConfig.isPaidVersion();
                 String token = com.overdrive.app.config.CloudflaredPaidConfig.getToken();
-
                 if (isPaid && !token.isEmpty()) {
-                    String grepResult = ctx.execShell("grep --line-buffered -iE 'ingress|hostname' /data/local/tmp/cloudflared.log 2>>/dev/null | grep --line-buffered -oE '[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}' | grep -vE '127.0.0.1' | tail -1");
-                    if (grepResult != null) {
+                    String grepResult = ctx.execShell("grep -iE 'ingress|hostname' /data/local/tmp/cloudflared.log 2>/dev/null | grep -oE '[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}' | grep -vE '127\\.0\\.0\\.1' | tail -1");
+                    // execShell returns "" (not null) on no match — require a real host.
+                    if (grepResult != null && !grepResult.trim().isEmpty() && grepResult.contains(".")) {
                         url = "https://" + grepResult.trim();
                     }
                 } else {
@@ -127,7 +127,6 @@ public class SystemCommandHandler implements TelegramCommandHandler {
                         url = grepResult.trim();
                     }
                 }
-
                 if (url != null) {
                     sb.append("• *Cloudflared:* ").append(url).append("\n");
                     resolved++;
@@ -213,13 +212,15 @@ public class SystemCommandHandler implements TelegramCommandHandler {
                 "*System*\n" +
                 "`/url` - Tunnel URL\n" +
                 "`/update` - Check for app update\n" +
+                "`/backup` - Export settings backup\n" +
+                "`/backup trips` - Backup incl. trip history\n" +
                 "`/help` - This message";
 
         String[][][] buttons = {
             {{"📊 Status", "cmd:/status"}, {"📹 Events", "cmd:/events"}},
             {{"✅ Start Surveillance", "cmd:/start"}, {"⛔ Stop Surveillance", "cmd:/stop"}},
             {{"🤖 Daemons", "cmd:/daemons"}, {"🌐 Tunnel URL", "cmd:/url"}},
-            {{"⬆️ Check Update", "cmd:/update"}}
+            {{"⬆️ Check Update", "cmd:/update"}, {"💾 Backup", "cmd:/backup"}}
         };
         
         ctx.sendMessageWithButtons(chatId, text, buttons);

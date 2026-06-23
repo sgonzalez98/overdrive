@@ -340,14 +340,78 @@ public final class BsNativeLayer {
         } catch (Throwable t) {
             logger.debug("clusterDisplaySize failed: " + t.getMessage());
         }
-        // Reached only when DisplayManager couldn't surface the fission display (its
-        // cache misses the foreign uid-1000 display on many models) — we return the
-        // fixed 1920×720. Warn loudly: on a model whose real cluster panel differs,
-        // this mis-sizes the BS card. Pair with resolveFissionDisplay() for the id;
-        // a future pass can parse "real W x H" from that display's dumpsys block.
-        logger.warn("clusterDisplaySize: fission panel not found via DisplayManager — "
-                + "using fixed 1920x720 fallback (may mis-size on non-Seal clusters)");
+        // DisplayManager couldn't surface the fission display (its cache misses the
+        // foreign uid-1000 display on many models). Before giving up to the fixed
+        // 1920×720, parse the AUTHORITATIVE real W×H from the fission display's own
+        // `dumpsys display` block (same source resolveFissionDisplay uses for the id /
+        // layerStack — it reflects reality even when the DisplayManager cache is stale).
+        // This is what stops a non-Seal cluster (real panel ≠ 1920×720) from silently
+        // snapping to the fallback and mis-sizing / under-rendering the projection.
+        Point fromDump = clusterDisplaySizeViaDumpsys();
+        if (fromDump != null && fromDump.x > 0 && fromDump.y > 0) {
+            logger.info("clusterDisplaySize: resolved " + fromDump.x + "x" + fromDump.y
+                    + " from dumpsys (DisplayManager cache missed the fission display)");
+            return fromDump;
+        }
+        // Only now fall back to the fixed 1920×720. Warn loudly: on a model whose real
+        // cluster panel differs AND whose dumpsys layout we couldn't parse, this
+        // mis-sizes the projection.
+        logger.warn("clusterDisplaySize: fission panel not found via DisplayManager OR "
+                + "dumpsys — using fixed 1920x720 fallback (may mis-size on non-Seal clusters)");
         return p;
+    }
+
+    /**
+     * Parse the fission cluster display's REAL physical resolution from
+     * {@code dumpsys display}, robust to per-model output layout. Returns null if no
+     * fission block with a parseable {@code W x H} is found.
+     *
+     * <p>The logical-display DisplayInfo line for the fission display inlines its real
+     * size, e.g.
+     *   {@code DisplayInfo{"fission_bg_xdjaVirtualSurface, displayId 1", real 1920 x 720, ...}}
+     * or {@code ... 1920 x 720, ...} / {@code ... 1920x720 ...}. We scan for a line
+     * containing {@code "fission"} and extract the first {@code <W> x <H>} (or
+     * {@code <W>x<H>}) integer pair on it. Same uid-2000/shell dumpsys access + same
+     * "fission" keying as {@link #resolveFissionDisplay()}, so it works wherever that
+     * does. Bounds-checked (1..8192) so a stray small pair (e.g. a density "1 x 1")
+     * can't win. Best-effort: any failure returns null and the caller uses its fallback.
+     */
+    private static Point clusterDisplaySizeViaDumpsys() {
+        Process proc = null;
+        try {
+            proc = new ProcessBuilder("dumpsys", "display").redirectErrorStream(true).start();
+            java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(proc.getInputStream()));
+            // <W> x <H> with optional spaces around the 'x' (e.g. "1920 x 720" or "1920x720").
+            java.util.regex.Pattern dim =
+                    java.util.regex.Pattern.compile("(\\d{3,4})\\s*[xX]\\s*(\\d{3,4})");
+            String line;
+            Point best = null;
+            while ((line = r.readLine()) != null) {
+                if (!line.toLowerCase(java.util.Locale.US).contains("fission")) continue;
+                java.util.regex.Matcher mt = dim.matcher(line);
+                while (mt.find()) {
+                    int w = Integer.parseInt(mt.group(1));
+                    int h = Integer.parseInt(mt.group(2));
+                    // Plausible panel dimensions only; prefer the LARGEST pair on the
+                    // line (the real resolution, not an inset/density artifact).
+                    if (w >= 200 && w <= 8192 && h >= 200 && h <= 8192) {
+                        if (best == null || (long) w * h > (long) best.x * best.y) {
+                            best = new Point(w, h);
+                        }
+                    }
+                }
+                if (best != null) {
+                    logger.info("clusterDisplaySizeViaDumpsys raw: " + line.trim());
+                    return best;
+                }
+            }
+        } catch (Throwable t) {
+            logger.debug("clusterDisplaySizeViaDumpsys failed: " + t.getMessage());
+        } finally {
+            if (proc != null) try { proc.destroy(); } catch (Throwable ignored) {}
+        }
+        return null;
     }
 
     /** Resolved cluster (fission) display descriptor from {@code dumpsys display}.
@@ -442,12 +506,28 @@ public final class BsNativeLayer {
                 // stack. On a model where the display IS live, its line carries state ON,
                 // so this passes and behaviour is unchanged. Strictly safer: it can only
                 // make resolution MORE conservative, never paint a card it wouldn't have.
-                // Token-aware liveness check: require a standalone "state on" /
-                // "state=on" token (word boundaries) so a substring like
-                // "state onhold" or "restate one" on a stale fission diagnostic line
-                // does NOT spoof the gate and re-admit a dead stack. Matches every
-                // real dumpsys form ("state ON," / "state ON}" / "state=ON" / EOL).
-                if (!low.matches(".*\\bstate[ =]+on\\b.*")) continue;
+                // (Liveness gate below is now fail-safe: reject only on a POSITIVE dead
+                // signal, never require an affirmative live token — see the comment at
+                // the gate. Word boundaries avoid matching "state offset"/etc.)
+                // DIAGNOSTIC: log the RAW fission DisplayInfo line(s) we parse, so the
+                // next on-car capture shows this trim's EXACT dumpsys token format
+                // (layerStack / state) — the one datum missing from every prior log that
+                // left the live-vs-fallback-stack question unanswerable.
+                logger.info("resolveFissionDisplay raw: " + line.trim());
+                // LIVENESS GATE — FAIL-SAFE (inverted from the over-strict v26.8 form).
+                // v26.8 REQUIRED a same-line "state on"/"state=on" before accepting the
+                // line; if THIS trim prints the state token in a different form (e.g.
+                // "mState=ON", or state on a neighbouring line), that gate WRONGLY
+                // rejected a genuinely live fission line → resolveFissionDisplay returned
+                // nothing usable → clusterLayerStack fell through to the FALLBACK CONSTANT
+                // 1 (a non-resolved stack) → BS card tagged onto the wrong stack = BLACK,
+                // which matches the video(v25.4 lenient)→black(v26.8 gate) crossover on
+                // byd-48eafd47. Invert to fail-safe: only REJECT a line that POSITIVELY
+                // reports the display is NOT live (state off / state unknown). A line
+                // with no parseable state token is ACCEPTED (v25.4 lenient behaviour),
+                // so we never over-reject a trim whose format we don't recognise; we
+                // still skip a genuinely dead/destroyed entry that says "state off".
+                if (low.matches(".*\\bstate[ =]+(off|unknown)\\b.*")) continue;
                 // Capture id + stack ATOMICALLY from the authoritative DisplayInfo line
                 // (the one that actually carries layerStack), not as independent halves
                 // accumulated across lines. A live fission display prints multiple
@@ -471,6 +551,13 @@ public final class BsNativeLayer {
                     foundId = id;                        // id-only line, no stack seen yet
                 }
             }
+            // DIAGNOSTIC: log the RESOLVED result so the next on-car log shows whether
+            // this trim yielded a parsed displayId/layerStack at all (vs nothing usable
+            // → clusterLayerStack falls to the FALLBACK CONSTANT). This + the per-line
+            // "resolveFissionDisplay raw:" above are the two datums every prior log
+            // lacked, which left code-vs-environment unanswerable.
+            logger.info("resolveFissionDisplay result: displayId=" + foundId
+                    + " layerStack=" + foundStack);
             return new FissionDisplay(foundId, foundStack);
         } catch (Throwable t) {
             logger.warn("resolveFissionDisplay parse failed: " + t.getMessage());
@@ -518,8 +605,22 @@ public final class BsNativeLayer {
 
     public static int clusterLayerStack(int fallback) {
         FissionDisplay fd = resolveFissionDisplay();
-        if (fd.layerStack >= 0) return fd.layerStack;   // live, authoritative
-        if (fd.displayId >= 0) return fallback;          // fission seen, stack unparsed → last-known-good
+        // DIAGNOSTIC: log WHICH branch we return so the next on-car log says definitively
+        // whether the card's stack is the PARSED-LIVE value (branch=live) or the
+        // FALLBACK CONSTANT (branch=fallback, meaning the real stack was never parsed —
+        // a non-resolved stack the card gets wrongly tagged onto = the suspected black).
+        // This is the one fact that separates a code bug (fallback) from environment
+        // (live stack but OEM never panel-composites it).
+        if (fd.layerStack >= 0) {
+            logger.info("clusterLayerStack: branch=live stack=" + fd.layerStack);
+            return fd.layerStack;   // live, authoritative
+        }
+        if (fd.displayId >= 0) {
+            logger.info("clusterLayerStack: branch=FALLBACK stack=" + fallback
+                    + " (displayId=" + fd.displayId + " but layerStack unparsed)");
+            return fallback;          // fission seen, stack unparsed → last-known-good
+        }
+        logger.info("clusterLayerStack: branch=UNRESOLVED (no fission display)");
         return STACK_UNRESOLVED;                          // no fission display → don't show
     }
 

@@ -32,6 +32,13 @@ BYD.events = {
     // v3 actor/severity/proximity filter state (item 6). Empty values = no filter.
     actorFilter: { class: '', severity: '', proximity: '' },
 
+    // Storage-volume filter. '' = all volumes (default — the index already
+    // spans internal + SD + USB). Otherwise 'INTERNAL' / 'SD_CARD' / 'USB',
+    // sent as the `storage` param to /api/recordings + /api/recordings/places.
+    // Surfaces clips across every storage location and lets the user narrow to
+    // one (e.g. "only what's on the SD card").
+    storageFilter: '',
+
     // Free-text place substring filter — separate from actorFilter.place
     // (which is the exact-match chip selection). Routed through
     // /api/recordings + /api/recordings/places as `placeContains=` and
@@ -811,6 +818,21 @@ BYD.events = {
     },
 
     /**
+     * Set the storage-volume filter ('' = all, 'INTERNAL' / 'SD_CARD' / 'USB')
+     * and reload. Server-side like the other filters so pagination +
+     * totalCount stay honest. Clips already span every volume in the index;
+     * this just narrows the view to one physical location.
+     */
+    setStorageFilter(value) {
+        this.storageFilter = value || '';
+        document.querySelectorAll('.filter-tabs[data-filter-row="storage"] .filter-chip').forEach(chip => {
+            chip.classList.toggle('active', (chip.dataset.storage || '') === (value || ''));
+        });
+        this.currentPage = 1;
+        this.loadRecordings();
+    },
+
+    /**
      * Rebuild the dynamic Place chip row from the currently loaded
      * recordings. Called from loadRecordings() after each successful
      * fetch. Hidden when no clip in the loaded set carries a
@@ -851,6 +873,7 @@ BYD.events = {
             if (this.actorFilter && this.actorFilter.severity)  params.push('severity=' + encodeURIComponent(this.actorFilter.severity));
             if (this.actorFilter && this.actorFilter.proximity) params.push('proximity=' + encodeURIComponent(this.actorFilter.proximity));
             if (this.placeContainsQuery)                        params.push('placeContains=' + encodeURIComponent(this.placeContainsQuery));
+            if (this.storageFilter)                             params.push('storage=' + encodeURIComponent(this.storageFilter));
             const queryStr = params.join('&');
             // Fetch memo: paging through the same filter set (prev/next
             // page) reissues loadRecordings → loadPlaceChips with the
@@ -1301,6 +1324,8 @@ BYD.events = {
             // exact chip AND the typed substring. Indexed via place_short
             // / place_medium / place_display LIKE in RecordingsIndex.
             if (this.placeContainsQuery)                        params.push('placeContains=' + encodeURIComponent(this.placeContainsQuery));
+            // Storage-volume narrowing — '' = all volumes.
+            if (this.storageFilter)                             params.push('storage=' + encodeURIComponent(this.storageFilter));
             params.push('page=' + this.currentPage);
             params.push('pageSize=' + this.pageSize);
             url += '?' + params.join('&');
@@ -1346,6 +1371,31 @@ BYD.events = {
         }
     },
     
+    // Build the per-clip storage chip (INTERNAL / SD_CARD / USB) for the
+    // recordings list meta row. Returns '' when the server didn't tag the
+    // clip (rec.storage absent) so legacy rows render unchanged. Inline SVGs
+    // match the existing icon style in this file; ES5-safe for the Chrome 58
+    // head-unit WebView (no template literals / arrow funcs).
+    _storageChip(storage) {
+        var s = (storage || '').toUpperCase();
+        if (s === 'SD_CARD') {
+            return '<span class="storage-chip storage-sd" title="' + BYD.i18n.t('events.storage_sd_card') + '">' +
+                '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h11l5 5v11a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/><path d="M9 4v4M13 4v4M17 9v3"/></svg>' +
+                BYD.i18n.t('events.storage_sd_card') + '</span>';
+        }
+        if (s === 'USB') {
+            return '<span class="storage-chip storage-usb" title="' + BYD.i18n.t('events.storage_usb') + '">' +
+                '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="19" r="2"/><path d="M12 17V3M8 7l4-4 4 4M6 12h12v3a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2z"/></svg>' +
+                BYD.i18n.t('events.storage_usb') + '</span>';
+        }
+        if (s === 'INTERNAL') {
+            return '<span class="storage-chip storage-internal" title="' + BYD.i18n.t('events.storage_internal') + '">' +
+                '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="7" y1="9" x2="7" y2="9"/><line x1="7" y1="15" x2="17" y2="15"/></svg>' +
+                BYD.i18n.t('events.storage_internal') + '</span>';
+        }
+        return '';
+    },
+
     renderRecordings() {
         const list = document.getElementById('recordingsList');
 
@@ -1417,6 +1467,13 @@ BYD.events = {
                     default: return '';
                 }
             })(rec.peakProximity);
+            // Per-clip storage tag. Surfaces where the clip ACTUALLY landed
+            // (INTERNAL / SD_CARD / USB) so the silent SD→internal fallback
+            // — the SD card is bridged behind the USB power rail, so cutting
+            // USB power unmounts it and recordings fall back to internal — is
+            // visible at the file level. Omitted when the server couldn't
+            // classify (rec.storage absent) so legacy rows render unchanged.
+            const storageChip = this._storageChip(rec.storage);
             let actorPills = '';
             if (personCount > 0)  actorPills += '<span class="pill">👤 ' + personCount + '</span>';
             if (vehicleCount > 0) actorPills += '<span class="pill">🚗 ' + vehicleCount + '</span>';
@@ -1452,7 +1509,7 @@ BYD.events = {
                 '</div>' +
                 '<div class="recording-info">' +
                 '<div class="recording-name"><span class="recording-badge ' + rec.type + '">' + badge + '</span>' + sevBadge + fname + '</div>' +
-                '<div class="recording-meta"><span>' + rec.dateFormatted + '</span><span>' + rec.timeFormatted + '</span><span>' + rec.sizeFormatted + '</span></div>' +
+                '<div class="recording-meta"><span>' + rec.dateFormatted + '</span><span>' + rec.timeFormatted + '</span><span>' + rec.sizeFormatted + '</span>' + storageChip + '</div>' +
                 placeRow +
                 actorRow +
                 '</div>' +

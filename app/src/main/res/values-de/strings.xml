@@ -1165,12 +1165,14 @@
     <string name="roadsense_map_search_to_save">Suche einen Ort zum setzen %1$s</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">Reise wiederhergestellt</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">Der Token wird sicher gespeichert und zwischen App- und Daemon-Prozessen geteilt.</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">Das Token wird verschlüsselt gespeichert und zwischen der App und dem Daemon-Prozess geteilt.</string>
     <string name="cloudflared_token_hint">Cloudflared-Token eingeben</string>
     <string name="cloudflare_paid_version">Cloudflare Bezahlversion</string>
-    <string name="dialog_cloudflared_settings_title">🌐 Cloudflared-Einstellungen</string>
-    <string name="dialog_cloudflared_settings_message">Legen Sie fest, ob Sie die kostenpflichtige Cloudflare-Version oder trycloudflare verwenden. Wenn Sie die kostenpflichtige Version verwenden, geben Sie Ihren Tunnel-Token ein.</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">Wenn die Bezahlversion eingestellt ist, darf der Token nicht leer sein</string>
+    <string name="dialog_cloudflared_settings_title">Cloudflared-Einstellungen</string>
+    <string name="dialog_cloudflared_settings_message">Legen Sie fest, ob Sie das kostenpflichtige Cloudflare oder trycloudflare verwenden. Wenn Sie das kostenpflichtige Cloudflare verwenden, geben Sie Ihr Tunnel-Token ein.</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">Wenn Sie die Bezahlversion festlegen, darf das Token nicht leer sein</string>
+    <string name="toast_cloudflared_token_invalid">Ungültiges Token: Verwenden Sie nur Buchstaben, Zahlen und die Zeichen . _ - =</string>
     <string name="toast_cloudflared_saved_settings">Cloudflared-Einstellungen gespeichert</string>
 </resources>

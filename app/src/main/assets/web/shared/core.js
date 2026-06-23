@@ -542,6 +542,7 @@ BYD.units = {
 BYD.core = {
     deviceId: null,
     pollInterval: null,
+    tickInFlight: false,
     lastStatus: null,
     // Counts /status fetch failures (network error, non-2xx, JSON parse).
     // Drives the UI "stale" / "disconnected" indicators and a sooner retry,
@@ -553,6 +554,12 @@ BYD.core = {
     hasEverHadVehicleData: false,
     POLL_INTERVAL_OK_MS: 5000,
     POLL_INTERVAL_RETRY_MS: 1500,
+    // Cadence while the tab is hidden/backgrounded. A tab left open over the
+    // tunnel (e.g. a phone pointed at the zrok URL) would otherwise poll
+    // /status every 5 s, 24/7 (~17k polls/day) over cellular. When nothing is
+    // on screen there is nothing to refresh, so back off hard and resume
+    // instantly on show (visibilitychange below forces an immediate tick).
+    POLL_INTERVAL_HIDDEN_MS: 60000,
     POLL_STALE_AFTER_FAILURES: 2,
 
     /**
@@ -593,9 +600,40 @@ BYD.core = {
     startStatusPolling() {
         var self = this;
         function tick() {
+            // Single-flight guard: never run two self-rescheduling chains at
+            // once. A visibilitychange firing mid-fetch must not spawn a
+            // second loop (which would double the poll rate and leak a timer).
+            if (self.tickInFlight) { return; }
+            self.tickInFlight = true;
+            self.pollInterval = null;  // no pending timer while fetching
             self.refreshStatus().then(function (ok) {
-                var delay = ok ? self.POLL_INTERVAL_OK_MS : self.POLL_INTERVAL_RETRY_MS;
+                self.tickInFlight = false;
+                var delay;
+                if (typeof document !== 'undefined' && document.hidden) {
+                    // Tab not visible — back off to the hidden cadence
+                    // regardless of OK/retry to stop background cellular polling.
+                    delay = self.POLL_INTERVAL_HIDDEN_MS;
+                } else {
+                    delay = ok ? self.POLL_INTERVAL_OK_MS : self.POLL_INTERVAL_RETRY_MS;
+                }
                 self.pollInterval = setTimeout(tick, delay);
+            }, function () {
+                // refreshStatus() is async and could reject — clear the flag and
+                // reschedule so a thrown error can never wedge polling forever.
+                self.tickInFlight = false;
+                self.pollInterval = setTimeout(tick, self.POLL_INTERVAL_RETRY_MS);
+            });
+        }
+        // Resume immediately when the tab becomes visible again: cancel the
+        // pending (possibly 60 s) hidden-cadence timer and tick now so the
+        // dashboard is fresh the instant the user looks at it. tick() is a
+        // no-op if a fetch is already in flight (guarded above).
+        if (typeof document !== 'undefined' && document.addEventListener) {
+            document.addEventListener('visibilitychange', function () {
+                if (!document.hidden) {
+                    if (self.pollInterval) { clearTimeout(self.pollInterval); self.pollInterval = null; }
+                    tick();
+                }
             });
         }
         tick();
@@ -915,11 +953,16 @@ BYD.core = {
         // Update power display
         if (evPower) {
             if (isCharging) {
-                if (powerKW > 0) {
-                    var prefix = isEstimated ? '~' : '';
-                    evPower.textContent = prefix + powerKW.toFixed(1) + ' kW';
+                if (powerKW > 0 && !isEstimated) {
+                    // Real measured charging power.
+                    evPower.textContent = powerKW.toFixed(1) + ' kW';
                 } else {
-                    evPower.textContent = '0.0 kW';
+                    // No live power reading yet (estimate or 0). Don't fabricate a
+                    // precise kW — a made-up "~7.0 kW" reads as a real measurement
+                    // and was wrong vs the actual charger. Show the charging state
+                    // without a number until the typed instrument listener delivers
+                    // a live value, then the branch above takes over.
+                    evPower.textContent = BYD.i18n.t('status.charging') || 'Charging';
                 }
             } else {
                 evPower.textContent = powerKW > 0 ? powerKW.toFixed(1) + ' kW' : '-- kW';

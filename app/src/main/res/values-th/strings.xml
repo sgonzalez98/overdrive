@@ -1155,12 +1155,14 @@
     <string name="roadsense_map_search_to_save">ค้นหาสถานที่เพื่อตั้งเป็น %1$s</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">กู้คืนการเดินทางแล้ว</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">โทเค็นถูกจัดเก็บอย่างปลอดภัยและใช้ร่วมกันระหว่างแอปและกระบวนการดีมอน</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">โทเค็นจะถูกจัดเก็บแบบเข้ารหัสและใช้ร่วมกันระหว่างแอปและกระบวนการ daemon</string>
     <string name="cloudflared_token_hint">ป้อนโทเค็น cloudflared</string>
     <string name="cloudflare_paid_version">Cloudflare เวอร์ชันชำระเงิน</string>
-    <string name="dialog_cloudflared_settings_title">🌐 การตั้งค่า Cloudflared</string>
-    <string name="dialog_cloudflared_settings_message">กำหนดว่าคุณกำลังใช้ Cloudflare แบบชำระเงินหรือ trycloudflare หากคุณใช้ Cloudflare แบบชำระเงิน ให้ป้อนโทเค็นอุโมงค์ของคุณ</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">หากตั้งค่าเป็นเวอร์ชันชำระเงิน โทเค็นต้องไม่ว่างเปล่า</string>
+    <string name="dialog_cloudflared_settings_title">การตั้งค่า Cloudflared</string>
+    <string name="dialog_cloudflared_settings_message">กำหนดว่าคุณกำลังใช้ Cloudflare แบบชำระเงินหรือ trycloudflare หากคุณใช้ Cloudflare แบบชำระเงิน ให้ป้อนโทเค็นทันเนลของคุณ</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">หากคุณตั้งค่าเวอร์ชันชำระเงิน โทเค็นต้องไม่ว่างเปล่า</string>
+    <string name="toast_cloudflared_token_invalid">โทเค็นไม่ถูกต้อง: ใช้ได้เฉพาะตัวอักษร ตัวเลข และอักขระ . _ - = เท่านั้น</string>
     <string name="toast_cloudflared_saved_settings">บันทึกการตั้งค่า Cloudflared แล้ว</string>
 </resources>

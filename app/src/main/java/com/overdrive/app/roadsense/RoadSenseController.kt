@@ -93,6 +93,10 @@ class RoadSenseController @JvmOverloads constructor(
     // every poll. Declared BEFORE [rejection] so buildRejectionFilter's write to it
     // in the initializer below isn't clobbered by a later default initializer.
     private var lastYawCfg: YawCfg? = null
+    // Last detection-sensitivity multiplier pushed into the (stateful) detector, so the
+    // ~2 Hz poll re-pushes ONLY when the user's slider actually changed — not every tick.
+    // NaN = nothing applied yet (forces the first push to seed the detector from config).
+    private var lastDetectionSensitivity: Float = Float.NaN
     // RejectionFilter is stateless but carries the speed-adaptive cornering-yaw
     // tunables as constructor params; rebuilt by [maybeRebuildRejection] when those
     // config knobs change (rare — a settings edit). @Volatile so the IMU thread's
@@ -613,6 +617,10 @@ class RoadSenseController @JvmOverloads constructor(
         // Pick up any change to the speed-adaptive cornering-yaw knobs (rare; off the
         // 100 Hz IMU path — this is the ~2 Hz vehicle poll).
         maybeRebuildRejection(cfgSnap)
+        // Pick up any change to the user's detection-sensitivity slider and push it into
+        // the (stateful) detector LIVE — a plain @Volatile assignment, so no restart, no
+        // lost in-flight event. Same off-the-100-Hz-path cadence as the yaw rebuild.
+        maybeApplyDetectionSensitivity(cfgSnap)
         val dyn = vehicleSource.latest(now)
         val accOn = com.overdrive.app.monitor.AccMonitor.isAccOn()
         val accAuth = com.overdrive.app.monitor.AccMonitor.isAccStateAuthoritative()
@@ -1735,6 +1743,23 @@ class RoadSenseController @JvmOverloads constructor(
             yawRejectCeilRps = cfg.cornerYawCeilRps,
             speedAdaptiveYaw = cfg.cornerYawSpeedAdaptive,
         )
+    }
+
+    /**
+     * Push the user's detection-sensitivity slider into the detector when it changed.
+     * Called from the ~2 Hz vehicle poll (off the 100 Hz IMU path). Unlike the yaw
+     * knobs this does NOT rebuild anything — [EventDetector.setThresholdScale] only
+     * assigns a @Volatile multiplier the hot path reads per sample, so the change is
+     * live, restart-free, and cannot disturb an in-flight event or the detector's
+     * ring-buffer/debounce state. Re-pushes only on an actual change (NaN seed forces
+     * the first push) so a steady slider costs nothing.
+     */
+    private fun maybeApplyDetectionSensitivity(cfg: RoadSenseConfig.Snapshot) {
+        val want = cfg.detectionSensitivity
+        if (!lastDetectionSensitivity.isNaN() && lastDetectionSensitivity == want) return
+        val applied = detector.setThresholdScale(want)
+        lastDetectionSensitivity = applied
+        plog.info("detection sensitivity → ${"%.2f".format(applied)} (×threshold)")
     }
 
     /** Rebuild the (stateless) RejectionFilter if the corner-yaw config changed.

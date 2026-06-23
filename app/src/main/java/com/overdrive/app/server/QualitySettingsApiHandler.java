@@ -352,7 +352,12 @@ public class QualitySettingsApiHandler {
             
             // Handle storage type changes first (before limit changes)
             boolean storageTypeChanged = false;
-            
+            // Track explicitly-requested storage type changes that the StorageManager
+            // rejected (e.g. target volume unavailable). We MUST NOT report HTTP 200
+            // success for these: the client treats success as "persisted" and would
+            // diverge from the daemon's true (unchanged) state on the next reload.
+            String storageTypeError = null;
+
             if (settings.has("recordingsStorageType")) {
                 StorageManager.StorageType type = parseStorageType(settings.getString("recordingsStorageType"));
                 boolean success = storage.setRecordingsStorageType(type);
@@ -361,6 +366,7 @@ public class QualitySettingsApiHandler {
                     CameraDaemon.log("Recordings storage type set to: " + type);
                 } else {
                     CameraDaemon.log("Failed to set recordings storage type to " + type + " - not available");
+                    storageTypeError = "Recordings storage " + type + " is not available";
                 }
             }
 
@@ -384,7 +390,17 @@ public class QualitySettingsApiHandler {
                     }
                 } else {
                     CameraDaemon.log("Failed to set surveillance storage type to " + type + " - not available");
+                    storageTypeError = "Surveillance storage " + type + " is not available";
                 }
+            }
+
+            // A requested storage type change was rejected. Fail the request so the
+            // client can detect the divergence and revert its optimistic UI/config
+            // instead of believing the change persisted (HTTP 200 = "persisted").
+            if (storageTypeError != null) {
+                CameraDaemon.log("Storage settings POST rejected: " + storageTypeError);
+                HttpResponse.sendJsonError(out, storageTypeError);
+                return;
             }
             
             // Calculate how much will be deleted before applying changes
@@ -614,6 +630,23 @@ public class QualitySettingsApiHandler {
                     }
                 } catch (Exception e) {
                     CameraDaemon.log("blindspot target retarget dispatch failed: " + e.getMessage());
+                }
+            }
+            // A blind-spot merge-mode change (both/side/rear) must take effect live.
+            // The value is already persisted by updateSection above; push it to the
+            // running BS scaler so the on-screen view switches without an ACC cycle.
+            // No-op when the lane isn't up (next enable re-applies it via
+            // applyBlindSpotCalibration). Covers no-bridge (tunnel/browser) clients.
+            if ("blindspot".equals(section) && data.has("mergeMode")) {
+                try {
+                    com.overdrive.app.surveillance.GpuSurveillancePipeline p = CameraDaemon.getGpuPipeline();
+                    if (p != null) {
+                        String mode = data.optString("mergeMode", "both");
+                        int code = "side".equals(mode) ? 1 : ("rear".equals(mode) ? 2 : 0);
+                        p.setBlindSpotMergeMode(code);
+                    }
+                } catch (Exception e) {
+                    CameraDaemon.log("blindspot merge-mode dispatch failed: " + e.getMessage());
                 }
             }
             // A cluster-layout (size-profile) change must take effect live: force the

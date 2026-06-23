@@ -421,6 +421,42 @@ public class HardwareEventRecorderGpu {
         if (ptsOriginUs < 0) {
             ptsOriginUs = info.presentationTimeUs;
         }
+        // Clock-domain jump guard. The encoder surface is stamped (via
+        // eglPresentationTimeANDROID) with a PTS sourced from either the BYD
+        // HAL sensor clock (a stuck, ~uptime-epoch counter) or System.nanoTime
+        // (CLOCK_MONOTONIC). When the camera pipeline transitions between those
+        // domains — most often after a camera/encoder restart triggered by an
+        // SD-card unmount, the GL watchdog, or an ACC bounce, where the stuck-
+        // clock latch re-evaluates while a muxer's origin is already seeded —
+        // two consecutive frames land in different domains and differ by
+        // billions of µs. Subtracting the old origin then records that gap as
+        // literal playback time: a 2-min clip's moov declares 55 min – 1 hr
+        // (the exact field symptom). MediaMuxer also drops every "future"
+        // sample after the jump, leaving the file both mis-timed AND near-empty.
+        //
+        // Detect a jump from the previous source PTS larger than any real
+        // inter-frame gap can be, and RE-ANCHOR: shift ptsOriginUs so this
+        // frame continues one nominal frame-interval after the last written
+        // one. The resulting clip has a small (sub-frame-interval) seam at the
+        // transition instead of a 55-min cliff, and stays fully playable.
+        if (lastSourcePtsUs >= 0) {
+            long sourceGap = info.presentationTimeUs - lastSourcePtsUs;
+            if (sourceGap < 0 || sourceGap > MAX_PLAUSIBLE_INTERFRAME_GAP_US) {
+                long frameIntervalUs = fps > 0 ? (1_000_000L / fps) : 33_333L;
+                // New origin places info.presentationTimeUs at
+                // (lastRebased + frameInterval): rebasedPts below becomes that
+                // value, preserving a monotonic, plausibly-spaced timeline.
+                long targetRebased = (lastFramePtsUs >= 0 ? lastFramePtsUs : 0) + frameIntervalUs;
+                ptsOriginUs = info.presentationTimeUs - targetRebased;
+                long n = ptsReanchorCount.incrementAndGet();
+                if (n % 50 == 1) {
+                    logger.warn("PTS clock-domain jump #" + n + " (source gap "
+                        + sourceGap + "us > " + MAX_PLAUSIBLE_INTERFRAME_GAP_US
+                        + "us) — re-anchored origin to keep moov duration honest");
+                }
+            }
+        }
+        lastSourcePtsUs = info.presentationTimeUs;
         long rebasedPts = info.presentationTimeUs - ptsOriginUs;
         // Defensive: a packet with a PTS earlier than origin would produce
         // a negative rebased PTS, which MediaMuxer rejects with
@@ -970,6 +1006,29 @@ public class HardwareEventRecorderGpu {
     private int recordedFrames = 0;
     private long firstFramePtsUs = -1;   // PTS of first frame written to muxer
     private long lastFramePtsUs = -1;    // PTS of last frame written to muxer
+    // Last ABSOLUTE (un-rebased, source-domain) video PTS handed to
+    // writeRebased. Used by the clock-domain jump guard to detect a
+    // discontinuity (HW→nanoTime transition or an origin re-seeded in one
+    // clock domain that then receives a frame in the other) and re-anchor the
+    // origin instead of recording a multi-billion-µs gap as literal playback
+    // time. Reset to -1 wherever ptsOriginUs is reset; (re)seeded on the
+    // first write of each segment. See writeRebased + MAX_PLAUSIBLE_INTERFRAME_GAP_US.
+    private long lastSourcePtsUs = -1;
+    // Count of clock-domain re-anchors performed by writeRebased. Surfaced
+    // for field diagnostics; logged every 50 to keep the log tractable.
+    private final java.util.concurrent.atomic.AtomicLong ptsReanchorCount =
+        new java.util.concurrent.atomic.AtomicLong(0);
+    // Largest plausible inter-frame gap for a real recording. Clips rotate
+    // every 2 minutes (SEGMENT_DURATION_MS) and the GL watchdog force-restarts
+    // the pipeline after a 3 s frame stall, so no legitimate gap between two
+    // consecutive written video frames approaches this value even at the low
+    // fps floor. A larger gap is a clock-domain jump (the BYD DiLink HAL
+    // timestamp is a stuck, different-epoch uptime counter; transitioning to
+    // System.nanoTime mid-clip yields a gap of billions of µs). Written
+    // verbatim, that gap is what makes a 2-min clip's moov declare a
+    // 55-min-to-1-hr duration. 10 s is comfortably above any real gap and far
+    // below the spurious one, so the guard never trips in normal operation.
+    private static final long MAX_PLAUSIBLE_INTERFRAME_GAP_US = 10_000_000L;
     // Duration (seconds) of the most recently finalized clip, captured at
     // rename time before the PTS bookkeeping is reset for the next segment.
     // Read by SurveillanceEngineGpu to caption its gated Telegram video send.
@@ -2139,6 +2198,7 @@ public class HardwareEventRecorderGpu {
             firstFramePtsUs = -1;
             lastFramePtsUs = -1;
             ptsOriginUs = -1;
+            lastSourcePtsUs = -1;
             lastAudioPtsUs = -1L;
             // Seed the disk-write clock at segment open so the wedge ticker's
             // grace window is measured from "muxer just opened," not a stale
@@ -2826,6 +2886,7 @@ public class HardwareEventRecorderGpu {
         firstFramePtsUs = -1;
         lastFramePtsUs = -1;
         ptsOriginUs = -1;
+        lastSourcePtsUs = -1;
         lastAudioPtsUs = -1L;
         segmentStartTime = 0;
         segmentNumber = 0;
@@ -4092,6 +4153,7 @@ public class HardwareEventRecorderGpu {
                 firstFramePtsUs = -1;
                 lastFramePtsUs = -1;
                 ptsOriginUs = -1;
+                lastSourcePtsUs = -1;
                 lastAudioPtsUs = -1L;
                 // Re-seed the disk-write clock on rotation so the new segment
                 // gets a fresh grace window (mirrors the trigger-open seed).
@@ -4403,18 +4465,65 @@ public class HardwareEventRecorderGpu {
 
         File[] orphans = directory.listFiles((dir, name) ->
                 name.endsWith(".tmp") || name.endsWith(".broken"));
-        if (orphans == null) return;
+        if (orphans == null) {
+            // FUSE-bridged SD/USB returns null under daemon UID 2000. Without this
+            // fallback the external dir is skipped and .tmp/.broken partials pile up
+            // on the card (counted by StorageManager's size gate but unreapable),
+            // parking the folder over its limit. Use StorageManager's shell-ls
+            // fallback for each suffix and merge.
+            try {
+                com.overdrive.app.storage.StorageManager sm =
+                        com.overdrive.app.storage.StorageManager.getInstance();
+                java.util.List<File> merged = new java.util.ArrayList<>();
+                java.util.Collections.addAll(merged, sm.listFilesWithFallback(directory, ".tmp"));
+                java.util.Collections.addAll(merged, sm.listFilesWithFallback(directory, ".broken"));
+                orphans = merged.toArray(new File[0]);
+            } catch (Throwable t) {
+                logger.warn("cleanupOrphanedTmpFiles: shell fallback failed for "
+                        + directory.getAbsolutePath() + ": " + t.getMessage());
+                return;
+            }
+        }
+        if (orphans == null || orphans.length == 0) return;
 
         long now = System.currentTimeMillis();
         for (File f : orphans) {
             long age = now - f.lastModified();
             if (age > 5 * 60 * 1000) { // Older than 5 minutes
                 long size = f.length();
-                if (f.delete()) {
+                boolean ok = f.delete();
+                if (!ok) {
+                    // Java delete fails on the SD FUSE mount under UID 2000 the same
+                    // way listFiles() does — fall back to a shell rm so the partial
+                    // is actually freed.
+                    ok = deleteViaShell(f);
+                }
+                if (ok) {
                     logger.info("Cleaned orphan: " + f.getName() + " (" + (size / 1024)
                             + " KB, age=" + (age / 1000) + "s)");
                 }
             }
+        }
+    }
+
+    /** Shell {@code rm} fallback for files Java {@link File#delete()} can't remove
+     *  (SD/USB FUSE mount owned by a different UID). Bounded so a stuck FUSE volume
+     *  can't pin the sweep. Returns true on exit code 0. */
+    private static boolean deleteViaShell(File file) {
+        Process p = null;
+        try {
+            p = Runtime.getRuntime().exec(new String[]{"rm", file.getAbsolutePath()});
+            boolean exited = p.waitFor(4, java.util.concurrent.TimeUnit.SECONDS);
+            if (!exited) {
+                p.destroyForcibly();
+                return false;
+            }
+            return p.exitValue() == 0;
+        } catch (Exception e) {
+            if (p != null) {
+                try { p.destroyForcibly(); } catch (Exception ignored) {}
+            }
+            return false;
         }
     }
     

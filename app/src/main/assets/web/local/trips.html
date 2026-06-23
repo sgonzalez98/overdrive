@@ -28,7 +28,7 @@
         ];
     </script>
     <script src="../shared/app-tabs.js"></script>
-    <link rel="stylesheet" href="../shared/styles.css?v=15">
+    <link rel="stylesheet" href="../shared/styles.css?v=16">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="../shared/leaflet.css" />
@@ -754,6 +754,47 @@
             color: var(--danger);
             background: rgba(239,68,68,0.1);
             box-shadow: 0 0 0 1px rgba(239,68,68,0.3) inset;
+        }
+        /* Recovered trip: neutral badge (no score exists) + small tag pill. */
+        .trip-score-badge.recovered {
+            color: var(--text-muted);
+            background: var(--panel-overlay-bg-soft, rgba(148,163,184,0.12));
+            box-shadow: 0 0 0 1px rgba(148,163,184,0.28) inset;
+        }
+        .trip-score-badge.recovered svg { width: 18px; height: 18px; }
+        .trip-recovered-tag {
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            background: rgba(148,163,184,0.14);
+            border: 1px solid rgba(148,163,184,0.28);
+            border-radius: 999px;
+            padding: 2px 8px;
+            line-height: 1.4;
+            white-space: nowrap;
+        }
+        /* Detail-view banner explaining recovered-trip gaps. */
+        .recovered-banner {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            margin: 12px 0;
+            padding: 12px 14px;
+            font-size: 12px;
+            line-height: 1.5;
+            color: var(--text-secondary);
+            background: rgba(148,163,184,0.10);
+            border: 1px solid rgba(148,163,184,0.24);
+            border-radius: var(--radius-sm, 12px);
+        }
+        .recovered-banner svg {
+            width: 18px;
+            height: 18px;
+            flex-shrink: 0;
+            margin-top: 1px;
+            color: var(--text-muted);
         }
         .trip-capsules {
             display: flex;
@@ -1601,6 +1642,32 @@
                         </div>
                     </div>
 
+                    <!-- Recover missing trips from telemetry files on disk.
+                         For history lost when the storage volume was briefly
+                         undetected. User-triggered (never automatic). -->
+                    <div class="card" data-tab="storage" style="margin-top:16px;">
+                        <div class="card-header">
+                            <div class="card-title">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M3 12a9 9 0 1 0 9-9 9 9 0 0 0-6.36 2.64L3 8"/><path d="M3 3v5h5"/>
+                                </svg>
+                                <span data-i18n="trip.recover.title">Recover Missing Trips</span>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="setting-row" style="border-bottom:none;">
+                                <div class="setting-info">
+                                    <div class="setting-name" data-i18n="trip.recover.action">Rebuild from storage</div>
+                                    <div class="setting-desc" data-i18n="trip.recover.desc">If trips vanished from your history after an SD card was briefly undetected, this rebuilds them from the telemetry files still on disk. Distance, speed, route and elevation are restored; energy, cost and driving scores aren’t available for recovered trips. Safe to run anytime.</div>
+                                </div>
+                            </div>
+                            <div id="tripRecoverResult" class="setting-desc" style="display:none;margin:4px 0 12px;"></div>
+                            <div style="margin-top:12px;">
+                                <button class="btn btn-primary" id="tripRecoverBtn" onclick="TRIPS.recoverTrips()" style="width:100%;" data-i18n="trip.recover.button">Scan &amp; Recover Trips</button>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- BYD Dashcam Cleanup (shown when SD card selected) -->
                     <div class="card" data-tab="storage" id="tripCdrCleanupCard" style="display:none;margin-top:16px;">
                         <div class="card-header">
@@ -1711,6 +1778,7 @@
                             <div class="detail-stat"><div class="detail-stat-value" id="detailAvgSpeed">--</div><div class="detail-stat-label" id="detailAvgSpeedLabel" data-i18n="trip.detail.avg_kmh">Avg km/h</div></div>
                             <div class="detail-stat"><div class="detail-stat-value" id="detailMaxSpeed">--</div><div class="detail-stat-label" id="detailMaxSpeedLabel" data-i18n="trip.detail.max_kmh">Max km/h</div></div>
                             <div class="detail-stat"><div class="detail-stat-value" id="detailSocStart">--</div><div class="detail-stat-label" data-i18n="trip.detail.start_soc">Start SoC</div></div>
+                            <div class="detail-stat"><div class="detail-stat-value" id="detailSocEnd">--</div><div class="detail-stat-label" data-i18n="trip.detail.end_soc">End SoC</div></div>
                             <div class="detail-stat phev-only" id="detailFuelStartTile" style="display:none;"><div class="detail-stat-value" id="detailFuelStart" style="color:var(--warning);">--</div><div class="detail-stat-label" data-i18n="trip.detail.start_fuel">Start Fuel</div></div>
                             <div class="detail-stat phev-only" id="detailFuelEndTile" style="display:none;"><div class="detail-stat-value" id="detailFuelEnd" style="color:var(--warning);">--</div><div class="detail-stat-label" data-i18n="trip.detail.end_fuel">End Fuel</div></div>
                             <div class="detail-stat phev-only" id="detailLitresUsedTile" style="display:none;"><div class="detail-stat-value" id="detailLitresUsed" style="color:var(--warning);">--</div><div class="detail-stat-label" data-i18n="trip.detail.litres_used">Petrol Used</div></div>
@@ -1720,6 +1788,13 @@
                             <div class="detail-stat"><div class="detail-stat-value" id="detailElevLoss" style="color:var(--danger);">--</div><div class="detail-stat-label" data-i18n="trip.detail.elev_down">Elev ↓</div></div>
                         </div>
                         <div style="margin-top:8px;text-align:center;"><span id="detailGradientPill" style="display:none;"></span></div>
+                    </div>
+
+                    <!-- Recovered-trip banner: explains why battery/energy/score
+                         tiles are empty on a trip rebuilt from GPS telemetry. -->
+                    <div class="recovered-banner" id="detailRecoveredBanner" style="display:none;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+                        <span data-i18n="trip.recovered.detail_note">Recovered from telemetry. Distance, speed and elevation are reconstructed from GPS; battery, energy, cost and driving scores were not recorded for this trip.</span>
                     </div>
 
                     <!-- Timeline Slider -->
@@ -1823,7 +1898,7 @@
                     </div>
 
                     <!-- Driving DNA Breakdown (at bottom for deep-dive) -->
-                    <div class="scores-card">
+                    <div class="scores-card" id="scoreBreakdownCard">
                         <div class="card-title" style="margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
                             <div style="display:flex; align-items:center; gap:8px;">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:20px;height:20px;color:var(--brand-primary)"><polygon points="12 2 22 8.5 19 20 5 20 2 8.5"/></svg>
@@ -1933,7 +2008,7 @@
     <script src="../shared/pwa-init.js?v=index1"></script>
     <script src="../shared/core.js"></script>
     <script src="../shared/update-flow.js"></script>
-    <script src="../shared/trips.js?v=bootstrap2"></script>
+    <script src="../shared/trips.js?v=recovered1"></script>
     <script>
         function toggleSidebar() {
             document.getElementById('sidebar').classList.toggle('open');

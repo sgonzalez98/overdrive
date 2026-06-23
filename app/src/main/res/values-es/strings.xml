@@ -1165,12 +1165,14 @@
     <string name="roadsense_map_search_to_save">Busca un lugar para establecer como %1$s</string>
     <!-- Shown when re-entering the map with a previously-set trip restored. -->
     <string name="roadsense_map_trip_restored">Viaje restaurado</string>
-    <!-- dialog_cloudflared_settings -->
-    <string name="cloudflared_token_storage_note">El token se almacena de forma segura y se comparte entre los procesos de la aplicación y el demonio.</string>
-    <string name="cloudflared_token_hint">Ingrese el token de cloudflared</string>
+
+    <!-- Cloudflared paid-tunnel settings -->
+    <string name="cloudflared_token_storage_note">El token se almacena cifrado y se comparte entre la aplicación y el proceso del daemon.</string>
+    <string name="cloudflared_token_hint">Introduce el token de cloudflared</string>
     <string name="cloudflare_paid_version">Versión de pago de Cloudflare</string>
-    <string name="dialog_cloudflared_settings_title">🌐 Ajustes de Cloudflared</string>
-    <string name="dialog_cloudflared_settings_message">Define si estás usando Cloudflare de pago o trycloudflare. Si estás usando Cloudflare de pago, ingresa tu token de túnel.</string>
-    <string name="toast_cloudflared_token_cannot_be_empty">Si seleccionas la versión de pago, el token no puede estar vacío</string>
-    <string name="toast_cloudflared_saved_settings">Ajustes de Cloudflared guardados</string>
+    <string name="dialog_cloudflared_settings_title">Configuración de Cloudflared</string>
+    <string name="dialog_cloudflared_settings_message">Define si usas Cloudflare de pago o trycloudflare. Si usas Cloudflare de pago, introduce el token de tu túnel.</string>
+    <string name="toast_cloudflared_token_cannot_be_empty">Si estableces la versión de pago, el token no puede estar vacío</string>
+    <string name="toast_cloudflared_token_invalid">Token no válido: usa solo letras, números y los caracteres . _ - =</string>
+    <string name="toast_cloudflared_saved_settings">Configuración de Cloudflared guardada</string>
 </resources>

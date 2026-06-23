@@ -590,6 +590,72 @@
                     app:singleLine="true" />
             </LinearLayout>
         </HorizontalScrollView>
+
+        <!-- Row 6: STORAGE chips. Narrow the library to one physical volume
+             (Internal / SD card / USB). Clips already span every location in
+             the index; this filters by where each clip actually landed (the
+             per-clip storage badge shows the same tag). "Any" = all volumes.
+             Applies to both the Dashcam and Surveillance segments. -->
+        <HorizontalScrollView
+            android:id="@+id/rowStorageFilter"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:scrollbars="none"
+            android:overScrollMode="never">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="8dp"
+                    android:text="@string/recording_lib_filter_section_storage"
+                    android:textColor="?attr/colorOnSurfaceVariant"
+                    android:textSize="11sp"
+                    android:fontFamily="sans-serif-medium"
+                    android:letterSpacing="0.06"
+                    android:textAllCaps="true" />
+
+                <com.google.android.material.chip.ChipGroup
+                    android:id="@+id/chipGroupStorage"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    app:chipSpacingHorizontal="6dp"
+                    app:singleLine="true">
+
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chipStorageAny"
+                        style="@style/Widget.Material3.Chip.Filter"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/recording_lib_chip_any"
+                        android:checked="true" />
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chipStorageInternal"
+                        style="@style/Widget.Material3.Chip.Filter"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/recording_lib_storage_filter_internal" />
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chipStorageSd"
+                        style="@style/Widget.Material3.Chip.Filter"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/recording_lib_storage_filter_sd" />
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chipStorageUsb"
+                        style="@style/Widget.Material3.Chip.Filter"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/recording_lib_storage_filter_usb" />
+                </com.google.android.material.chip.ChipGroup>
+            </LinearLayout>
+        </HorizontalScrollView>
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 

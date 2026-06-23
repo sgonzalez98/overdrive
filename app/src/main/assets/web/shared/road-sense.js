@@ -31,6 +31,11 @@ BYD.roadSense = {
         warnLeadSeconds: 4,
         // Stored 0..1 in the config; the slider works in whole percent (0..100).
         warnConfidenceThreshold: 0,
+        // Detection sensitivity: a MULTIPLIER on the detector threshold (0.7..1.3,
+        // default 1.0 = shipped tuning). Lower = more sensitive. The slider works in
+        // "Less↔More" percent and is INVERTED vs this multiplier (see _detectPctToMult).
+        // Distinct from warnConfidenceThreshold — this changes what gets DETECTED.
+        detectionSensitivity: 1.0,
         warnSeverityMinor: true,
         warnSeverityModerate: true,
         warnSeveritySevere: true,
@@ -44,6 +49,8 @@ BYD.roadSense = {
         // Blind Spot (separate UCM 'blindspot' section). enabled gates the
         // native indicator overlay; the 6 numerics are the stitch calibration.
         bsEnabled: false,
+        // Camera merge mode: 'both' (rear+side stitch), 'side', or 'rear'.
+        bsMergeMode: 'both',
         bsRearFov: 1.66,
         bsSideFov: 1.98,
         bsYaw: 1.23,
@@ -129,6 +136,12 @@ BYD.roadSense = {
                     if (t < 0) t = 0; if (t > 1) t = 1;
                     c.warnConfidenceThreshold = t;
                 }
+                if (typeof rs.detectionSensitivity === 'number') {
+                    let m = rs.detectionSensitivity;
+                    if (m < this.DETECT_MULT_MIN) m = this.DETECT_MULT_MIN;
+                    if (m > this.DETECT_MULT_MAX) m = this.DETECT_MULT_MAX;
+                    c.detectionSensitivity = m;
+                }
                 if (typeof rs.warnSeverityMinor === 'boolean') c.warnSeverityMinor = rs.warnSeverityMinor;
                 if (typeof rs.warnSeverityModerate === 'boolean') c.warnSeverityModerate = rs.warnSeverityModerate;
                 if (typeof rs.warnSeveritySevere === 'boolean') c.warnSeveritySevere = rs.warnSeveritySevere;
@@ -145,6 +158,7 @@ BYD.roadSense = {
                 const bs = data.config.blindspot;
                 const c = this.config;
                 if (typeof bs.enabled === 'boolean') c.bsEnabled = bs.enabled;
+                if (bs.mergeMode === 'both' || bs.mergeMode === 'side' || bs.mergeMode === 'rear') c.bsMergeMode = bs.mergeMode;
                 if (typeof bs.rearFov === 'number') c.bsRearFov = this._clamp(bs.rearFov, 1.0, 2.2);
                 if (typeof bs.sideFov === 'number') c.bsSideFov = this._clamp(bs.sideFov, 1.0, 2.2);
                 if (typeof bs.yaw === 'number') c.bsYaw = this._clamp(bs.yaw, 0, 1.4);
@@ -274,6 +288,12 @@ BYD.roadSense = {
         if (confSlider) confSlider.value = confPct;
         this._setConfLabel(confPct);
 
+        // Detection-sensitivity slider (config multiplier 0.7..1.3 -> "Less↔More" 0..100).
+        const detectPct = this._detectMultToPct(c.detectionSensitivity);
+        const detectSlider = document.getElementById('rsDetectSensSlider');
+        if (detectSlider) detectSlider.value = detectPct;
+        this._setDetectSensLabel(detectPct);
+
         // Per-severity chimes.
         this._setChecked('rsSeverityMinor', c.warnSeverityMinor);
         this._setChecked('rsSeverityModerate', c.warnSeverityModerate);
@@ -288,6 +308,8 @@ BYD.roadSense = {
         // Blind Spot.
         this._setChecked('bsEnabled', c.bsEnabled);
         this._setBadge('bsStatusBadge', c.bsEnabled);
+        if (c.bsMergeMode !== 'both' && c.bsMergeMode !== 'side' && c.bsMergeMode !== 'rear') c.bsMergeMode = 'both';
+        this._bsHighlightMergeMode(c.bsMergeMode);
         // Live preview is a NATIVE on-car window — only meaningful in the in-app
         // WebView. Hide the preview controls on a tunnel/browser (no AndroidBridge),
         // where tapping them would do nothing. Sliders + Apply still work remotely
@@ -389,6 +411,11 @@ BYD.roadSense = {
 
     _setConfLabel(pct) {
         const el = document.getElementById('rsWarnConfValue');
+        if (el) el.textContent = pct + '%';
+    },
+
+    _setDetectSensLabel(pct) {
+        const el = document.getElementById('rsDetectSensValue');
         if (el) el.textContent = pct + '%';
     },
 
@@ -505,6 +532,55 @@ BYD.roadSense = {
         this._debounceSave('warnConfidenceThreshold', { warnConfidenceThreshold: t });
     },
 
+    // Detection-sensitivity multiplier band — MUST mirror EventDetector's
+    // MIN/MAX/DEFAULT_THRESHOLD_SCALE (the daemon clamps to the same band).
+    DETECT_MULT_MIN: 0.7,
+    DETECT_MULT_MAX: 1.3,
+    DETECT_MULT_DEFAULT: 1.0,
+
+    // The UI slider reads "Less (0%) ↔ More (100%)" sensitivity, but the stored
+    // value is a threshold MULTIPLIER where LOWER = more sensitive — so the two are
+    // INVERTED. 0% → MAX multiplier (least sensitive), 100% → MIN multiplier (most
+    // sensitive), 50% → DEFAULT (1.0). Split the mapping around the default so the
+    // midpoint is exactly 1.0 regardless of the (slightly asymmetric) band.
+    _detectPctToMult(pct) {
+        let p = parseInt(pct, 10);
+        if (isNaN(p)) p = 50;
+        if (p < 0) p = 0; if (p > 100) p = 100;
+        // More sensitive (p>50) interpolates DEFAULT→MIN; less (p<50) DEFAULT→MAX.
+        if (p >= 50) {
+            const tMore = (p - 50) / 50;            // 0..1 toward "More"
+            return this.DETECT_MULT_DEFAULT + tMore * (this.DETECT_MULT_MIN - this.DETECT_MULT_DEFAULT);
+        }
+        const tLess = (50 - p) / 50;                 // 0..1 toward "Less"
+        return this.DETECT_MULT_DEFAULT + tLess * (this.DETECT_MULT_MAX - this.DETECT_MULT_DEFAULT);
+    },
+
+    _detectMultToPct(mult) {
+        let m = parseFloat(mult);
+        if (isNaN(m)) m = this.DETECT_MULT_DEFAULT;
+        if (m < this.DETECT_MULT_MIN) m = this.DETECT_MULT_MIN;
+        if (m > this.DETECT_MULT_MAX) m = this.DETECT_MULT_MAX;
+        let pct;
+        if (m <= this.DETECT_MULT_DEFAULT) {
+            // DEFAULT..MIN maps to 50..100 ("More").
+            const t = (this.DETECT_MULT_DEFAULT - m) / (this.DETECT_MULT_DEFAULT - this.DETECT_MULT_MIN);
+            pct = 50 + t * 50;
+        } else {
+            // DEFAULT..MAX maps to 50..0 ("Less").
+            const t = (m - this.DETECT_MULT_DEFAULT) / (this.DETECT_MULT_MAX - this.DETECT_MULT_DEFAULT);
+            pct = 50 - t * 50;
+        }
+        return Math.round(pct / 5) * 5;          // snap to the slider's step=5
+    },
+
+    updateDetectSensitivity(value) {
+        const mult = this._detectPctToMult(value);
+        this.config.detectionSensitivity = mult;
+        this._setDetectSensLabel(parseInt(value, 10));
+        this._debounceSave('detectionSensitivity', { detectionSensitivity: mult });
+    },
+
     _debounceSave(key, delta) {
         this._saveTimers = this._saveTimers || {};
         if (this._saveTimers[key]) clearTimeout(this._saveTimers[key]);
@@ -512,7 +588,12 @@ BYD.roadSense = {
         this._saveTimers[key] = setTimeout(function () {
             self._saveTimers[key] = null;
             self._save(delta).then(function (ok) {
-                if (!ok) self._toastFailed();
+                // Toast on BOTH outcomes so a slider gives the same "Saved"
+                // confirmation as the toggles. Debounced (only fires ~250 ms after
+                // the user stops dragging), so a continuous drag yields one toast on
+                // settle, not one per input event. Shared by the lead-time,
+                // confidence, and detection-sensitivity sliders.
+                if (ok) self._toastSaved(); else self._toastFailed();
             });
         }, 250);
     },
@@ -973,6 +1054,30 @@ BYD.roadSense = {
         const ok = await this._bsSave({ enabled: on });
         if (ok) { this._bsSyncNative(); this._toastSaved(); }
         else { document.getElementById('bsEnabled').checked = !on; this.config.bsEnabled = !on; this._setBadge('bsStatusBadge', !on); this._toastFailed(); }
+    },
+
+    /** Select the camera merge mode: 'both' (rear+side stitch), 'side' (side
+     *  camera only), or 'rear' (rear camera only). Persists immediately and takes
+     *  effect live on the running view (daemon pushes it to the BS scaler). */
+    async bsSetMergeMode(mode) {
+        if (mode !== 'both' && mode !== 'side' && mode !== 'rear') return;
+        var prev = this.config.bsMergeMode;
+        if (mode === prev) return;
+        this.config.bsMergeMode = mode;
+        this._bsHighlightMergeMode(mode);
+        const ok = await this._bsSave({ mergeMode: mode });
+        if (ok) { this._toastSaved(); }
+        else { this.config.bsMergeMode = prev; this._bsHighlightMergeMode(prev); this._toastFailed(); }
+    },
+
+    /** Highlight the selected merge mode (M3 tonal selection, same pattern as the
+     *  display-target / corner buttons). */
+    _bsHighlightMergeMode(mode) {
+        var map = { both: 'bsMergeBoth', side: 'bsMergeSide', rear: 'bsMergeRear' };
+        for (var k in map) {
+            var el = document.getElementById(map[k]);
+            if (el) { if (k === mode) el.classList.add('active'); else el.classList.remove('active'); }
+        }
     },
 
     /** Read the sliders into config + reflect labels. */

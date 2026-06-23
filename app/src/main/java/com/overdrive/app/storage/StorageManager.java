@@ -186,12 +186,103 @@ public class StorageManager {
     
     // Periodic cleanup interval (30 seconds)
     private static final long CLEANUP_INTERVAL_SECONDS = 30;
-    
+
+    // Max anchor files to delete in a single BOUNDED-TRIM pass that runs WHILE the
+    // encoder is writing. This caps SD-card I/O contention against the muxer's disk
+    // writer — the historical full delete-burst (19 files / 118 MB at once) produced
+    // a ~2.8 s mosaic+swap stall because the disk writer was starved by cleanup I/O.
+    //
+    // It also FIXES the convergence deadlock the old policy created: a continuous
+    // recorder parks ~1.9 %% over its cap forever (one ~2-min/220 MB segment in every
+    // ~120 s vs the cap), but the old defer gate only allowed a reap when usage was
+    // >5 %% over, AND the deferred-drain only runs when the encoder is idle — which
+    // never happens mid-drive. So in the 0–5 %% band nothing EVER reaped while driving
+    // and the volume overflowed to ENOSPC. A small per-tick trim (every 30 s) keeps
+    // the pool converging: 4 deletes/tick ≫ the ~1 segment/2-min inflow, and clears a
+    // worst-case sub-5 %% backlog (≤5 %% of the cap ≈ a couple of segments) within a
+    // tick or two, while staying ~5× under the known-bad burst size. Larger over-runs
+    // (>5 %%, e.g. a big limit drop) bypass this and take the unbounded HARD reap.
+    private static final int RECORDING_TRIM_MAX_FILES = 4;
+    // Sentinel for ensureSpace's delete budget: no per-pass cap. Used by idle reaps,
+    // the boot reap, and the HARD over-limit emergency path (full reap down to limit).
+    private static final int UNLIMITED_REAP = 0;
+
+    // Free-space threshold (bytes) at which the periodic tick clears a stale
+    // recordingsEnospcFallbackActive — the card must have at least one segment's
+    // worth of room before we re-scope recordings retention back to the SD pool.
+    // Set ABOVE the recorder's per-segment reserve (~100MB, see
+    // resolveTargetWithEnospcFallback) so there is a hysteresis gap between the
+    // set threshold (<100MB → latch) and this clear threshold (>=200MB → unlatch):
+    // a volume sitting exactly at the boundary can't toggle the latch every tick.
+    private static final long ENOSPC_FALLBACK_RECOVER_BYTES = 200L * 1024 * 1024;
+
+    // Physical-volume free-space emergency reaper thresholds. These are
+    // DISTINCT from the per-category caps. When a SHARED volume is physically
+    // full but every category living on it is still UNDER its OWN cap — the cap
+    // oversubscription case (Σ per-category caps > the card's real capacity, e.g.
+    // recordings 100 GB + surveillance 20 GB + trips 0.8 GB ≈ 121 GB of caps on a
+    // ~119 GB card) — the per-category reaper has nothing eligible (each category
+    // compares only against its own cap, never the physical volume), the 90% wake
+    // gate and REAP_DEFER both short-circuit, and the diskCritical/forceFull
+    // override is unreachable. The volume then stays full forever and new segments
+    // spill to internal via the ENOSPC fallback ("recordings on internal storage
+    // even though SD is configured" + "periodic cleanup never frees space" — the
+    // same single defect). This layer reaps the globally-oldest finalized clips on
+    // the volume — ACROSS categories — until free space recovers, independent of
+    // any per-category cap. FLOOR triggers the reap; TARGET is reaped down-to.
+    // TARGET is well above ENOSPC_FALLBACK_RECOVER_BYTES (200 MB) so reaching it
+    // also clears the stale internal-fallback latch in one shot instead of flapping
+    // it around the 200 MB boundary every segment rotation. Both are additionally
+    // clamped to a fraction of the volume total (see runPhysicalFreeSpaceEmergencyReap)
+    // so a genuinely tiny card can never be reaped empty chasing an unreachable target.
+    private static final long PHYSICAL_FREE_EMERGENCY_FLOOR_BYTES = 512L * 1024 * 1024;   // act below 512 MB free
+    private static final long PHYSICAL_FREE_EMERGENCY_TARGET_BYTES = 1024L * 1024 * 1024; // reap down to ~1 GB free
+    // Media categories the physical-free reaper evicts from. Trips (.jsonl.gz,
+    // DB-backed, KB-to-low-MB scale) is intentionally excluded — it cannot
+    // meaningfully relieve a full volume and would drag TripDatabase row
+    // bookkeeping into the emergency path. Its own per-category reaper still runs.
+    private static final String[] PHYSICAL_REAP_CATEGORIES = { "recordings", "surveillance", "proximity" };
+    // Internal volume root used for on-volume file matching (mirrors internalScopedDirs).
+    private static final String INTERNAL_VOLUME_ROOT = "/storage/emulated/0";
+    // Max ANCHOR deletions per tick for the physical-free emergency reaper WHILE the
+    // encoder is writing, so the burst of unlink syscalls can't starve the muxer's
+    // disk writer (the historical 19-file burst caused a ~2.8 s eglSwap stall). 8
+    // anchors (~1.7 GB of cam_/dvr_ clips) clears a from-near-zero → 1 GB target in
+    // a single tick yet stays ~2.4× under the known-bad burst.
+    private static final int PHYSICAL_REAP_MAX_FILES = 8;
+    // Absolute idle ceiling on delete ATTEMPTS per tick (no encoder writer to starve,
+    // so the muxer-protection cap above doesn't bind). Caps wasted work when the volume
+    // is degenerate-unhealthy — read-only/EROFS remount, card pulled (free probe == 0),
+    // transient StatFs 0 — where the no-progress loop-exit (free >= target) can never fire
+    // because every delete frees nothing; without this the loop would fork a doomed `rm`
+    // for the WHOLE pool while holding all three cleanup locks. A real full-volume reap
+    // (deletes succeed) frees ~1.7 GB well before 64 anchors and exits via the free target.
+    private static final int PHYSICAL_REAP_MAX_FILES_IDLE = 64;
+    // Consecutive zero-free delete returns that flag a vanished/read-only volume (EROFS /
+    // ENOENT make every unlink a no-op). After this many in a row, stop forking doomed
+    // rm's and retry next tick rather than walking the rest of the pool.
+    private static final int PHYSICAL_REAP_MAX_CONSEC_FAILS = 8;
+    // Wall-clock ceiling on a SINGLE reapForPhysicalFreeSpace() invocation. The reaper
+    // runs under the nested recordings→surveillance→proximity locks, and a degenerate
+    // FUSE volume can make each deleteAnchorAndSidecars() fork an `rm` that blocks up to
+    // 4 s (deleteFileViaShell waitForBounded). With the 8-attempt budget that is a ~32 s
+    // worst-case lock hold — which would stall the surveillance trigger path now that it
+    // resolves its event dir through getLiveSurveillanceDir() (surveillanceCleanupLock).
+    // Bound the per-tick delete work to ~2 s so the trigger thread is never blocked long
+    // enough to overrun the finite pre-record ring buffer; the reap simply resumes on the
+    // next 30 s tick. This complements (does not replace) the file-count/consec-fail caps.
+    private static final long PHYSICAL_REAP_MAX_LOCK_HOLD_MS = 2_000L;
+
     // Current limits
-    private static long recordingsLimitMb = DEFAULT_RECORDINGS_LIMIT_MB;
-    private static long surveillanceLimitMb = DEFAULT_SURVEILLANCE_LIMIT_MB;
-    private static long proximityLimitMb = DEFAULT_PROXIMITY_LIMIT_MB;
-    private long tripsLimitMb = DEFAULT_TRIPS_LIMIT_MB;
+    // volatile: the cleanup thread reads these under the per-category cleanup
+    // locks while settings/HTTP threads write them under configChangeLock — two
+    // distinct monitors, so without volatile a write under one establishes no
+    // happens-before for a read under the other (the enforced retention size).
+    // Matches the cross-thread-visibility rationale on the storage-type fields below.
+    private static volatile long recordingsLimitMb = DEFAULT_RECORDINGS_LIMIT_MB;
+    private static volatile long surveillanceLimitMb = DEFAULT_SURVEILLANCE_LIMIT_MB;
+    private static volatile long proximityLimitMb = DEFAULT_PROXIMITY_LIMIT_MB;
+    private volatile long tripsLimitMb = DEFAULT_TRIPS_LIMIT_MB;
     
     // Storage type selection (SOTA: independent selection for recordings and surveillance)
     // volatile: read cross-thread (recorder pre-flight reconcile, size queries)
@@ -392,6 +483,24 @@ public class StorageManager {
     private static final int SD_WATCHDOG_MAX_VERBOSE_FAILURES = 5;  // Log verbosely for first 5 failures
     private static final int SD_WATCHDOG_QUIET_LOG_INTERVAL = 20;   // Then log every 20th attempt (~5 min)
 
+    // Idempotency latch for the remount-FAILURE recovery push (forced
+    // stopRecording + setOutputDir(internal) + RMM resync). The recovery is a
+    // ONE-TIME transition action ("the configured external volume just went
+    // away → move the live recorder to internal"). The watchdog re-probes every
+    // SD_WATCHDOG_INTERVAL_SECONDS (15s), so without this latch a card that stays
+    // unmounted (e.g. SD slot unpowered while parked with USB power off — the SD
+    // shares the USB rail) re-runs the recovery on EVERY tick: it force-stops the
+    // in-flight recording, re-pushes the same internal dir, and re-kicks RMM. A
+    // continuous segment needs SEGMENT_DURATION_MS (120s) to finalize, so an
+    // every-15s force-stop means NO segment ever completes — recording silently
+    // produces zero files for the whole park. Latch true after the first recovery
+    // and skip the disruptive push on subsequent failed ticks (mount RETRIES still
+    // run; only the recorder-disturbing recovery is gated). Reset to false on a
+    // successful remount so a card that returns and drops AGAIN recovers each
+    // cycle. Per-rail so SD and USB latch independently.
+    private boolean sdFallbackRecoveryDone = false;
+    private boolean usbFallbackRecoveryDone = false;
+
     // Rate-limit for the raw `sm list-volumes` diagnostic dump. The fingerprint
     // line (publicRows=N matchedRows=M) is cheap and stays at logInfo on every
     // failure; the multi-line raw output only re-prints when 5 minutes have
@@ -543,6 +652,27 @@ public class StorageManager {
                         }
                         return false;
                     });
+                    if (files == null) {
+                        // FUSE-bridged SD/USB returns null under daemon UID 2000.
+                        // Without this fallback the entire external dir is skipped,
+                        // so .mp4.tmp/.broken partials accumulate on the card forever:
+                        // the size gate (getDirectoriesTotalSize) counts their bytes
+                        // and the ensureSpace reaper only walks primary-extension
+                        // anchors, so they're counted-but-unreapable and the SD folder
+                        // parks permanently over its limit. Shell-ls then filter to
+                        // the partial extensions in-process (listFilesViaShell takes
+                        // no filter).
+                        File[] all = listFilesViaShell(dir);
+                        if (all == null || all.length == 0) continue;
+                        java.util.List<File> matched = new java.util.ArrayList<>();
+                        for (File f : all) {
+                            String n = f.getName();
+                            for (String ext : partials) {
+                                if (n.endsWith(ext)) { matched.add(f); break; }
+                            }
+                        }
+                        files = matched.toArray(new File[0]);
+                    }
                     if (files == null) continue;
                     for (File f : files) {
                         // Don't unlink a still-being-written trip file in case
@@ -667,6 +797,10 @@ public class StorageManager {
                 logInfo(targetClass + " already mounted via /proc/mounts: " + sdCardPath);
                 if (isSd) initSdCardDirectories(); else initUsbDirectories();
                 updateActiveDirectories();
+                // Re-clamp any persisted limit that was inflated to the unmounted-
+                // external sentinel down to this now-mounted card's real ceiling, so
+                // the slider max and the enforced limit reflect the actual capacity.
+                reclampLimitsToMountedCeilings();
                 return true;
             }
             if (!isSd && usbAvailable && usbPath != null
@@ -674,6 +808,7 @@ public class StorageManager {
                 logInfo(targetClass + " already mounted via /proc/mounts: " + usbPath);
                 initUsbDirectories();
                 updateActiveDirectories();
+                reclampLimitsToMountedCeilings();
                 return true;
             }
         } catch (Throwable t) {
@@ -828,6 +963,9 @@ public class StorageManager {
                                 + " (poll attempt " + (i + 1) + "/20)");
                             if (isSd) initSdCardDirectories(); else initUsbDirectories();
                             updateActiveDirectories();
+                            // Re-clamp a persisted oversized limit down to the now-
+                            // mounted card's real ceiling (see the /proc/mounts branch).
+                            reclampLimitsToMountedCeilings();
                             return true;
                         }
                         logDebug("Waiting for " + targetClass + " mount... attempt " + (i+1) + "/20");
@@ -876,6 +1014,9 @@ public class StorageManager {
                     logInfo("Kernel fallback: SD picked up after " + (i + 1) + "s at " + sdCardPath);
                     initSdCardDirectories();
                     updateActiveDirectories();
+                    // Re-clamp a persisted oversized limit down to the now-mounted
+                    // card's real ceiling (see the /proc/mounts branch).
+                    reclampLimitsToMountedCeilings();
                     return true;
                 }
             }
@@ -1130,6 +1271,64 @@ public class StorageManager {
     }
 
     /**
+     * Classify which physical volume a recording's absolute path lives on,
+     * purely from the path string. This is the single source of truth for the
+     * per-clip storage badge shown in the recordings library (events.html) and
+     * the native recording fragments: because the SD card on this BYD fleet is
+     * bridged behind the USB power rail, cutting USB power unmounts the SD and
+     * recordings transparently fall back to internal storage (see
+     * {@link #resolveActive}). That fallback is otherwise invisible — a clip the
+     * user expected on the SD card silently lands on internal. Tagging each clip
+     * with where it ACTUALLY landed makes the fallback visible at the level that
+     * matters (the individual file), without any new persisted state.
+     *
+     * <p>Path-based, not mount-based, on purpose: a historical clip must still
+     * classify correctly long after the volume it was written to was removed.
+     * We match the path prefix against the internal base dir and the currently
+     * resolved SD/USB mount roots. Anything under the internal base — including
+     * the legacy app-files dir — is INTERNAL. A path under the live SD/USB root
+     * is SD_CARD/USB respectively. When the path is under neither (e.g. a clip
+     * written to an SD card that has since been swapped for one mounted at a
+     * different uuid path), we fall back to: not-internal + a /storage/ prefix
+     * that is neither the live USB root ⇒ SD_CARD (the common case), else null
+     * ("unknown") so the UI can omit the badge rather than mislabel.
+     *
+     * @param absPath absolute path of the recording file (or its directory)
+     * @return "INTERNAL", "SD_CARD", "USB", or {@code null} if unclassifiable
+     */
+    public String classifyStorageForPath(String absPath) {
+        if (absPath == null || absPath.isEmpty()) return null;
+        // Internal base (and the legacy app-files dir) → INTERNAL.
+        if (absPath.startsWith(INTERNAL_BASE_DIR)
+                || absPath.startsWith(LEGACY_APP_FILES_DIR)) {
+            return StorageType.INTERNAL.name();
+        }
+        // Live mount roots take precedence — exact-volume match.
+        final String sd = sdCardPath;
+        final String usb = usbPath;
+        if (sd != null && !sd.isEmpty() && absPath.startsWith(sd)) {
+            return StorageType.SD_CARD.name();
+        }
+        if (usb != null && !usb.isEmpty() && absPath.startsWith(usb)) {
+            return StorageType.USB.name();
+        }
+        // Path is external (under /storage/<uuid>/...) but doesn't match a
+        // currently-resolved root — most likely an SD card written in a prior
+        // session/swap. /storage/emulated is always the internal emulated
+        // volume on this platform; treat that as INTERNAL, every other
+        // /storage/ subtree as SD_CARD (the dominant external on BYD head
+        // units; a USB stick that's since been unplugged is rare and the
+        // badge degrades gracefully to "SD_CARD" rather than mislabeling).
+        if (absPath.startsWith("/storage/emulated")) {
+            return StorageType.INTERNAL.name();
+        }
+        if (absPath.startsWith("/storage/") || absPath.startsWith("/mnt/")) {
+            return StorageType.SD_CARD.name();
+        }
+        return null;
+    }
+
+    /**
      * Ensure storage is ready for use.
      * If SD/USB storage is selected but not mounted, attempts to mount it.
      * If mount fails, falls back to internal storage.
@@ -1203,7 +1402,88 @@ public class StorageManager {
 
         return true;
     }
-    
+
+    /**
+     * Boot/ACC-on mount-race guard: give the configured external volume a
+     * short, bounded window to finish mounting before a caller snapshots its
+     * output directory.
+     *
+     * <p>The constructor mounts SD/USB on the background "StorageMountInit"
+     * thread so daemon boot isn't wedged by the post-update vold-unmount
+     * stall. Consumers see INTERNAL until that mount lands, then transparently
+     * switch — but a surveillance event firing inside that 2-15s window pins
+     * its event dir to the internal fallback for the first 1-2 events. This
+     * helper lets the enable path PAUSE briefly so the first event's dir is
+     * the real external path.
+     *
+     * <p>It is a strict OBSERVER: it does NOT attempt a mount of its own (the
+     * background thread and the concurrent {@link #ensureStorageReady} call
+     * are already doing that). Forking another unsynchronized mount here would
+     * double up on the FUSE contention the {@code isSdCardLikelyMounted}
+     * rationale takes pains to avoid. It only watches the volatile
+     * availability flag flip.
+     *
+     * <p>No-op fast-outs (return immediately, never wait):
+     * <ul>
+     *   <li>configured INTERNAL → true</li>
+     *   <li>configured external already available → true</li>
+     *   <li>configured SD but no card physically present → false</li>
+     * </ul>
+     * Reads the RAW configured type ({@link #surveillanceStorageType}) on
+     * purpose: {@link #normalizeStorageType} coerces SD/USB to INTERNAL
+     * exactly when the volume isn't available, which is the state we want to
+     * WAIT on, not skip.
+     *
+     * @param timeoutMs maximum time to wait for the flag to flip
+     * @return true if the configured volume is (or became) available, false if
+     *         it's still unavailable after the wait — caller falls back to
+     *         internal for now; the watchdog switches subsequent events later
+     */
+    public boolean waitForConfiguredExternalMount(long timeoutMs) {
+        StorageType t = surveillanceStorageType;            // RAW configured type
+        boolean isSd = (t == StorageType.SD_CARD);
+        boolean isUsb = (t == StorageType.USB);
+        if (!isSd && !isUsb) return true;                   // INTERNAL → no-op
+        // Readiness = availability flag AND the surveillance dir field is published.
+        // The mount writers (ensureVolumeMounted / discoverVolumes) flip
+        // sdCardAvailable/usbAvailable BEFORE the lock-free initSdCardDirectories()
+        // populates sdCardSurveillanceDir, so a reader can legitimately observe
+        // available==true while the dir is still null. resolveActive() then falls
+        // back to internal precisely in that window (`available && dir==null` →
+        // internal), which is the first-event-on-internal residual this wait targets.
+        // Requiring the dir field keeps the enable-time wait honest so the first
+        // trigger only proceeds once the path it will resolve is actually published.
+        if (isSd && sdCardAvailable && sdCardSurveillanceDir != null) return true;   // ready → no-op
+        if (isUsb && usbAvailable && usbSurveillanceDir != null) return true;
+        // Genuinely-absent fast-out: only bother polling when the volume could
+        // plausibly land. SD has a cheap physical-present probe; USB has no
+        // equivalent, so a USB-configured-but-absent stick polls the full
+        // window before falling back (tolerable, once per arm).
+        if (isSd && !isSdCardPhysicallyPresent()) {
+            logInfo("waitForConfiguredExternalMount: SD configured but no card physically present — not waiting");
+            return false;
+        }
+        long deadline = System.currentTimeMillis() + Math.max(0, timeoutMs);
+        while (System.currentTimeMillis() < deadline) {
+            if (isSd && sdCardAvailable && sdCardSurveillanceDir != null) return true;
+            if (isUsb && usbAvailable && usbSurveillanceDir != null) return true;
+            try {
+                Thread.sleep(250);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return isSd ? (sdCardAvailable && sdCardSurveillanceDir != null)
+                            : (usbAvailable && usbSurveillanceDir != null);
+            }
+        }
+        boolean landed = isSd ? (sdCardAvailable && sdCardSurveillanceDir != null)
+                              : (usbAvailable && usbSurveillanceDir != null);
+        if (!landed) {
+            logWarn("waitForConfiguredExternalMount: " + t + " not ready after " + timeoutMs +
+                "ms (available+dir) — falling back to internal for now (watchdog will switch later)");
+        }
+        return landed;
+    }
+
     /**
      * Backwards-compatible alias for {@link #discoverVolumes()} — public
      * callers (refreshSdCard, watchdog) keep working unchanged.
@@ -2028,9 +2308,17 @@ public class StorageManager {
             }
 
             if (targetFree >= reserveBytes) {
-                // External volume has room — keep it, and clear the full-fallback
-                // signal so the UI banner stops showing once SD frees space.
-                if (trackState) recordingsEnospcFallbackActive = false;
+                // External volume has room for THIS segment — keep it. But only
+                // CLEAR the full-fallback flag once free is durably above the
+                // recovery hysteresis (200MB), not merely back over the per-segment
+                // reserve (100MB). Setting the flag at <reserveBytes and clearing it
+                // at >=reserveBytes shares one boundary, so a volume hovering at the
+                // reserve flaps the banner / scope every segment rotation. The wider
+                // clear threshold matches the periodic ticker (ENOSPC_FALLBACK_RECOVER_BYTES)
+                // so both writers of the flag use the same hysteresis band.
+                if (trackState && targetFree >= ENOSPC_FALLBACK_RECOVER_BYTES) {
+                    recordingsEnospcFallbackActive = false;
+                }
                 return targetDir;
             }
 
@@ -2086,6 +2374,78 @@ public class StorageManager {
             return internalDir;
         } catch (Throwable t) {
             logWarn("resolveTargetWithEnospcFallback failed, using target as-is: " + t.getMessage());
+            return targetDir;
+        }
+    }
+
+    /**
+     * SURVEILLANCE-bucket analogue of {@link #resolveTargetWithEnospcFallback}:
+     * when the configured external surveillance volume is mounted-but-FULL,
+     * redirect THIS event clip to the INTERNAL SURVEILLANCE dir (not the
+     * recordings internal dir) so it isn't quarantined as {@code .broken} on a
+     * packed card.
+     *
+     * <p><b>Why a separate method.</b> {@link #resolveTargetWithEnospcFallback}
+     * hard-codes {@code internalRecordingsDir} as its spill target and flips the
+     * recordings UI banner. Spilling an {@code event_*.mp4} into the recordings
+     * folder would orphan it: the surveillance cleanup scans
+     * {@code getReapableDirs("surveillance")} with the {@code event_} prefix and
+     * the recordings cleanup scans with the {@code cam} prefix — a surveillance
+     * clip in the recordings dir matches neither and would never be reaped.
+     * Spilling to {@code internalSurveillanceDir} (which IS in
+     * {@code getAllSurveillanceDirs()}) keeps it in the surveillance reap pool.
+     *
+     * <p>Mirrors the conservative contract of the recordings variant: returns
+     * {@code targetDir} unchanged when target is null, already internal, StatFs
+     * throws (the unmounted/GONE case — left to the watchdog), the external has
+     * room, or internal itself lacks the reserve. Does NOT touch the recordings
+     * ENOSPC banner flag. Any throw returns {@code targetDir} as-is.
+     *
+     * <p>Resolved ONCE per trigger (callers guard {@code recording==false}), so
+     * no clip is split across volumes.
+     */
+    public File resolveSurveillanceTargetWithEnospcFallback(File targetDir, long reserveBytes) {
+        if (targetDir == null) return targetDir;
+        try {
+            String targetPath = targetDir.getAbsolutePath();
+            if (targetPath.startsWith(INTERNAL_BASE_DIR)) return targetDir;
+
+            long targetFree;
+            try {
+                File probe = targetDir.exists() ? targetDir : targetDir.getParentFile();
+                if (probe == null || !probe.exists()) return targetDir;
+                targetFree = new StatFs(probe.getAbsolutePath()).getAvailableBytes();
+            } catch (Throwable statThrow) {
+                logWarn("ENOSPC-fallback(surveillance): StatFs on external target " + targetPath
+                    + " threw (" + statThrow.getMessage() + ") — treating as unmounted, "
+                    + "leaving to the unmount fallback path");
+                return targetDir;
+            }
+
+            if (targetFree >= reserveBytes) {
+                return targetDir;  // external has room for THIS clip
+            }
+
+            File internalDir = internalSurveillanceDir;
+            if (internalDir == null) return targetDir;
+            long internalFree = getInternalFreeSpace();
+            if (internalFree < reserveBytes) {
+                logWarn("ENOSPC-fallback(surveillance): external target " + targetPath + " is full ("
+                    + formatSize(targetFree) + " free < " + formatSize(reserveBytes)
+                    + " reserve) AND internal is also short (" + formatSize(internalFree)
+                    + " free) — cannot fall back; event may fail to save");
+                return targetDir;
+            }
+
+            if (!internalDir.exists()) internalDir.mkdirs();
+            logWarn("ENOSPC-fallback(surveillance): external target " + targetPath + " is full ("
+                + formatSize(targetFree) + " free < " + formatSize(reserveBytes)
+                + " reserve) — redirecting THIS event to internal surveillance "
+                + internalDir.getAbsolutePath() + " (" + formatSize(internalFree)
+                + " free) so the event is not lost");
+            return internalDir;
+        } catch (Throwable t) {
+            logWarn("resolveSurveillanceTargetWithEnospcFallback failed, using target as-is: " + t.getMessage());
             return targetDir;
         }
     }
@@ -2151,14 +2511,22 @@ public class StorageManager {
             }
         }
 
-        // Proximity always uses same storage as surveillance
+        // Proximity follows the RECORDINGS (ACC-ON) storage type. Proximity
+        // recording is an ACC-ON feature (PROXIMITY_GUARD runs while the car is
+        // on/armed), so it must honor the user's ACC-ON storage selection
+        // (recordingsStorageType), NOT the ACC-OFF/surveillance one. Routing it
+        // to surveillanceStorageType meant "ACC-ON storage = SD, ACC-OFF = INTERNAL"
+        // silently put ACC-ON proximity clips on internal. NOTE: proximity has no
+        // ENOSPC per-segment redirect of its own, so it resolves with the plain
+        // mount-based resolveActive(recordingsStorageType) here (and a mount-based
+        // active type below) rather than the recordings ENOSPC-aware path.
         synchronized (proximityCleanupLock) {
             if (!surveillanceActive.get()) {
-                ResolvedDir r = resolveActive(surveillanceStorageType,
+                ResolvedDir r = resolveActive(recordingsStorageType,
                     internalProximityDir, sdCardProximityDir, usbProximityDir, "proximity");
                 proximityDir = r.dir;
-                // Proximity follows surveillance silently — no log here, the
-                // surveillance line already conveyed the resolution.
+                // Proximity follows recordings silently — no log here, the
+                // recordings line already conveyed the resolution.
             }
         }
 
@@ -2216,7 +2584,7 @@ public class StorageManager {
                     // effectiveReapLimitBytes during the fallback. See loadTimeCeilingMb.
                     recordingsLimitMb   = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(recordingsStorageType),   recordingsLimitMb));
                     surveillanceLimitMb = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(surveillanceStorageType), surveillanceLimitMb));
-                    proximityLimitMb    = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(surveillanceStorageType), proximityLimitMb));
+                    proximityLimitMb    = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(recordingsStorageType), proximityLimitMb));  // proximity follows recordings (ACC-ON) volume
                     tripsLimitMb        = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(tripsStorageType),        tripsLimitMb));
                     
                     logInfo("Loaded storage config: recordings=" + recordingsLimitMb + "MB (" + recordingsStorageType + 
@@ -2290,11 +2658,71 @@ public class StorageManager {
     public File getSurveillanceDir() {
         return surveillanceDir;
     }
-    
+
+    /**
+     * Resolve the surveillance directory LIVE, on demand, bypassing the
+     * {@code surveillanceActive} freeze that gates the volatile
+     * {@link #surveillanceDir} field.
+     *
+     * <p><b>Why this exists.</b> {@code surveillanceDir} has exactly one writer
+     * — {@link #updateActiveDirectories()} — and that writer SKIPS the
+     * surveillance branch whenever {@code surveillanceActive.get()==true}. So
+     * once an arm session latches active, the field is frozen at whatever it
+     * resolved to before {@code enable()}. If the configured external volume
+     * mount lands AFTER the bounded {@link #waitForConfiguredExternalMount}
+     * window (the 4-15s slow-mount tail), the field stays pinned to the
+     * internal fallback for the whole session and the per-trigger refresh in
+     * {@link com.overdrive.app.surveillance.SurveillanceEngineGpu} reads the
+     * same stale internal path — defeating the first-event-on-SD intent.
+     *
+     * <p>This mirrors the watchdog's recordings push (audit R5), which already
+     * resolves the canonical SD path DIRECTLY rather than reading the frozen
+     * field, precisely because the field doesn't move while active.
+     *
+     * <p><b>Safe to call per trigger.</b> The engine resolves this ONCE while
+     * {@code recording==false} (Site A / Site B guards), so an in-flight clip
+     * can never be split across volumes. {@link #resolveActive} returns the
+     * internal fallback whenever the configured external is genuinely
+     * unavailable, so the live resolve is no worse than the frozen field when
+     * the card is absent. Held under {@code surveillanceCleanupLock} for a
+     * consistent {availability, dir} read against {@code updateActiveDirectories}.
+     *
+     * @return the live surveillance directory for the configured volume, or the
+     *         internal fallback when the external volume isn't available
+     */
+    public File getLiveSurveillanceDir() {
+        synchronized (surveillanceCleanupLock) {
+            ResolvedDir r = resolveActive(surveillanceStorageType,
+                internalSurveillanceDir, sdCardSurveillanceDir, usbSurveillanceDir, "surveillance");
+            return r.dir;
+        }
+    }
+
     public File getProximityDir() {
         return proximityDir;
     }
-    
+
+    /**
+     * Live proximity dir — the proximity analogue of {@link #getLiveSurveillanceDir()}.
+     * Resolves the configured RECORDINGS (ACC-ON) volume DIRECTLY rather than reading
+     * the frozen {@code proximityDir} field, which {@link #updateActiveDirectories()}
+     * stops updating once a surveillance arm session latches active (the proximity
+     * branch there is gated on {@code !surveillanceActive.get()}). Without this, a
+     * proximity recording that starts during an armed session — or right after a
+     * boot/intermittent SD mount lands — would read the stale internal fallback even
+     * though the configured SD is now mounted. Mirrors the recordings-volume resolve
+     * (no ENOSPC redirect: proximity has no per-segment fallback of its own) and falls
+     * back to internal when the external is genuinely unavailable. Held under
+     * {@code proximityCleanupLock} for a consistent {availability, dir} read.
+     */
+    public File getLiveProximityDir() {
+        synchronized (proximityCleanupLock) {
+            ResolvedDir r = resolveActive(recordingsStorageType,
+                internalProximityDir, sdCardProximityDir, usbProximityDir, "proximity");
+            return r.dir;
+        }
+    }
+
     public File getTripsDir() {
         return tripsDir;
     }
@@ -2469,24 +2897,36 @@ public class StorageManager {
     // loadTimeCeilingMb returns the real ceiling so a genuine smaller-volume swap
     // is still clamped. Runtime over-fill during a fallback stays bounded by
     // effectiveReapLimitBytes. Mirrors loadConfig's load-time clamp (see ~line 2116).
+    // Take configChangeLock around the read-modify-write so a concurrent
+    // reclampLimitsToMountedCeilings() (now fired on several remount-success paths)
+    // or a peer setter can't interleave and lose this update on the static long
+    // *LimitMb fields. Same monitor the storage-type setters and reclamp use.
     public void setRecordingsLimitMb(long limitMb) {
-        recordingsLimitMb = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(recordingsStorageType), limitMb));
-        saveConfig();
+        synchronized (configChangeLock) {
+            recordingsLimitMb = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(recordingsStorageType), limitMb));
+            saveConfig();
+        }
     }
 
     public void setSurveillanceLimitMb(long limitMb) {
-        surveillanceLimitMb = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(surveillanceStorageType), limitMb));
-        saveConfig();
+        synchronized (configChangeLock) {
+            surveillanceLimitMb = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(surveillanceStorageType), limitMb));
+            saveConfig();
+        }
     }
 
     public void setProximityLimitMb(long limitMb) {
-        proximityLimitMb = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(surveillanceStorageType), limitMb));
-        saveConfig();
+        synchronized (configChangeLock) {
+            proximityLimitMb = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(recordingsStorageType), limitMb));  // proximity follows recordings (ACC-ON) volume
+            saveConfig();
+        }
     }
 
     public void setTripsLimitMb(long limitMb) {
-        tripsLimitMb = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(tripsStorageType), limitMb));
-        saveConfig();
+        synchronized (configChangeLock) {
+            tripsLimitMb = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(tripsStorageType), limitMb));
+            saveConfig();
+        }
     }
     
     // ==================== Storage Type Getters/Setters ====================
@@ -2570,7 +3010,15 @@ public class StorageManager {
         // transient zero is already bounded by effectiveReapLimitBytes.
         long liveTotal = liveVolumeTotalBytes(type);
         if (liveTotal > 0) {
-            recordingsLimitMb = Math.max(MIN_LIMIT_MB, Math.min(getEffectiveMaxLimitMb(type), recordingsLimitMb));
+            // Reuse the single read that just cleared the transient-zero guard —
+            // do NOT call getEffectiveMaxLimitMb(type), which performs its OWN
+            // fresh StatFs read that can race to 0 (read#1 positive, read#2 zero
+            // on a flaky FUSE mount) and collapse to internal's ~8GB ceiling,
+            // irreversibly shrinking the persisted external limit + mass-reaping
+            // the card. volumeCeilingMb(liveTotal) is exactly the transform
+            // getEffectiveMaxLimitMb applies for a positive total (mirrors the
+            // converged reclampCeilingMb path).
+            recordingsLimitMb = Math.max(MIN_LIMIT_MB, Math.min(volumeCeilingMb(liveTotal), recordingsLimitMb));
         }
         updateActiveDirectories();
         saveConfig();
@@ -2711,8 +3159,12 @@ public class StorageManager {
         // external limit).
         long liveTotal = liveVolumeTotalBytes(type);
         if (liveTotal > 0) {
-            surveillanceLimitMb = Math.max(MIN_LIMIT_MB, Math.min(getEffectiveMaxLimitMb(type), surveillanceLimitMb));
-            proximityLimitMb    = Math.max(MIN_LIMIT_MB, Math.min(getEffectiveMaxLimitMb(type), proximityLimitMb));
+            // Reuse the single guard-clearing read; getEffectiveMaxLimitMb(type)
+            // would do a second StatFs read that can race to 0 and collapse to
+            // internal's ~8GB ceiling (see setRecordingsStorageType).
+            long ceilingMb = volumeCeilingMb(liveTotal);
+            surveillanceLimitMb = Math.max(MIN_LIMIT_MB, Math.min(ceilingMb, surveillanceLimitMb));
+            proximityLimitMb    = Math.max(MIN_LIMIT_MB, Math.min(ceilingMb, proximityLimitMb));
         }
         updateActiveDirectories();
         saveConfig();
@@ -2765,7 +3217,10 @@ public class StorageManager {
         // StatFs read — see setRecordingsStorageType for the full rationale.
         long liveTotal = liveVolumeTotalBytes(type);
         if (liveTotal > 0) {
-            tripsLimitMb = Math.max(MIN_LIMIT_MB, Math.min(getEffectiveMaxLimitMb(type), tripsLimitMb));
+            // Reuse the single guard-clearing read; getEffectiveMaxLimitMb(type)
+            // would do a second StatFs read that can race to 0 and collapse to
+            // internal's ~8GB ceiling (see setRecordingsStorageType).
+            tripsLimitMb = Math.max(MIN_LIMIT_MB, Math.min(volumeCeilingMb(liveTotal), tripsLimitMb));
         }
         updateActiveDirectories();
         saveConfig();
@@ -2904,6 +3359,40 @@ public class StorageManager {
 
     public List<File> getAllTripsDirs() {
         return getAllDirsForType(tripsDir, internalTripsDir, sdCardTripsDir, usbTripsDir);
+    }
+
+    /**
+     * Bounded directory listing for callers (e.g. trip recovery) that walk a
+     * possibly-FUSE-bridged SD/USB trips dir. Runs the in-process
+     * {@code File.listFiles()} on a SEPARATE worker thread with a hard deadline:
+     * a flaky FUSE mount mid-write does NOT return null from listFiles() — it
+     * BLOCKS inside native readdir/stat indefinitely — so we must bound the call
+     * itself, not just handle a null return. On timeout (or null), we abandon
+     * the (possibly-stuck, daemon) worker and fall back to {@link
+     * #listFilesViaShell}, which has its own 4s `ls` deadline + destroyForcibly.
+     * Returns null only if both paths fail. This is what keeps a hung card from
+     * stranding the recovery worker + latching its in-progress flags forever.
+     */
+    public File[] listTripFilesBounded(File dir) {
+        if (dir == null) return null;
+        final File d = dir;
+        final java.util.concurrent.atomic.AtomicReference<File[]> result =
+                new java.util.concurrent.atomic.AtomicReference<>(null);
+        Thread worker = new Thread(() -> {
+            try { result.set(d.listFiles()); } catch (Throwable ignored) {}
+        }, "listTripFiles-" + dir.getName());
+        worker.setDaemon(true);   // never block daemon shutdown if it's wedged
+        worker.start();
+        try {
+            worker.join(4_000);   // hard deadline, mirrors listFilesViaShell
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+        File[] direct = result.get();
+        if (direct != null) return direct;
+        // Either listFiles is still blocked in the (abandoned) worker, or it
+        // returned null — fall back to the deadline-bounded shell listing.
+        return listFilesViaShell(dir);
     }
 
     /**
@@ -3183,32 +3672,49 @@ public class StorageManager {
     }
 
     /**
-     * Upward re-clamp on remount: when a configured external volume returns, the
-     * persisted limit may have been shrunk by an OLDER build that used the strict
-     * getEffectiveMaxLimitMb ceiling in its setters (collapsing it to internal's
-     * ~8GB while the card was absent, with no path back). Re-clamp each category's
-     * persisted limit to the now-real mounted ceiling so that intent is restored.
-     * loadTimeCeilingMb returns the true ceiling for a mounted volume and the
-     * preserving sentinel for an unmounted one, so this never shrinks a value and
-     * only grows it back up to what the (now mounted) volume can actually hold.
-     * Persists only if something changed. Cheap; safe to call on every remount.
+     * Re-clamp persisted limits DOWN to the now-mounted external volume's real ceiling.
+     * Shrink-or-hold only (see {@link #reclampTargetMb}): when the persisted limit exceeds
+     * the mounted card's ceiling (a larger card was swapped for a smaller one, or an
+     * oversized value was persisted while the card was absent — loadConfig/the setters
+     * clamp through loadTimeCeilingMb, which returns the 100GB sentinel for an unmounted
+     * external), this shrinks it to the real ceiling so the slider max and the enforced
+     * limit match the actual capacity and the card can't fill to physical-full. A limit at
+     * or below the card ceiling (the user's deliberate choice) is left untouched — reclamp
+     * never grows a configured limit (that would discard the user's retention cap on every
+     * routine USB-rail/FUSE remount). Persists only if something changed. Cheap; safe to
+     * call on every remount.
      */
     private void reclampLimitsToMountedCeilings() {
         try {
-            long r = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(recordingsStorageType),   recordingsLimitMb));
-            long s = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(surveillanceStorageType), surveillanceLimitMb));
-            long p = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(surveillanceStorageType), proximityLimitMb));
-            long t = Math.max(MIN_LIMIT_MB, Math.min(loadTimeCeilingMb(tripsStorageType),        tripsLimitMb));
-            // Only the persisted *intent* matters here; loadTimeCeilingMb already
-            // preserves a large external limit while unmounted, so the values here
-            // never decrease — they only recover toward the mounted ceiling.
-            boolean changed = (r != recordingsLimitMb) || (s != surveillanceLimitMb)
-                           || (p != proximityLimitMb) || (t != tripsLimitMb);
-            recordingsLimitMb = r;
-            surveillanceLimitMb = s;
-            proximityLimitMb = p;
-            tripsLimitMb = t;
-            if (changed) saveConfig();
+            // Serialize against the limit setters and storage-type setters: all four
+            // *LimitMb fields are static long and were read-modify-written here with no
+            // lock, while a concurrent set*LimitMb / set*StorageType on the HTTP pool
+            // wrote the same fields. A card-insert remount (this is now called on the
+            // extra remount-success paths, exactly the window a user adjusts limits)
+            // could interleave with a limit save → lost update durably corrupts the
+            // PERSISTED + UI-displayed limit. configChangeLock is the shared monitor the
+            // setters already hold, so taking it here makes the whole RMW atomic w.r.t.
+            // them. (saveConfig's synchronized(this) only serializes JSON assembly, not
+            // these field mutations.)
+            synchronized (configChangeLock) {
+                long r = reclampTargetMb(recordingsStorageType,   recordingsLimitMb);
+                long s = reclampTargetMb(surveillanceStorageType, surveillanceLimitMb);
+                long p = reclampTargetMb(recordingsStorageType, proximityLimitMb);  // proximity follows recordings (ACC-ON) volume
+                long t = reclampTargetMb(tripsStorageType,        tripsLimitMb);
+                // reclampTargetMb preserves a large external limit while UNMOUNTED (no
+                // shrink against an absent card) AND while a still-mounted card returns a
+                // transient StatFs 0 (FUSE/vold mid-remount hiccup). Only a genuine
+                // mounted card with a positive live total down-clamps an oversized value
+                // (smaller-swap) to the card's real ceiling; a configured limit at/below
+                // the ceiling is held, never grown.
+                boolean changed = (r != recordingsLimitMb) || (s != surveillanceLimitMb)
+                               || (p != proximityLimitMb) || (t != tripsLimitMb);
+                recordingsLimitMb = r;
+                surveillanceLimitMb = s;
+                proximityLimitMb = p;
+                tripsLimitMb = t;
+                if (changed) saveConfig();
+            }
         } catch (Throwable ignored) {}
     }
 
@@ -3333,6 +3839,65 @@ public class StorageManager {
     }
 
     /**
+     * Re-clamp ceiling (MB) for {@link #reclampLimitsToMountedCeilings}, honoring the
+     * SAME transient-zero guard the storage-type setters use ({@code liveTotal > 0}).
+     *
+     * <p>{@link #loadTimeCeilingMb} is unsafe to down-clamp against here: for an
+     * external type it gates on {@code sdCardAvailable}/{@code usbAvailable} and then
+     * calls {@link #getEffectiveMaxLimitMb}, which collapses to internal's ~8GB
+     * ceiling whenever the live StatFs read returns 0 (a FUSE/vold hiccup mid-remount)
+     * even though the card is still mounted. reclamp persists its result via
+     * saveConfig() and only ever GROWS back via min(realCeiling, current) — so a
+     * single transient zero would permanently shrink a valid external limit to ~8GB
+     * and then drive the reaper to delete the SD/USB archive down to that size.
+     * Treating a 0 live total as "don't shrink" (return the current limit, an effective
+     * no-op through the caller's min) leaves the persisted limit intact until a real
+     * positive read confirms the actual capacity. A genuine smaller card SWAP still
+     * reads live &gt; 0 and clamps correctly; runtime over-fill on a transient zero
+     * stays bounded by {@link #effectiveReapLimitBytes}/{@link #activeExternalReapLimitBytes}.
+     */
+    private long reclampCeilingMb(StorageType type, long currentLimitMb) {
+        if (type == StorageType.INTERNAL) return getEffectiveMaxLimitMb(StorageType.INTERNAL);
+        boolean mounted = (type == StorageType.SD_CARD) ? sdCardAvailable
+                        : (type == StorageType.USB) ? usbAvailable : false;
+        if (!mounted) return MAX_LIMIT_MB_FALLBACK; // unmounted: preserve persisted limit (no shrink)
+        long liveTotal = liveVolumeTotalBytes(type);
+        if (liveTotal <= 0) return currentLimitMb; // mounted but transient StatFs 0: don't shrink
+        // Reuse the read that just passed the guard — do NOT call getEffectiveMaxLimitMb(type),
+        // which performs its OWN fresh StatFs read that can race to 0 on a flaky FUSE mount
+        // (read#1 positive, read#2 zero) and collapse to internal's ~8GB ceiling, persisting an
+        // irreversible shrink + mass-reap of the external archive (the round-3 data-loss bug).
+        // volumeCeilingMb(liveTotal) is exactly the transform getEffectiveMaxLimitMb applies for
+        // a positive total, computed from the single value that cleared the transient-zero guard.
+        return volumeCeilingMb(liveTotal);
+    }
+
+    /**
+     * Resolve the new persisted limit (MB) for {@link #reclampLimitsToMountedCeilings}.
+     *
+     * <p>SHRINK-OR-HOLD ONLY: {@code min(reclampCeilingMb, current)}, floored at MIN. This
+     * preserves a deliberately-small user limit (it's at/below the card ceiling, so {@code
+     * min} keeps it) and still down-clamps an OVERSIZED persisted limit to the card's real
+     * ceiling when a smaller card is mounted, while never widening against the unmounted
+     * sentinel or a transient StatFs 0. The same {@code min(ceiling, current)} contract is
+     * used by loadConfig, the limit setters, and the storage-type setters — reclamp must
+     * not be the lone path that diverges.
+     *
+     * <p>The "Up" recovery once enumerated in the class doc (grow a limit an older build
+     * stale-shrank to internal's ~8GB ceiling back toward the card's capacity) was REMOVED:
+     * a bare persisted {@code *LimitMb} carries no provenance, so the adopt-the-ceiling
+     * implementation could not tell a sentinel-corrupted value from an intentional small
+     * user choice and grew EVERY external limit below the card ceiling up to physical-full
+     * on each routine USB-rail/FUSE remount, destroying + persisting over the user's choice
+     * within one ACC cycle. Honoring the configured retention cap outweighs auto-recovering
+     * the rare stale-shrunk case; a user who wants more capacity can simply raise the limit.
+     */
+    private long reclampTargetMb(StorageType type, long currentLimitMb) {
+        long ceiling = reclampCeilingMb(type, currentLimitMb);
+        return Math.max(MIN_LIMIT_MB, Math.min(ceiling, currentLimitMb));
+    }
+
+    /**
      * Runtime EFFECTIVE retention limit (MB) for a category whose configured
      * limit is {@code configuredMb}, given the volume writes are ACTUALLY landing
      * on right now ({@code activeType}). Returns {@code min(configuredMb,
@@ -3360,6 +3925,36 @@ public class StorageManager {
         return effectiveReapLimitMb(activeType, configuredMb) * 1024L * 1024L;
     }
 
+    /**
+     * Runtime EFFECTIVE retention limit (bytes) for a category whose writes are
+     * ACTUALLY landing on a mounted EXTERNAL volume ({@code activeType} is SD/USB,
+     * active == configured, no internal fallback). Returns {@code min(configuredMb,
+     * liveCeiling(activeType))} in bytes, where the ceiling is the volume's LIVE
+     * total minus {@link #VOLUME_HEADROOM_MB}.
+     *
+     * <p>WHY NOT {@link #effectiveReapLimitBytes}: that path routes through
+     * {@link #getEffectiveMaxLimitMb}, which substitutes INTERNAL's (smaller)
+     * ceiling whenever the external StatFs transiently reads 0 — on a FUSE hiccup
+     * that would shrink the SD target to ~8 GB and over-reap a large card. Here we
+     * read {@link #liveVolumeTotalBytes} and treat a 0/unreadable result as
+     * "don't shrink" (return the configured limit untouched this pass), so a
+     * momentary vold/FUSE stall never triggers a spurious mass-delete on the card.
+     * The clamp only bites once StatFs reports the card's real (smaller) capacity —
+     * exactly when an oversized persisted limit would otherwise let the card
+     * fill to physical-full.
+     */
+    private long activeExternalReapLimitBytes(StorageType activeType, long configuredMb) {
+        long configuredBytes = configuredMb * 1024L * 1024L;
+        long totalBytes = liveVolumeTotalBytes(activeType);
+        if (totalBytes <= 0) {
+            // Transient StatFs zero — don't shrink the target on a hiccup.
+            return configuredBytes;
+        }
+        long ceilingBytes = volumeCeilingMb(totalBytes) * 1024L * 1024L;
+        long minBytes = MIN_LIMIT_MB * 1024L * 1024L;
+        return Math.max(minBytes, Math.min(configuredBytes, ceilingBytes));
+    }
+
     // ── Per-category resolvers for the active-volume retention scoping ──────────
     // These let the single chokepoint in ensureSpace() resolve, for any category,
     // (a) the volume writes are CURRENTLY landing on, (b) the user's CONFIGURED
@@ -3371,7 +3966,7 @@ public class StorageManager {
         switch (category) {
             case "recordings":   return getActiveRecordingsStorageType();   // ENOSPC-aware (mounted-but-full → INTERNAL)
             case "surveillance": return getActiveSurveillanceStorageType();
-            case "proximity":    return getActiveSurveillanceStorageType();  // proximity follows surveillance volume
+            case "proximity":    return normalizeStorageType(recordingsStorageType);  // proximity follows recordings (ACC-ON) volume; plain mount-based (no ENOSPC redirect of its own)
             case "trips":        return getActiveTripsStorageType();
             default:             return StorageType.INTERNAL;
         }
@@ -3381,7 +3976,7 @@ public class StorageManager {
         switch (category) {
             case "recordings":   return recordingsStorageType;
             case "surveillance": return surveillanceStorageType;
-            case "proximity":    return surveillanceStorageType;
+            case "proximity":    return recordingsStorageType;  // proximity follows recordings (ACC-ON) volume
             case "trips":        return tripsStorageType;
             default:             return StorageType.INTERNAL;
         }
@@ -3442,7 +4037,26 @@ public class StorageManager {
         if (isFallbackActiveForCategory(category)) {
             return effectiveReapLimitBytes(StorageType.INTERNAL, configuredMb);
         }
-        return configuredMb * 1024L * 1024L;
+        // Active EXTERNAL (SD/USB), no fallback: mirror ensureSpace's active-external
+        // clamp so the periodic 90% gate / HARD escape / deferred-drain measure against
+        // the SAME card-capacity-bounded limit the reaper enforces. Without this the
+        // gate would compare the real card pool against an oversized persisted limit
+        // (up to the 100 GB sentinel), never trip, and the reaper would never be
+        // invoked even though it would now reap correctly once called.
+        StorageType activeType = activeTypeForCategory(category);
+        if (activeType != StorageType.INTERNAL) {
+            return activeExternalReapLimitBytes(activeType, configuredMb);
+        }
+        // Natively-INTERNAL (active == configured == INTERNAL): mirror ensureSpace's
+        // internal-capacity clamp (see the `else if (activeType == INTERNAL)` branch)
+        // so the gate trips at the SAME bound the reaper enforces. A limit persisted
+        // while internal's StatFs transiently read 0 can be up to the 100 GB sentinel;
+        // returning that raw value here means the 90% gate / HARD escape / onSaved
+        // checks compare the real internal pool against ~100 GB, never trip, and the
+        // reaper is never invoked even though it would now clamp+converge once called —
+        // internal fills to physical-full with the configured limit silently un-enforced.
+        return Math.min(configuredMb * 1024L * 1024L,
+            effectiveReapLimitBytes(StorageType.INTERNAL, configuredMb));
     }
 
     /** The INTERNAL active dir for a category — the dir writes land on during a
@@ -3790,7 +4404,14 @@ public class StorageManager {
     }
 
     public File[] listFilesWithFallback(File dir, String prefix, String suffix) {
-        if (dir == null || !dir.exists() || !dir.isDirectory() || !dir.canRead()) {
+        // NOTE: deliberately do NOT gate on canRead(). On the SD/USB FUSE mount
+        // under daemon UID 2000 the dir reads non-readable to Java yet the shell
+        // ls fallback below still enumerates it — the same reason the size gate,
+        // wipeMediaCategory, sweepOrphanTempFiles and the ensureSpace sidecar
+        // sweep guard only on exists()+isDirectory(). A canRead() short-circuit
+        // here would skip the listFilesViaShell path and silently no-op the
+        // FUSE consumers (e.g. cleanupOrphanedTmpFiles).
+        if (dir == null || !dir.exists() || !dir.isDirectory()) {
             return new File[0];
         }
         java.io.FileFilter filter = f -> {
@@ -3853,6 +4474,17 @@ public class StorageManager {
 
     // ==================== Cleanup Logic ====================
     
+    // Return values of {@link #cleanupGateDuringRecording}: how a caller should
+    // proceed when it wants to reap a category.
+    /** Encoder idle (or no over-limit) — run the normal UNLIMITED reap. */
+    private static final int REAP_FULL = 0;
+    /** Encoder writing, usage in the 0–5% over-cap band — run a BOUNDED trim
+     *  ({@link #RECORDING_TRIM_MAX_FILES}) so the limit still converges mid-drive
+     *  without a disk-writer-starving burst. */
+    private static final int REAP_BOUNDED = 1;
+    /** Encoder writing, usage under cap (or category empty) — defer to idle drain. */
+    private static final int REAP_DEFER = 2;
+
     /**
      * If a recording is in flight, defer the cleanup so it runs on the next
      * encoder-idle periodic tick. Returns true when deferral happened.
@@ -3871,6 +4503,10 @@ public class StorageManager {
      * &gt;5%, deferral is skipped — at that point the encoder will
      * backpressure on disk full anyway, so unblocking storage is the
      * lesser evil. Mirrors the periodic-loop policy.
+     *
+     * <p>This is the DEFER-OR-FULL gate used by the limit-change / boot / wipe
+     * callers. The periodic ticker uses {@link #cleanupGateDuringRecording}
+     * instead, which adds the BOUNDED-trim middle state.
      */
     private boolean deferIfEncoderBusy(String deferredKey, long currentSize, long limitBytes) {
         if (!isEncoderWriting()) return false;
@@ -3883,6 +4519,46 @@ public class StorageManager {
         deferredCleanupDirs.add(deferredKey);
         logDebug("Cleanup deferred (encoder busy): " + deferredKey + " — will drain on next idle tick");
         return true;
+    }
+
+    /**
+     * Cleanup-gate for the PERIODIC TICKER while it may be racing the encoder.
+     *
+     * <p>WHY THIS EXISTS — the "periodic cleanup never frees space" deadlock.
+     * {@link #deferIfEncoderBusy} is all-or-nothing: below +5% over cap it DEFERS,
+     * and the deferred queue only drains when {@code isEncoderWriting()} is false.
+     * During a continuous drive that idle window never opens, and a continuous
+     * recorder parks ~1.9% over its cap forever (one ~220 MB segment per ~2 min vs
+     * the cap). Result: in the 0–5% band nothing was EVER reaped while driving —
+     * the gate fired every 30 s, logged "...recordings at 10.7 GB/10.5 GB", and
+     * deleted zero bytes until the volume hit ENOSPC. (The "forced...CRITICAL"
+     * tick admitted itself on a disk-critical signal, but then called
+     * ensureRecordingsSpace which re-deferred on this same +5% rule with no
+     * knowledge of the disk-critical state — so the signal never reached the
+     * reaper. Gate disagreement, now closed: the ticker reaps directly via the
+     * decision returned here.)
+     *
+     * <p>Three outcomes:
+     * <ul>
+     *   <li>{@link #REAP_FULL} — encoder idle, or not over cap: unbounded reap.
+     *   <li>{@link #REAP_BOUNDED} — encoder writing AND over cap (any amount up to
+     *       +5%): trim a few oldest finalized segments this tick so the limit
+     *       converges without a burst. Above +5% also returns FULL (HARD escape).
+     *   <li>{@link #REAP_DEFER} — encoder writing and under cap: nothing to do,
+     *       mark deferred so an idle drain re-checks.
+     * </ul>
+     */
+    private int cleanupGateDuringRecording(String deferredKey, long currentSize, long limitBytes) {
+        if (!isEncoderWriting()) return REAP_FULL;
+        if (limitBytes <= 0 || currentSize <= limitBytes) {
+            // Under cap (the 90% ticker gate can fire between 90%–100%): nothing to
+            // free yet. Mark deferred so the next idle drain revisits if it climbs.
+            deferredCleanupDirs.add(deferredKey);
+            return REAP_DEFER;
+        }
+        boolean hardOverLimit = currentSize > limitBytes * 21 / 20;  // >5% over
+        // Over cap but ≤5%: bounded trim. Over cap by >5%: full emergency reap.
+        return hardOverLimit ? REAP_FULL : REAP_BOUNDED;
     }
 
     /**
@@ -4107,23 +4783,7 @@ public class StorageManager {
      */
     public boolean ensureTripsSpace(long reserveBytes) {
         synchronized (tripsCleanupLock) {
-            // Reconcile orphan DB rows BEFORE reading the gate size. The trips
-            // limit gate reads the DB SUM(size_bytes+sidecar_size_bytes), but the
-            // reaper frees bytes by walking the filesystem. A row whose .jsonl.gz
-            // vanished out-of-band (file-manager delete, SD/volume swap, or a crash
-            // between TripApiHandler's file-delete and row-delete) keeps the SUM
-            // inflated forever: the gate fires every 30s while the disk walk has
-            // nothing to delete, so it never converges. Drop those rows here so the
-            // DB-backed size only reflects bytes that are actually reapable, then
-            // expire the cached SUM so the gate re-reads post-reconcile reality.
-            try {
-                com.overdrive.app.trips.TripAnalyticsManager tam =
-                        com.overdrive.app.daemon.CameraDaemon.getTripAnalyticsManager();
-                com.overdrive.app.trips.TripDatabase db = (tam != null) ? tam.getDatabase() : null;
-                if (db != null && db.deleteRowsWithMissingFiles() > 0) {
-                    invalidateTripsDbSizeCache();
-                }
-            } catch (Throwable ignored) {}
+            reconcileOrphanTripRows();
 
             if (deferIfEncoderBusy(DEFERRED_TRIPS, scopedSizeForCategory("trips"),
                     scopedLimitBytesForCategory("trips"))) {
@@ -4134,7 +4794,76 @@ public class StorageManager {
                 tripsLimitMb * 1024 * 1024, reserveBytes);
         }
     }
+
+    /**
+     * Drop trip DB rows whose backing .jsonl.gz vanished out-of-band, BEFORE any
+     * trips-size gate read. The trips limit gate reads the DB
+     * SUM(size_bytes+sidecar_size_bytes), but the reaper frees bytes by walking the
+     * filesystem. A row whose file vanished (file-manager delete, SD/volume swap, or
+     * a crash between TripApiHandler's file-delete and row-delete) keeps the SUM
+     * inflated forever: the gate fires every 30 s while the disk walk has nothing to
+     * delete, so it never converges. Caller must hold {@code tripsCleanupLock}.
+     */
+    private void reconcileOrphanTripRows() {
+        try {
+            com.overdrive.app.trips.TripAnalyticsManager tam =
+                    com.overdrive.app.daemon.CameraDaemon.getTripAnalyticsManager();
+            com.overdrive.app.trips.TripDatabase db = (tam != null) ? tam.getDatabase() : null;
+            // Pass a volume-availability guard so a dropped SD/USB card (where
+            // every file reads as missing) can NEVER mass-delete the user's
+            // trip history. A row is only reapable if its file is gone AND the
+            // volume that holds it is mounted. See deleteRowsWithMissingFiles.
+            if (db != null && db.deleteRowsWithMissingFiles(this::isTelemetryVolumeAvailable) > 0) {
+                invalidateTripsDbSizeCache();
+            }
+        } catch (Throwable ignored) {}
+    }
     
+    /**
+     * True iff the storage volume that {@code telemetryPath} lives on is
+     * currently mounted and readable — the guard that stops the trips
+     * orphan-reconcile from mass-deleting history when an SD/USB card is
+     * dropped (every file on an unmounted volume reads as missing).
+     *
+     * <p>Resolution is DENYLIST-BY-INTERNAL (fail safe toward preservation):
+     * return true ONLY for paths we can prove live on internal storage (which is
+     * always mounted). Removable roots gate on their live mount probe. ANYTHING
+     * else — including a path on a volume whose root we can't currently resolve
+     * (e.g. {@code sdCardPath==null} because the card is unmounted, or a
+     * {@code /mnt/*} mount point we didn't recognise) — returns false so the row
+     * is PRESERVED. The earlier allowlist-by-removable-shape version wrongly fell
+     * through to "internal → true" for unrecognised removable mount points (e.g.
+     * {@code /mnt/external_sd} from the /proc/mounts fallback), which would
+     * mass-delete history on exactly the dropped-card case this guard exists for.
+     */
+    private boolean isTelemetryVolumeAvailable(String telemetryPath) {
+        if (telemetryPath == null || telemetryPath.isEmpty()) return false;
+
+        // Known removable roots, while mounted: gate on the live probe.
+        String sd = sdCardPath;
+        if (sd != null && !sd.isEmpty() && telemetryPath.startsWith(sd)) {
+            return isSdCardLikelyMounted();
+        }
+        String usb = usbPath;
+        if (usb != null && !usb.isEmpty() && telemetryPath.startsWith(usb)) {
+            return isUsbLikelyMounted();
+        }
+
+        // Provably-internal roots are always available. Only these return true.
+        if (telemetryPath.startsWith(INTERNAL_BASE_DIR)
+                || telemetryPath.startsWith(LEGACY_APP_FILES_DIR)
+                || telemetryPath.startsWith("/storage/emulated")
+                || telemetryPath.startsWith("/storage/self")
+                || telemetryPath.startsWith("/data/")) {
+            return true;
+        }
+
+        // Anything else — an unmounted removable root (path under /storage/<uuid>,
+        // /mnt/*, etc. whose live root we couldn't match above) — is treated as
+        // unavailable so the reconcile PRESERVES the row rather than deleting it.
+        return false;
+    }
+
     /**
      * Primary file extension for a category. Cleanup walks files matching
      * this extension as the "anchor" rows; sidecars are pulled in via
@@ -4166,7 +4895,10 @@ public class StorageManager {
      */
     private static String[] partialExtensionsForCategory(String category) {
         switch (category) {
-            case "recordings":   return new String[]{".mp4.tmp", ".broken"};
+            // .json.tmp / .srt.tmp: LocationSidecarWriter.writeJsonAtomic and
+            // SrtWriter.write both write a <base>.<ext>.tmp then rename; an abnormal
+            // exit between write and rename orphans the .tmp next to a cam_/dvr_ clip.
+            case "recordings":   return new String[]{".mp4.tmp", ".broken", ".json.tmp", ".srt.tmp"};
             case "surveillance": return new String[]{".mp4.tmp", ".broken", ".jpg.tmp", ".json.tmp", ".srt.tmp"};
             case "proximity":    return new String[]{".mp4.tmp", ".broken"};
             case "trips":        return new String[]{".jsonl.gz.tmp"};
@@ -4186,13 +4918,18 @@ public class StorageManager {
     private static String[] sidecarExtensionsForCategory(String category) {
         switch (category) {
             case "recordings":
-                // cam_*.mp4 carries a cam_*.json geo sidecar written by
-                // LocationSidecarWriter for the pano/recorder flow. Reaping the
-                // .mp4 must also reap its .json (and count it toward the limit)
-                // or the sidecars leak forever, one per recorded segment. The
-                // dvr_ aux clips get no .json, so this can't orphan-delete a
-                // needed dvr_ companion.
-                return new String[]{".json"};
+                // Both cam_*.mp4 AND dvr_*.mp4 (OEM Dashcam) carry geo + subtitle
+                // sidecars: LocationSidecarWriter.writeJsonAtomic writes <base>.json
+                // and SrtWriter writes <base>.srt for any clip whose
+                // inferGeocodingFlow != "surveillance" — i.e. everything that isn't
+                // event_* (HardwareEventRecorderGpu:inferGeocodingFlow only special-
+                // cases the "event_" prefix). dvr_ clips run through the SAME encoder,
+                // so they get dvr_*.json and dvr_*.srt companions too (the old comment
+                // claiming "dvr_ aux clips get no .json" was wrong). Both extensions
+                // must be in this list or the .srt (and, for dvr_, the .json) leak
+                // forever — one per recorded segment — counted by nothing and reaped
+                // by nothing. .srt was entirely absent here.
+                return new String[]{".json", ".srt"};
             case "surveillance":
                 // event_*: timeline JSON, hero JPG, overlay SRT.
                 return new String[]{".json", ".jpg", ".srt"};
@@ -4257,6 +4994,27 @@ public class StorageManager {
     private boolean ensureSpace(String category, List<File> dirs, File activeDir,
                                 String namePrefix,
                                 long limitBytes, long reserveBytes) {
+        // Backward-compatible entry point: no delete budget (full reap to limit).
+        // Boot reap, idle drain, post-save cleanup, limit-change, and the HARD
+        // over-limit emergency path all want the unbounded behaviour.
+        return ensureSpace(category, dirs, activeDir, namePrefix,
+            limitBytes, reserveBytes, UNLIMITED_REAP);
+    }
+
+    /**
+     * As {@link #ensureSpace(String, List, File, String, long, long)} but with a
+     * delete budget. {@code maxDeletes <= 0} ({@link #UNLIMITED_REAP}) reaps as many
+     * oldest anchors as needed to reach the limit. A positive budget stops after that
+     * many anchor deletions — the BOUNDED-TRIM mode used by the periodic tick WHILE
+     * the encoder is writing, so a single pass can't fire a large delete-burst that
+     * starves the muxer's disk writer (see {@link #RECORDING_TRIM_MAX_FILES}). The
+     * orphan-sidecar sweep and the CDR fallback are skipped under a budget — they walk
+     * the whole tree and are housekeeping that the next idle/full pass still performs.
+     */
+    private boolean ensureSpace(String category, List<File> dirs, File activeDir,
+                                String namePrefix,
+                                long limitBytes, long reserveBytes, int maxDeletes) {
+        final boolean budgeted = maxDeletes > 0;
         // Active-volume scoping: if writes have fallen back from a configured
         // external volume onto internal, bound internal to the configured limit
         // (clamped to internal's capacity) and DON'T touch the external archive.
@@ -4287,6 +5045,23 @@ public class StorageManager {
             // matters — giving correct convergence without shrinking on a hiccup.
             limitBytes = Math.min(limitBytes,
                 effectiveReapLimitBytes(StorageType.INTERNAL, configuredLimitMbForCategory(category)));
+        } else if (activeType != StorageType.INTERNAL) {
+            // Active EXTERNAL volume (SD/USB), active == configured (no fallback).
+            // A limit persisted while the card was absent — or carried over from a
+            // larger card before a swap — can be up to the 100 GB MAX_LIMIT_MB_FALLBACK
+            // sentinel (loadConfig + the set*LimitMb setters both clamp through
+            // loadTimeCeilingMb, which returns that sentinel for an unmounted external).
+            // reclampLimitsToMountedCeilings() only re-clamps on SOME remount paths,
+            // so an oversized value can survive on a now-mounted small card. Without a
+            // clamp here the reaper target stays at that sentinel on e.g. a 32 GB card,
+            // currentSize never exceeds it, the reaper deletes nothing, and the card
+            // fills to physical-full — the configured limit silently un-enforced.
+            // Bound the enforced target to the active card's real capacity using the
+            // LIVE total (activeExternalReapLimitBytes), which treats a transient StatFs
+            // zero as "don't shrink" rather than substituting internal's smaller ceiling
+            // (which would over-reap the SD card on a FUSE hiccup).
+            limitBytes = Math.min(limitBytes,
+                activeExternalReapLimitBytes(activeType, configuredLimitMbForCategory(category)));
         }
 
         if (activeDir != null && (!activeDir.exists() || !activeDir.isDirectory())) {
@@ -4369,6 +5144,20 @@ public class StorageManager {
         }
 
         if (allFiles.isEmpty()) {
+            // We were called because the GATE measured this category OVER its
+            // limit (scopedSizeForCategory > scopedLimitBytesForCategory), yet
+            // the reaper's own walk found ZERO reapable anchors. On a flaky
+            // FUSE-bridged SD/USB volume mid-remount, listFiles() (and the
+            // shell-ls fallback) can both return null, so the reaper sees an
+            // empty pool, "converges" to nothing, and the gate keeps firing
+            // every 30 s with no delete — the silent no-op behind the field
+            // report "periodic cleanup never cleans up". Make it loud and
+            // measured so this is diagnosable from a single log capture instead
+            // of inferred. The next tick re-tries once the volume re-resolves.
+            logWarn(category + " over limit (" + formatSize(currentSize) + "/"
+                + formatSize(limitBytes) + ") but found NO reapable files in "
+                + dirs.size() + " dir(s) — volume listing likely failed (transient "
+                + "unmount?); will retry next pass");
             return true;
         }
 
@@ -4378,6 +5167,7 @@ public class StorageManager {
         int deletedCount = 0;
         long deletedSize = 0;
         boolean reapedFromInactive = false;
+        boolean budgetExhausted = false;
 
         // Path of the in-flight trip telemetry file, if any. Only honored
         // when reaping the trips category; recordings/surveillance use the
@@ -4386,6 +5176,19 @@ public class StorageManager {
 
         for (File file : allFiles) {
             if (currentSize <= targetSize) break;
+
+            // Bounded-trim cap: when running WHILE the encoder writes, stop after
+            // maxDeletes ANCHOR deletions so this pass can't fire a large delete-
+            // burst that contends with the muxer's disk writer. The budget counts
+            // ANCHORS (the heavy ~220 MB .mp4 files); each anchor's same-stem
+            // sidecars and aux thumbs (KB-scale) ride along uncounted below — their
+            // unlink cost is negligible next to the big files the budget exists to
+            // pace. The 30 s ticker resumes the trim next pass, so the limit still
+            // converges.
+            if (budgeted && deletedCount >= maxDeletes) {
+                budgetExhausted = true;
+                break;
+            }
 
             // Don't unlink a still-being-written trip file. The recorder
             // keeps the GZIPOutputStream open across SAMPLE_INTERVAL_MS ticks;
@@ -4492,7 +5295,25 @@ public class StorageManager {
 
         if (deletedCount > 0) {
             logInfo("Cleanup complete: deleted " + deletedCount + " files (" + formatSize(deletedSize) + ")"
-                + (reapedFromInactive ? " — including orphan/legacy locations" : ""));
+                + (reapedFromInactive ? " — including orphan/legacy locations" : "")
+                + (budgetExhausted ? " — bounded trim (budget=" + maxDeletes
+                    + "/tick, still " + formatSize(currentSize - targetSize)
+                    + " over; continues next pass)" : ""));
+        }
+
+        // Bounded-trim pass stops here: the orphan-sidecar sweep and CDR fallback
+        // below both walk the ENTIRE tree (and CDR forks a deep external clean),
+        // which is exactly the whole-tree I/O the budget exists to avoid while the
+        // encoder is writing. They're pure housekeeping that the next idle/full
+        // reap (or the HARD emergency path) still performs, so deferring them keeps
+        // the mid-recording pass cheap without losing any cleanup.
+        if (budgeted) {
+            // Must still expire the trips DB-size cache if we dropped any rows,
+            // exactly as the full path does at its tail — otherwise the next
+            // getTripsSize() returns the stale (inflated) SUM and the gate keeps
+            // firing with nothing to free. No-op for non-trips categories.
+            if (tripsRowReaped) invalidateTripsDbSizeCache();
+            return currentSize <= targetSize;
         }
 
         // Orphan-sidecar pass. The collection loop above accumulated every
@@ -4547,8 +5368,22 @@ public class StorageManager {
                         if (actorMarker > auxLen) {
                             stem = name.substring(auxLen, actorMarker);
                         }
-                    } else {
-                        // Same-stem sidecar (event_xxx.json/.srt/.jpg).
+                    }
+                    // Same-stem sidecar (event_xxx.json/.srt/.jpg) — ALSO the fall-through
+                    // for an aux-prefixed name that is NOT a per-actor thumb. Not every aux
+                    // prefix is thumb-shaped: "dvr_" (OEM dashcam) is an aux prefix only so
+                    // dvr_*.mp4 counts as a recordings ANCHOR, but its sidecars are SAME-STEM
+                    // (dvr_<ts>.json from LocationSidecarWriter, dvr_<ts>.srt from SrtWriter —
+                    // inferGeocodingFlow treats every non-event_ clip as "recording"). Those
+                    // names carry no "_a<digit>" actor marker, so the aux branch above leaves
+                    // stem==null and they were skipped forever: counted toward the limit by
+                    // getDirectoriesTotalSize yet reaped by nothing once their .mp4 anchor was
+                    // gone — a slow recordings leak that keeps the folder above its limit.
+                    // Falling through to the same-stem parse recognizes dvr_<ts>.json/.srt as
+                    // sidecars of stem dvr_<ts>. Safe for thumb_: real per-actor thumbs always
+                    // have the actor marker (parsed above → stem set → this is skipped), and a
+                    // live anchor's sidecars are still protected by the liveStems guard below.
+                    if (stem == null) {
                         for (String ext : sidecarExts) {
                             if (name.endsWith(ext)) {
                                 stem = name.substring(0, name.length() - ext.length());
@@ -5125,30 +5960,72 @@ public class StorageManager {
                     logDebug("Periodic cleanup tick skipped — encoder probe not wired yet");
                     return;
                 }
-                // SOTA: skip the entire pass while the encoder is writing. The
-                // 19-files / 118 MB delete burst observed in field logs while
-                // recording was active produced a 2.8 sec mosaic+swap stall on
-                // the GL thread (encoder backpressured eglSwap because the disk
-                // writer was starved by cleanup I/O). Deferring is safe: the
-                // dir is added to deferredCleanupDirs so the next tick (or the
-                // next save event after recording finishes) drains it.
+                // Self-clear a stale ENOSPC fallback. recordingsEnospcFallbackActive
+                // latches true when a mounted-but-full external volume redirects a
+                // segment to internal, but it is only re-evaluated by the per-segment
+                // recorder probe — so after a full-volume drive ends (recording stops,
+                // no more probes), the flag stays true while parked even though
+                // surveillance reaps / the user deletes files and the volume frees up.
+                // While stale-true getActiveRecordingsStorageType() reports INTERNAL, so
+                // the reaper scopes to internal-only and the real external recordings
+                // pool is neither measured nor reaped against the configured external
+                // limit until the next external recording session. Re-probe the
+                // volume recordings is ACTUALLY configured to (cheap StatFs, ~200µs)
+                // and clear the flag once it has room again, so this same tick's
+                // recordings pass below re-scopes to that pool and enforces its limit.
                 //
-                // Edge case: a HARD storage situation (disk literally full, can't
-                // even write the next muxer chunk) needs a way out. We honor
-                // that by forcing a cleanup pass when current usage exceeds the
-                // limit by >5% — at that point eglSwap will fail anyway, so
-                // unblocking storage is the lesser evil. Below that threshold,
-                // the encoder write wins.
-                if (isEncoderWriting()) {
-                    // Per-dir over-limit ratio. Old code used MAX(limits)/20 as
-                    // the denominator, which let a small dir (e.g., 100 MB
-                    // recordings) grow many tens of MB over its OWN limit
-                    // before triggering. Per-dir ratio gives every dir an
-                    // independent, fair escape (audit Finding "storage drift").
-                    // Scoped to each category's ACTIVE volume + effective limit so a
-                    // fallback to internal is measured on internal's pool vs internal's
-                    // cap (combined-pool-vs-raw-external would never trip during a
-                    // fallback and internal could fill to physical-full mid-recording).
+                // The flag is volume-agnostic (resolveTargetWithEnospcFallback sets it
+                // for ANY mounted-but-full external recordings target), so we MUST probe
+                // the configured volume — getUsbFreeSpace() for USB, getSdCardFreeSpace()
+                // for SD. Probing SD only would leave a USB-configured user stuck-true
+                // forever while parked, and would read the wrong volume's free space when
+                // both cards are present.
+                if (recordingsEnospcFallbackActive) {
+                    long extFreeNow = (recordingsStorageType == StorageType.USB)
+                        ? getUsbFreeSpace() : getSdCardFreeSpace();
+                    if (extFreeNow >= ENOSPC_FALLBACK_RECOVER_BYTES) {
+                        recordingsEnospcFallbackActive = false;
+                        logInfo("ENOSPC-fallback cleared: " + recordingsStorageType
+                            + " now has " + formatSize(extFreeNow)
+                            + " free — recordings retention re-scoped to the external pool");
+                    }
+                }
+                // Decide how aggressive this tick is allowed to be, based on
+                // whether the encoder is mid-write.
+                //
+                // OLD POLICY (the bug): while recording, skip the ENTIRE pass
+                // unless usage was >5% over a cap; otherwise mark-deferred and
+                // return. But a continuous recorder parks ~1.9% over forever and
+                // the deferred queue only drains at encoder-idle — which never
+                // happens mid-drive — so in the 0–5% band NOTHING ever reaped and
+                // the volume overflowed to ENOSPC ("periodic cleanup never frees
+                // space"). The full delete-burst the skip was protecting against
+                // (19 files / 118 MB → 2.8 s eglSwap stall) is now avoided a
+                // different way: the per-category passes below run a BOUNDED trim
+                // (≤RECORDING_TRIM_MAX_FILES/tick) while recording, which converges
+                // the limit without starving the muxer's disk writer.
+                //
+                // This block now only: (1) computes the free-disk emergency
+                // signal, (2) logs the over-limit state, and (3) decides whether
+                // to run the whole-tree idle-only work (deferred drain + orphan
+                // tmp sweep) — kept OUT of the steady-state recording path to
+                // hold tick I/O low, but still run during a genuine emergency.
+                boolean encoderWriting = isEncoderWriting();
+                boolean diskCritical = false;
+
+                // Scoped size/limit snapshot for recordings/surveillance/proximity,
+                // measured ONCE per tick in the recording branch and reused by the
+                // per-category passes below (-1 = "measure in the pass"). This avoids
+                // a second uncached FUSE directory walk per category per tick while
+                // recording. Trips is excluded: it's reconciled (orphan-row drop)
+                // right before its pass and is DB-SUM-cached, so it re-reads there.
+                long recBytesSnap = -1, survBytesSnap = -1, proxBytesSnap = -1;
+                long recLimSnap = -1, survLimSnap = -1, proxLimSnap = -1;
+
+                if (encoderWriting) {
+                    // Per-dir over-limit ratio (per-category, not MAX(limits)/20),
+                    // scoped to each category's ACTIVE volume + effective limit so
+                    // an external→internal fallback is measured on internal's pool.
                     long recBytes = scopedSizeForCategory("recordings");
                     long survBytes = scopedSizeForCategory("surveillance");
                     long tripsBytes = scopedSizeForCategory("trips");
@@ -5157,32 +6034,21 @@ public class StorageManager {
                     long survLim = scopedLimitBytesForCategory("surveillance");
                     long tripsLim = scopedLimitBytesForCategory("trips");
                     long proxLim = scopedLimitBytesForCategory("proximity");
+                    // Hand these same measurements to the per-category passes.
+                    recBytesSnap = recBytes;   recLimSnap = recLim;
+                    survBytesSnap = survBytes; survLimSnap = survLim;
+                    proxBytesSnap = proxBytes; proxLimSnap = proxLim;
                     boolean recHard  = recLim   > 0 && recBytes   > recLim   * 21 / 20;  // >5% over OWN limit
                     boolean survHard = survLim  > 0 && survBytes  > survLim  * 21 / 20;
                     boolean tripsHard= tripsLim > 0 && tripsBytes > tripsLim * 21 / 20;
-                    // Proximity keeps its OWN logical cap (proximityLimitMb) even
-                    // though it shares surveillance's volume, so a proximity-only
-                    // overflow must be able to force a pass during continuous
-                    // recording — otherwise the periodic proximity reap below is
-                    // unreachable for the whole drive (encoder writing the whole
-                    // time) and proximity parks above its limit until an idle tick.
                     boolean proxHard = proxLim  > 0 && proxBytes  > proxLim  * 21 / 20;
 
                     // Free-disk emergency: if ANY active volume is critically
-                    // low, continuing to write is going to fail anyway. Force
-                    // cleanup regardless of probe. The min across all
-                    // categories' active volumes covers the case where
-                    // surveillance is on USB while recordings are on internal —
-                    // a starved surveillance volume must still trigger.
-                    //
+                    // low, continuing to write is going to fail anyway. The min
+                    // across all categories' active volumes covers the case where
+                    // surveillance is on USB while recordings are on internal.
                     // Probe each category's ACTIVE volume (activeTypeForCategory),
-                    // NOT the raw configured volatiles — mirroring scopedSizeForCategory.
-                    // During an external→internal fallback activeTypeForCategory
-                    // returns INTERNAL, so this measures the volume actually being
-                    // written; the old configured-type loop measured the unmounted/
-                    // full external (free=0, filtered out) and missed the internal
-                    // pool entirely, so the escape silently no-op'd in the exact
-                    // fallback scenario it exists to guard.
+                    // not the raw configured volatiles — mirroring scopedSizeForCategory.
                     long minFree = Long.MAX_VALUE;
                     boolean activeExternalDown = false;
                     Set<StorageType> activeTypes = new HashSet<>();
@@ -5201,10 +6067,8 @@ public class StorageManager {
                         if (f <= 0) {
                             // A 0 reading on an ACTIVE external volume means it is
                             // unmounted/inaccessible (or genuinely 0-free) — treat
-                            // that as critical rather than discarding it, so the
-                            // escape stays live when the active external is down.
-                            // Internal returning 0 is a transient StatFs hiccup, not
-                            // a definitive critical signal, so don't latch on it.
+                            // that as critical. Internal 0 is a transient StatFs
+                            // hiccup, not a definitive signal, so don't latch on it.
                             if (t == StorageType.SD_CARD || t == StorageType.USB) {
                                 activeExternalDown = true;
                             }
@@ -5213,83 +6077,96 @@ public class StorageManager {
                         if (f < minFree) minFree = f;
                     }
                     long sdFree = (minFree == Long.MAX_VALUE) ? 0 : minFree;
-                    boolean diskCritical = activeExternalDown
+                    diskCritical = activeExternalDown
                         || (sdFree > 0 && sdFree < 200L * 1024 * 1024);  // <200MB free
 
                     boolean hardOverlimit = recHard || survHard || tripsHard || proxHard || diskCritical;
                     if (hardOverlimit) {
+                        // Emergency: log it AND run the idle-only whole-tree work
+                        // (orphan tmp sweep) right now — the disk is about to
+                        // ENOSPC, so the extra I/O is the lesser evil. The
+                        // per-category passes below run a FULL reap (diskCritical
+                        // upgrades the bounded trim to full, see the force flag).
                         logWarn("Periodic cleanup forced during recording: "
                             + "rec=" + formatSize(recBytes) + "/" + formatSize(recLim) + (recHard ? " HARD" : "")
                             + " surv=" + formatSize(survBytes) + "/" + formatSize(survLim) + (survHard ? " HARD" : "")
                             + " trips=" + formatSize(tripsBytes) + "/" + formatSize(tripsLim) + (tripsHard ? " HARD" : "")
                             + " prox=" + formatSize(proxBytes) + "/" + formatSize(proxLim) + (proxHard ? " HARD" : "")
                             + " sdFree=" + formatSize(sdFree) + (diskCritical ? " CRITICAL" : ""));
-                    } else {
-                        // Mark all dirs that are at risk so we drain them later.
-                        if (recBytes > recLim * 0.9) deferredCleanupDirs.add(DEFERRED_RECORDINGS);
-                        if (survBytes > survLim * 0.9) deferredCleanupDirs.add(DEFERRED_SURVEILLANCE);
-                        if (tripsBytes > tripsLim * 0.9) deferredCleanupDirs.add(DEFERRED_TRIPS);
-                        if (proxLim > 0 && proxBytes > proxLim * 0.9) deferredCleanupDirs.add(DEFERRED_PROXIMITY);
-                        return;
+                        sweepOrphanTempFiles();
                     }
+                    // Soft state (over cap ≤5%, disk healthy): fall through to the
+                    // per-category passes, which run a BOUNDED trim. We intentionally
+                    // SKIP drainDeferredCleanupIfDue + sweepOrphanTempFiles here to
+                    // keep steady-state recording-tick I/O low; both run at idle.
+                } else {
+                    // Encoder idle: drain any deferred work first so storage limits
+                    // re-converge after a long recording, then sweep orphan
+                    // .mp4.tmp / .broken / .jpg.tmp partials (whole-tree walk, safe
+                    // when idle; otherwise partials only get reaped at daemon boot).
+                    drainDeferredCleanupIfDue();
+                    sweepOrphanTempFiles();
                 }
 
-                // Encoder idle: drain any deferred work first so storage limits
-                // re-converge after a long recording.
-                drainDeferredCleanupIfDue();
-
-                // Sweep orphan .mp4.tmp / .broken / .jpg.tmp partials. The
-                // helper itself takes per-category locks one at a time and
-                // holds a 10-minute grace window so live writers are never
-                // touched. Without this in the periodic loop, partials
-                // accumulated only got reaped at daemon boot — a long-running
-                // daemon hit by an OOM kill mid-recording could leave the
-                // disk half-full of tmps that the size-based reaper never
-                // frees because it only walks primary-extension files.
-                sweepOrphanTempFiles();
-
                 // Standard periodic pass (catches dirs that grew past the limit
-                // while the daemon was offline, or after a manual limit change).
-                // Each ensureXxxSpace self-acquires its category lock; the
-                // size readouts under the same monitor stay consistent with
-                // what ensureXxxSpace will operate on.
+                // while the daemon was offline, after a manual limit change, OR —
+                // the field "cleanup never frees space" case — that sit over cap
+                // for the whole drive because the encoder never goes idle).
+                //
+                // Each category reaps via runPeriodicCategoryCleanup, which uses
+                // cleanupGateDuringRecording to choose FULL / BOUNDED / DEFER and
+                // then calls ensureSpace DIRECTLY. This is the fix for the gate
+                // disagreement: the old code called ensureXxxSpace here, which
+                // re-ran deferIfEncoderBusy and silently re-deferred anything ≤5%
+                // over cap — so a continuously-recording car (parked ~1.9% over)
+                // never reaped while driving. Reaping directly with a small
+                // per-tick budget converges the limit without a disk-writer-
+                // starving burst.
+                //
                 // Scope size+limit to each category's ACTIVE volume + effective
                 // (clamped) cap, exactly like the HARD branch above and ensureSpace
-                // itself. The old combined-pool-size-vs-raw-external-limit gate
-                // never tripped during an external→internal fallback (the large
-                // under-limit external archive dominated the combined size while
-                // the raw external limit stayed far away), so a near-full internal
-                // pool looked fine and grew toward physical-full. The scoped
-                // helpers are no-ops in normal (active==configured) mode, so
-                // non-fallback behavior is unchanged.
+                // itself. The scoped helpers are no-ops in normal
+                // (active==configured) mode, so non-fallback behavior is unchanged.
+                // diskCritical (only ever set while recording) upgrades a bounded
+                // trim to a FULL reap: when the volume is about to ENOSPC we want
+                // every over-cap category taken all the way down to its limit (and
+                // the CDR/external fallback inside ensureSpace re-enabled), not just
+                // a few-file trim. Harmless at idle (forceFull is false there).
+                final boolean forceFull = diskCritical;
+
+                // PHYSICAL-VOLUME emergency reap — runs BEFORE the per-category
+                // passes. This is the fix for the cap-oversubscription deadlock: when
+                // the SUM of per-category caps exceeds a shared volume's real capacity,
+                // the volume fills to 0-free while every category is under its OWN cap,
+                // so the per-category passes below (and the diskCritical/forceFull
+                // upgrade) free NOTHING — recordings spill to internal via the ENOSPC
+                // fallback and "periodic cleanup never frees space". This pass ignores
+                // per-category caps and evicts the globally-oldest clips on any
+                // physically-full volume until free space recovers, then the
+                // per-category passes run on the freed volume (mostly no-ops). Cheap
+                // when healthy: a StatFs free probe per active volume, no FUSE walk
+                // unless a volume is actually below the floor. Not gated on
+                // encoderWriting — it self-bounds its delete burst while recording.
+                runPhysicalFreeSpaceEmergencyReap();
+
                 synchronized (recordingsCleanupLock) {
-                    long currentSize = scopedSizeForCategory("recordings");
-                    long limitBytes = scopedLimitBytesForCategory("recordings");
-                    if (limitBytes > 0 && currentSize > limitBytes * 0.9) {  // 90% threshold
-                        logInfo("Periodic cleanup: recordings at " +
-                            formatSize(currentSize) + "/" + formatSize(limitBytes));
-                        ensureRecordingsSpace(50 * 1024 * 1024);  // Reserve 50MB
-                    }
+                    runPeriodicCategoryCleanup("recordings", DEFERRED_RECORDINGS, recordingsDir,
+                        forceFull, recBytesSnap, recLimSnap);
                 }
 
                 synchronized (surveillanceCleanupLock) {
-                    long currentSize = scopedSizeForCategory("surveillance");
-                    long limitBytes = scopedLimitBytesForCategory("surveillance");
-                    if (limitBytes > 0 && currentSize > limitBytes * 0.9) {  // 90% threshold
-                        logInfo("Periodic cleanup: surveillance at " +
-                            formatSize(currentSize) + "/" + formatSize(limitBytes));
-                        ensureSurveillanceSpace(50 * 1024 * 1024);  // Reserve 50MB
-                    }
+                    runPeriodicCategoryCleanup("surveillance", DEFERRED_SURVEILLANCE, surveillanceDir,
+                        forceFull, survBytesSnap, survLimSnap);
                 }
 
                 synchronized (tripsCleanupLock) {
-                    long currentSize = scopedSizeForCategory("trips");
-                    long limitBytes = scopedLimitBytesForCategory("trips");
-                    if (limitBytes > 0 && currentSize > limitBytes * 0.9) {  // 90% threshold
-                        logInfo("Periodic cleanup: trips at " +
-                            formatSize(currentSize) + "/" + formatSize(limitBytes));
-                        ensureTripsSpace(50 * 1024 * 1024);  // Reserve 50MB
-                    }
+                    // Reconcile orphan rows first (same as ensureTripsSpace) so the
+                    // gate's DB-SUM size reflects only bytes that actually exist —
+                    // else a vanished-file row keeps the gate firing with nothing
+                    // to delete. Pass -1 so the size is re-read AFTER the reconcile
+                    // (a pre-reconcile snapshot would be inflated by dropped rows).
+                    reconcileOrphanTripRows();
+                    runPeriodicCategoryCleanup("trips", DEFERRED_TRIPS, tripsDir, forceFull, -1, -1);
                 }
 
                 // Proximity must be swept here too. It was historically reaped
@@ -5301,13 +6178,8 @@ public class StorageManager {
                 // the other three categories so the limit converges regardless
                 // of whether new proximity clips are still being written.
                 synchronized (proximityCleanupLock) {
-                    long currentSize = scopedSizeForCategory("proximity");
-                    long limitBytes = scopedLimitBytesForCategory("proximity");
-                    if (limitBytes > 0 && currentSize > limitBytes * 0.9) {  // 90% threshold
-                        logInfo("Periodic cleanup: proximity at " +
-                            formatSize(currentSize) + "/" + formatSize(limitBytes));
-                        ensureProximitySpace(50 * 1024 * 1024);  // Reserve 50MB
-                    }
+                    runPeriodicCategoryCleanup("proximity", DEFERRED_PROXIMITY, proximityDir,
+                        forceFull, proxBytesSnap, proxLimSnap);
                 }
             } catch (Exception e) {
                 logWarn("Periodic cleanup error: " + e.getMessage());
@@ -5398,6 +6270,506 @@ public class StorageManager {
     }
 
     /**
+     * Raw (unscoped) configured limit in BYTES for a category — the value the
+     * direct {@link #ensureSpace} callers pass. {@code ensureSpace} re-scopes/clamps
+     * it to the active volume internally, so we hand it the raw configured cap here.
+     */
+    private long rawLimitBytesForCategory(String category) {
+        switch (category) {
+            case "recordings":   return recordingsLimitMb   * 1024 * 1024;
+            case "surveillance": return surveillanceLimitMb * 1024 * 1024;
+            case "proximity":    return proximityLimitMb    * 1024 * 1024;
+            case "trips":        return tripsLimitMb         * 1024 * 1024;
+            default:             return 0;
+        }
+    }
+
+    /**
+     * One category's periodic-cleanup pass. Caller MUST hold the category's
+     * cleanup lock. Mirrors the old per-category block but routes through
+     * {@link #cleanupGateDuringRecording} so it reaps DIRECTLY (FULL or BOUNDED)
+     * instead of bouncing through {@code ensureXxxSpace}, which would re-defer
+     * anything ≤5% over cap while recording — the deadlock this fix removes.
+     *
+     * @param category    "recordings" | "surveillance" | "proximity" | "trips"
+     * @param deferredKey the matching DEFERRED_* key for the idle-drain queue
+     * @param activeDir   the live write dir for the category (snapshotted by caller)
+     * @param forceFull   when true (disk-critical emergency), reap FULLY even while
+     *                    recording instead of a bounded trim — the disk is about to
+     *                    ENOSPC, so the extra I/O is the lesser evil.
+     * @param preSize     a scoped size already measured this tick, or {@code < 0} to
+     *                    measure it here. Lets the recording branch share its single
+     *                    {@code scopedSizeForCategory} walk (an uncached FUSE
+     *                    directory scan) instead of repeating it — the reaper still
+     *                    does its own authoritative re-measure if a gate fires.
+     * @param preLimit    a scoped limit already measured this tick, or {@code < 0}.
+     */
+    private void runPeriodicCategoryCleanup(String category, String deferredKey,
+                                            File activeDir, boolean forceFull,
+                                            long preSize, long preLimit) {
+        // Scope size+limit to the ACTIVE volume + effective (clamped) cap. No-op in
+        // normal mode; during an external→internal fallback it measures internal's
+        // pool vs internal's cap (see ensureSpace's own scoping). Reuse the caller's
+        // snapshot when given (avoids a second FUSE walk per category per tick).
+        long currentSize = (preSize >= 0) ? preSize : scopedSizeForCategory(category);
+        long limitBytes = (preLimit >= 0) ? preLimit : scopedLimitBytesForCategory(category);
+        if (limitBytes <= 0 || currentSize <= limitBytes * 0.9) {  // 90% wake threshold
+            return;
+        }
+        int decision = cleanupGateDuringRecording(deferredKey, currentSize, limitBytes);
+        if (decision == REAP_DEFER) {
+            // Under cap while recording (90–100% band): nothing over the limit to
+            // free yet; the gate already marked it deferred for the next idle drain.
+            // (This matches the old recording-time behavior, which also deferred
+            // everything ≤5% over while the encoder was writing.)
+            return;
+        }
+        // diskCritical emergency overrides the bounded trim — take it all the way down.
+        boolean bounded = (decision == REAP_BOUNDED) && !forceFull;
+        logInfo("Periodic cleanup: " + category + " at "
+            + formatSize(currentSize) + "/" + formatSize(limitBytes)
+            + (bounded ? " — bounded trim while recording (≤" + RECORDING_TRIM_MAX_FILES
+                + " files/tick)" : (forceFull && decision == REAP_BOUNDED
+                    ? " — full reap (disk critical)" : "")));
+        // Reserve 50MB headroom (parity with the old ensureXxxSpace(50MB) calls).
+        // Pass the RAW configured cap; ensureSpace re-scopes/clamps it to the
+        // active volume just like every other caller.
+        ensureSpace(category, getReapableDirs(category), activeDir,
+            namePrefixForCategory(category),
+            rawLimitBytesForCategory(category), 50 * 1024 * 1024,
+            bounded ? RECORDING_TRIM_MAX_FILES : UNLIMITED_REAP);
+    }
+
+    /** Live free bytes on the volume backing {@code type} (StatFs availableBytes). */
+    private long freeBytesForType(StorageType type) {
+        switch (type) {
+            case SD_CARD: return getSdCardFreeSpace();
+            case USB:     return getUsbFreeSpace();
+            case INTERNAL:
+            default:      return getInternalFreeSpace();
+        }
+    }
+
+    /** Filesystem path prefix that identifies files physically residing on {@code type}.
+     *  Null when an external volume isn't currently mounted (no path resolved). */
+    private String volumeRootForType(StorageType type) {
+        switch (type) {
+            case SD_CARD: return sdCardPath;
+            case USB:     return usbPath;
+            case INTERNAL:
+            default:      return INTERNAL_VOLUME_ROOT;
+        }
+    }
+
+    /**
+     * PHYSICAL-VOLUME emergency reaper — the fix for the cap-oversubscription
+     * deadlock (see {@link #PHYSICAL_FREE_EMERGENCY_FLOOR_BYTES}).
+     *
+     * <p>The per-category reaper ({@link #runPeriodicCategoryCleanup} /
+     * {@link #cleanupGateDuringRecording}) compares each category ONLY against its
+     * own cap, so when the SUM of caps oversubscribes a shared volume, the volume
+     * fills to 0-free while every category sits under its own cap and NOTHING is
+     * eligible to reap. This method ignores per-category caps entirely: it pools the
+     * finalized media clips PHYSICALLY ON {@code volume} across
+     * {@link #PHYSICAL_REAP_CATEGORIES}, sorts them STRICTLY oldest-first (global,
+     * cross-category — the chosen policy: the single oldest clip on the card goes
+     * first regardless of which category it belongs to), and deletes until live free
+     * space reaches {@code targetFreeBytes} (or a per-tick budget is hit while the
+     * encoder is writing). It does NOT touch per-category caps or the trips DB.
+     *
+     * <p>Safety: never deletes the encoder's currently-open output (or its {@code
+     * .tmp}), never deletes a {@code .tmp} newer than the 10-min grace window, never
+     * deletes the in-flight trip file, and only ever deletes finalized anchors +
+     * their sidecars. Caller MUST hold all the category cleanup locks (acquired in a
+     * fixed order by {@link #runPhysicalFreeSpaceEmergencyReap}) to serialize against
+     * the per-category passes and the recorder pre-flight.
+     *
+     * @return bytes freed on the volume (sum of deleted file lengths).
+     */
+    private long reapForPhysicalFreeSpace(StorageType volume, long targetFreeBytes) {
+        final String volumeRoot = volumeRootForType(volume);
+        if (volumeRoot == null) {
+            // External volume not currently path-resolved (unmounted mid-swap) —
+            // nothing safe to scope; the next tick retries once it re-resolves.
+            return 0;
+        }
+
+        // Probe the live encoder output so we never unlink the file (or its .tmp)
+        // the muxer is currently writing into. Mirrors wipeMediaCategory's probe,
+        // but WITHOUT force-stopping the recorder — this is steady-state retention,
+        // not a user wipe, so we must not interrupt an active recording.
+        String activeEncoderPath = null;
+        try {
+            com.overdrive.app.surveillance.GpuSurveillancePipeline pipeline =
+                com.overdrive.app.daemon.CameraDaemon.getGpuPipeline();
+            if (pipeline != null && pipeline.getRecorder() != null) {
+                com.overdrive.app.surveillance.HardwareEventRecorderGpu enc =
+                    pipeline.getRecorder().getEncoder();
+                if (enc != null) activeEncoderPath = enc.getCurrentOutputPath();
+            }
+        } catch (Throwable t) {
+            logWarn("Physical-free reap: encoder-path probe threw: " + t.getMessage());
+        }
+        final String protEncoderPath = activeEncoderPath;
+        final String protEncoderTmpPath = (activeEncoderPath != null) ? activeEncoderPath + ".tmp" : null;
+        final String protectedTripPath = activeTripFilePath;  // belt-and-suspenders; trips excluded anyway
+        final long tmpGraceCutoff = System.currentTimeMillis() - (10L * 60L * 1000L);
+
+        // Pool finalized anchors physically on this volume, tagged with their
+        // category (so the right sidecar/aux extensions are reaped alongside).
+        List<ReapCandidate> pool = new ArrayList<>();
+        Set<String> seenPaths = new HashSet<>();
+        for (String category : PHYSICAL_REAP_CATEGORIES) {
+            String primaryExt = primaryExtensionForCategory(category);
+            String namePrefix = namePrefixForCategory(category);
+            String[] auxPrefixes = auxiliaryPrefixesForCategory(category);
+            for (File dir : getReapableDirs(category)) {
+                if (dir == null || !dir.exists() || !dir.isDirectory()) continue;
+                // Only dirs physically on the target volume.
+                if (!dir.getAbsolutePath().startsWith(volumeRoot)) continue;
+                File[] files = dir.listFiles((d, name) -> name.endsWith(primaryExt));
+                if (files == null) files = listFilesByExt(dir, primaryExt);
+                if (files == null) continue;
+                for (File f : files) {
+                    if (f == null || !f.isFile()) continue;
+                    String name = f.getName();
+                    if (namePrefix != null
+                            && !nameMatchesCategoryPrefix(name, namePrefix, auxPrefixes)) continue;
+                    // De-dup by absolute path so a clip listed under two overlapping
+                    // dir entries (active == one of the all-dirs) isn't queued twice.
+                    if (!seenPaths.add(f.getAbsolutePath())) continue;
+                    pool.add(new ReapCandidate(f, category));
+                }
+            }
+        }
+
+        if (pool.isEmpty()) {
+            logWarn("Physical-free reap: " + volume + " critically low ("
+                + formatSize(freeBytesForType(volume)) + " free) but found NO reapable "
+                + "clips on the volume — listing likely failed (transient unmount?); retry next tick");
+            return 0;
+        }
+
+        // STRICT oldest-first, globally across categories.
+        Collections.sort(pool, (a, b) -> Long.compare(a.file.lastModified(), b.file.lastModified()));
+
+        boolean budgeted = isEncoderWriting();
+        long freedTotal = 0;
+        int deletedAnchors = 0;
+        // Budget bounds costly delete WORK (each anchor may fork an `rm` that blocks
+        // up to 4s), not just successful frees. On a FUSE-bridged SD under I/O
+        // contention — which coincides with isEncoderWriting()==true — File.delete()
+        // and the shell fallback can repeatedly return 0; counting only successes
+        // would let the loop walk the entire pool, serially forking `rm` and starving
+        // the muxer on the same volume. Count every candidate that reaches the delete
+        // call (i.e. passed the cheap protection-skips) against the per-tick budget.
+        int attempted = 0;
+        int consecutiveFails = 0;
+        // Wall-clock cap on the time this invocation holds the nested cleanup locks.
+        // A degenerate FUSE volume can make each delete fork an `rm` that blocks up to
+        // 4 s, so the file-count budget alone permits a ~32 s lock hold that would stall
+        // the surveillance trigger path (it now resolves its dir under surveillanceCleanupLock).
+        final long reapDeadlineMs = System.currentTimeMillis() + PHYSICAL_REAP_MAX_LOCK_HOLD_MS;
+        for (ReapCandidate c : pool) {
+            if (freeBytesForType(volume) >= targetFreeBytes) break;
+            // Stop once this invocation has spent its time budget — resume next tick.
+            // Checked AFTER at least the first candidate so a slow single delete still
+            // makes progress; cheap skips below don't consume the budget meaningfully.
+            if (attempted > 0 && System.currentTimeMillis() >= reapDeadlineMs) {
+                logInfo("Physical-free reap: hit " + PHYSICAL_REAP_MAX_LOCK_HOLD_MS
+                    + "ms lock-hold budget on " + volume + " after " + attempted
+                    + " delete attempt(s) — continues next tick");
+                break;
+            }
+            // Re-sample the (cheap, lock-free) encoder state once the muxer-protection
+            // budget would bind: an encoder that flips idle->writing mid-reap (e.g. a
+            // continuous-segment rollover that bypasses the lock-blocking recorder pre-
+            // flight) must still be honored, or the per-tick cap goes permanently dead
+            // and we walk the whole pool while the muxer contends for the same FUSE
+            // volume. Whichever cap is active (writing vs idle), it also bounds the
+            // wasted work — forking a doomed `rm` per anchor — on a degenerate volume.
+            int cap = (budgeted || (budgeted = isEncoderWriting()))
+                ? PHYSICAL_REAP_MAX_FILES : PHYSICAL_REAP_MAX_FILES_IDLE;
+            if (attempted >= cap) {
+                logInfo("Physical-free reap: bounded to " + cap
+                    + " delete attempts/tick (" + (budgeted ? "recording" : "idle")
+                    + ") — continues next tick");
+                break;
+            }
+            // A run of zero-free deletes signals a read-only/EROFS or vanished volume
+            // where every unlink is a no-op; stop forking doomed rm's over the rest of
+            // the pool (the free target can never be reached when nothing frees).
+            if (consecutiveFails >= PHYSICAL_REAP_MAX_CONSEC_FAILS) {
+                logWarn("Physical-free reap: " + PHYSICAL_REAP_MAX_CONSEC_FAILS
+                    + " consecutive deletes freed nothing on " + volume
+                    + " (read-only/vanished volume?) — aborting reap, retry next tick");
+                break;
+            }
+            String absPath = c.file.getAbsolutePath();
+            // Never the live encoder output / its .tmp companion.
+            if (protEncoderPath != null
+                    && (absPath.equals(protEncoderPath) || absPath.equals(protEncoderTmpPath))) {
+                continue;
+            }
+            // Never the in-flight trip file (defensive; trips not in the pool).
+            if (protectedTripPath != null
+                    && (protectedTripPath.equals(absPath) || protectedTripPath.equals(absPath + ".tmp"))) {
+                continue;
+            }
+            // Never a fresh .tmp partial a writer may still hold open.
+            if (c.file.getName().endsWith(".tmp") && c.file.lastModified() > tmpGraceCutoff) {
+                continue;
+            }
+            attempted++;
+            long freed = deleteAnchorAndSidecars(c.file, c.category, reapDeadlineMs);
+            if (freed > 0) {
+                freedTotal += freed;
+                deletedAnchors++;
+                consecutiveFails = 0;
+            } else {
+                consecutiveFails++;
+            }
+        }
+
+        if (deletedAnchors > 0) {
+            logInfo("Physical-free reap: freed " + formatSize(freedTotal) + " across "
+                + deletedAnchors + " clip(s) on " + volume + " — "
+                + formatSize(freeBytesForType(volume)) + " free now"
+                + (budgeted ? " (bounded trim while recording)" : ""));
+        }
+        return freedTotal;
+    }
+
+    /** A finalized media clip queued for the physical-free reaper, with its category
+     *  so the correct sidecar/aux companions are removed alongside the anchor. */
+    private static final class ReapCandidate {
+        final File file;
+        final String category;
+        ReapCandidate(File file, String category) { this.file = file; this.category = category; }
+    }
+
+    /**
+     * Delete one finalized anchor plus its same-stem sidecars and aux-prefix
+     * siblings, and drop the matching index/cache rows. Mirrors the per-file work
+     * inside {@link #ensureSpace}'s delete loop, factored out for the physical-free
+     * reaper. Caller is responsible for in-flight / grace-window protection and for
+     * holding the category lock. Returns total bytes freed (anchor + companions).
+     */
+    private long deleteAnchorAndSidecars(File file, String category) {
+        return deleteAnchorAndSidecars(file, category, Long.MAX_VALUE);
+    }
+
+    /**
+     * As {@link #deleteAnchorAndSidecars(File, String)} but bounds the per-anchor
+     * lock-hold so a single anchor on a degenerate/hung FUSE volume can't fork many
+     * serial 4 s {@code rm}s while all three cleanup locks are held — the exact
+     * overrun that would breach {@link #PHYSICAL_REAP_MAX_LOCK_HOLD_MS} and stall the
+     * surveillance trigger thread (it resolves its event dir under
+     * surveillanceCleanupLock). Two bounds:
+     *  - {@code deadlineMs}: once exceeded, the slow shell fallback is skipped for the
+     *    remaining sidecars/aux this tick (in-process {@code File.delete()} only — a
+     *    hung volume won't free them either, so forking more doomed 4 s rm's only pads
+     *    the hold); the reap simply resumes on the next 30 s tick.
+     *  - hung-anchor signal: if the anchor itself only deleted via the shell fallback
+     *    (its in-process {@code File.delete()} failed), the volume is in trouble, so
+     *    its companions also skip the shell fallback this tick.
+     */
+    private long deleteAnchorAndSidecars(File file, String category, long deadlineMs) {
+        final String primaryExt = primaryExtensionForCategory(category);
+        final String[] sidecarExts = sidecarExtensionsForCategory(category);
+        final String[] auxPrefixes = auxiliaryPrefixesForCategory(category);
+
+        long fileSize = file.length();
+        boolean deleted = file.delete();
+        // Whether the anchor's fast in-process unlink failed and we had to fall through
+        // to (or are about to skip) the bounded shell `rm`. A failed fast unlink is the
+        // hung/degenerate-volume signal: don't fork serial 4 s rm's for the companions.
+        boolean fastUnlinkFailed = !deleted;
+        if (!deleted) deleted = deleteFileViaShell(file);
+        if (!deleted) {
+            logWarn("Physical-free reap: failed to delete " + file.getAbsolutePath());
+            return 0;
+        }
+        long freed = fileSize;
+        logInfo("Deleted old file: " + file.getAbsolutePath() + " (" + formatSize(fileSize)
+            + ") — physical-free emergency reap [" + category + "]");
+
+        if (file.getName().endsWith(".mp4")) {
+            try {
+                com.overdrive.app.server.RecordingsIndex.getInstance().remove(file.getName());
+            } catch (Throwable ignored) {}
+        }
+        if (sidecarExts.length > 0) {
+            String stem = stemForName(file.getName(), primaryExt);
+            for (String ext : sidecarExts) {
+                File sidecar = new File(file.getParentFile(), stem + ext);
+                if (sidecar.exists()) {
+                    long sz = sidecar.length();
+                    boolean sd = sidecar.delete();
+                    // Skip the bounded shell fallback once the lock-hold budget is spent
+                    // or the anchor signalled a hung volume — either way forking another
+                    // 4 s `rm` only pads the hold without freeing space on a wedged FUSE.
+                    if (!sd && !fastUnlinkFailed && System.currentTimeMillis() < deadlineMs) {
+                        sd = deleteFileViaShell(sidecar);
+                    }
+                    if (sd) freed += sz;
+                }
+            }
+        }
+        if (auxPrefixes.length > 0) {
+            String stem = stemForName(file.getName(), primaryExt);
+            for (File aux : findAuxiliarySiblings(file.getParentFile(), auxPrefixes, stem)) {
+                long sz = aux.length();
+                boolean ad = aux.delete();
+                if (!ad && !fastUnlinkFailed && System.currentTimeMillis() < deadlineMs) {
+                    ad = deleteFileViaShell(aux);
+                }
+                if (ad) freed += sz;
+            }
+        }
+        try {
+            com.overdrive.app.server.RecordingsApiHandler.invalidateRecordingCache(file.getAbsolutePath());
+        } catch (Throwable ignored) {}
+        return freed;
+    }
+
+    /**
+     * Sum the bytes of finalized media physically residing on {@code volumeRoot}
+     * across {@link #PHYSICAL_REAP_CATEGORIES} — i.e. exactly the pool the
+     * physical-free reaper is allowed to delete. Used by
+     * {@link #runPhysicalFreeSpaceEmergencyReap} to decide whether reaping media can
+     * plausibly recover the free-space deficit, so a volume that is full from
+     * NON-media usage (OS / maps / OTA staging / logs on INTERNAL) is left alone
+     * instead of progressively bleeding away in-cap user clips it can never satisfy.
+     *
+     * <p>Counts only the primary anchors (sidecars/aux are small and tracked with the
+     * anchor) and matches the same dir / prefix / extension filters the reaper applies,
+     * so this is a conservative lower bound on what a reap would actually free. Cheap
+     * because it only runs once a volume is already below the emergency floor.
+     */
+    private long pooledMediaBytesOnVolume(String volumeRoot) {
+        if (volumeRoot == null) return 0L;
+        long total = 0L;
+        Set<String> seenPaths = new HashSet<>();
+        for (String category : PHYSICAL_REAP_CATEGORIES) {
+            final String primaryExt = primaryExtensionForCategory(category);
+            final String namePrefix = namePrefixForCategory(category);
+            final String[] auxPrefixes = auxiliaryPrefixesForCategory(category);
+            for (File dir : getReapableDirs(category)) {
+                if (dir == null || !dir.exists() || !dir.isDirectory()) continue;
+                if (!dir.getAbsolutePath().startsWith(volumeRoot)) continue;
+                File[] files = dir.listFiles((d, name) -> name.endsWith(primaryExt));
+                if (files == null) files = listFilesByExt(dir, primaryExt);
+                if (files == null) continue;
+                for (File f : files) {
+                    if (f == null || !f.isFile()) continue;
+                    String name = f.getName();
+                    if (namePrefix != null
+                            && !nameMatchesCategoryPrefix(name, namePrefix, auxPrefixes)) continue;
+                    if (!seenPaths.add(f.getAbsolutePath())) continue;
+                    total += f.length();
+                }
+            }
+        }
+        return total;
+    }
+
+    /**
+     * Entry point for the periodic tick: if any ACTIVE volume backing a media
+     * category is physically below {@link #PHYSICAL_FREE_EMERGENCY_FLOOR_BYTES},
+     * run {@link #reapForPhysicalFreeSpace} on it. Acquires the category cleanup
+     * locks in a FIXED order (recordings → surveillance → proximity) — matching the
+     * per-category passes' lock usage — so the cross-category reap can't deadlock
+     * against them or the recorder pre-flight. Targets a free-space level above the
+     * 200 MB internal-fallback clear threshold so a successful reap also un-latches a
+     * stale {@code recordingsEnospcFallbackActive} on the next probe.
+     *
+     * @return true if any reap freed space (caller may re-snapshot sizes).
+     */
+    private boolean runPhysicalFreeSpaceEmergencyReap() {
+        // The media categories share at most ONE external volume + internal. Build
+        // the distinct set of volumes PHYSICALLY backing media right now, driven by
+        // each category's CONFIGURED type (normalized for a genuinely-unmounted
+        // external → INTERNAL), NOT the ENOSPC-aware active type.
+        //
+        // Why configured, not active: activeTypeForCategory("recordings") delegates
+        // to getActiveRecordingsStorageType(), which is ENOSPC-AWARE — once a
+        // mounted-but-FULL external card latches recordingsEnospcFallbackActive, it
+        // reports INTERNAL. In a recordings-only-on-external config (surveillance +
+        // proximity on INTERNAL), that would collapse the set to {INTERNAL} the
+        // instant the latch flips and HIDE the full external card from this reaper —
+        // the exact deadlock this pass exists to break (SD stays full, recordings
+        // spill to internal forever, the 200 MB self-clear never fires because
+        // nothing reaps SD). The physical-volume pass must see the configured
+        // external regardless of the latch. normalizeStorageType still folds a
+        // genuinely-unmounted external back to INTERNAL (so a transiently-absent
+        // archive is never auto-reaped — req 3), and the all-internal config stays a
+        // no-op (req 10). The HashSet de-dups the common active==configured case.
+        Set<StorageType> volumes = new HashSet<>();
+        volumes.add(normalizeStorageType(configuredTypeForCategory("recordings")));
+        volumes.add(normalizeStorageType(configuredTypeForCategory("surveillance")));
+        volumes.add(normalizeStorageType(configuredTypeForCategory("proximity")));
+
+        boolean freedAny = false;
+        for (StorageType volume : volumes) {
+            long free = freeBytesForType(volume);
+            // free <= 0 on INTERNAL is a transient StatFs hiccup (don't act); on an
+            // external volume it means unmounted/inaccessible (no safe scope) — skip
+            // either way, the per-category passes + watchdog handle those.
+            if (free <= 0 || free >= PHYSICAL_FREE_EMERGENCY_FLOOR_BYTES) continue;
+
+            // Clamp the target to a fraction of the volume so a tiny card is never
+            // reaped toward an unreachable 1 GB. Never below the floor (else a reap
+            // that can't reach target would loop every tick deleting one clip).
+            long total = liveVolumeTotalBytes(volume);
+            long target = PHYSICAL_FREE_EMERGENCY_TARGET_BYTES;
+            if (total > 0) {
+                long quarter = total / 4;
+                if (target > quarter) target = Math.max(quarter, PHYSICAL_FREE_EMERGENCY_FLOOR_BYTES);
+            }
+
+            // MEDIA-FOOTPRINT gate (data-loss guard): only reap when deleting media
+            // can PLAUSIBLY recover the deficit. On INTERNAL, freeBytesForType reads
+            // whole-filesystem free, which can dip below the floor purely from
+            // NON-media pressure (OS / maps / OTA staging / logs). Reaping in-cap
+            // clips can never recover that, so without this gate the reaper would
+            // bleed away the oldest user clips every 30 s — deleting media the user
+            // explicitly kept within cap, and never reaching the target. Pool the
+            // media physically on the volume (exactly what the reaper may delete) and
+            // skip when it's smaller than the deficit: the per-category caps already
+            // bound that media, and non-media pressure is not ours to fix. When media
+            // IS the consumer (the oversubscription/ENOSPC-spill case this pass exists
+            // for — SD or an oversubscribed internal), the pool dwarfs the deficit, the
+            // gate passes, and the deadlock-break is unchanged. Only walked below the
+            // floor, so the healthy path stays a cheap StatFs no-op.
+            long deficit = target - free;            // > 0 here (free < floor < target)
+            long pooledMedia = pooledMediaBytesOnVolume(volumeRootForType(volume));
+            if (pooledMedia < deficit) {
+                logWarn("Physical-free emergency: " + volume + " at " + formatSize(free)
+                    + " free but only " + formatSize(pooledMedia) + " of reapable media on it"
+                    + " (deficit " + formatSize(deficit) + ") — pressure is non-media; "
+                    + "skipping reap (per-category caps still bound media)");
+                continue;
+            }
+
+            logWarn("Physical-free emergency: " + volume + " at " + formatSize(free)
+                + " free (< " + formatSize(PHYSICAL_FREE_EMERGENCY_FLOOR_BYTES)
+                + ") — cross-category oldest-first reap to " + formatSize(target));
+
+            // Fixed lock order: recordings → surveillance → proximity. No other path
+            // nests these locks, so a consistent acquisition order is deadlock-free.
+            synchronized (recordingsCleanupLock) {
+                synchronized (surveillanceCleanupLock) {
+                    synchronized (proximityCleanupLock) {
+                        if (reapForPhysicalFreeSpace(volume, target) > 0) freedAny = true;
+                    }
+                }
+            }
+        }
+        return freedAny;
+    }
+
+    /**
      * Stop periodic cleanup.
      */
     public void stopPeriodicCleanup() {
@@ -5442,6 +6814,15 @@ public class StorageManager {
         }
 
         stopSdCardWatchdog();  // Stop any existing watchdog first
+
+        // Fresh watchdog session (boot, ACC-OFF arm, or storage-type change):
+        // clear the one-time internal-fallback recovery latches so the first
+        // remount failure of this session runs its recovery, and reset the
+        // failure counters so quiet-log throttling starts clean.
+        sdFallbackRecoveryDone = false;
+        usbFallbackRecoveryDone = false;
+        sdWatchdogConsecutiveFailures = 0;
+        usbWatchdogConsecutiveFailures = 0;
 
         final boolean watchSd = anyOnSd;
         final boolean watchUsb = anyOnUsb;
@@ -5503,6 +6884,10 @@ public class StorageManager {
                         logInfo("SD card watchdog: remounted successfully after " +
                             sdWatchdogConsecutiveFailures + " attempts");
                         sdWatchdogConsecutiveFailures = 0;
+                        // Re-arm the one-time internal-fallback recovery: the card
+                        // is back, so if it drops AGAIN later the failure branch
+                        // must run its recovery once more for that new outage.
+                        sdFallbackRecoveryDone = false;
 
                         // Restore SD card directories now that card is back
                         initSdCardDirectories();
@@ -5513,9 +6898,22 @@ public class StorageManager {
                             com.overdrive.app.surveillance.GpuSurveillancePipeline pipeline =
                                 com.overdrive.app.daemon.CameraDaemon.getGpuPipeline();
                             if (pipeline != null && pipeline.getSentry() != null) {
-                                pipeline.getSentry().setEventOutputDir(getSurveillanceDir());
+                                // FIX (audit R1, surveillance freeze): use the
+                                // LIVE canonical resolution rather than the
+                                // volatile surveillanceDir field. While an arm
+                                // session is active, updateActiveDirectories()
+                                // skips the surveillance branch, so getSurveillanceDir()
+                                // returns the frozen internal-fallback path
+                                // captured before enable() — re-pushing it here
+                                // would be a no-op and subsequent events would
+                                // stay on internal for the whole session.
+                                // getLiveSurveillanceDir() resolves the freshly
+                                // remounted SD path directly, exactly like the
+                                // recordings branch below (R5).
+                                File liveSurvDir = getLiveSurveillanceDir();
+                                pipeline.getSentry().setEventOutputDir(liveSurvDir);
                                 logInfo("SD card watchdog: updated sentry output dir to " +
-                                    getSurveillanceDir().getAbsolutePath());
+                                    liveSurvDir.getAbsolutePath());
                             }
 
                             // Also re-poke the pano recorder if recordings
@@ -5648,6 +7046,29 @@ public class StorageManager {
                         // (3) push setOutputDir(internalFallbackDir) so RMM's
                         //     next start consumes the override and lands on
                         //     internal instead of the dead SD path.
+                        //
+                        // IDEMPOTENCY: this recovery is a one-time TRANSITION
+                        // action. Gate it on sdFallbackRecoveryDone so a card
+                        // that stays unmounted (e.g. SD slot unpowered while
+                        // parked with USB power off) doesn't re-force-stop the
+                        // recorder every 15s — which would prevent any 120s
+                        // continuous segment from ever finalizing (zero files
+                        // for the whole park). Run it once on the drop, then
+                        // skip until a successful remount resets the latch.
+                        // The cheap discoverVolumes()/updateActiveDirectories()
+                        // re-resolve above STILL runs every tick (truthful paths
+                        // for cleanup/stats); only the recorder-disturbing push
+                        // is latched.
+                        if (sdFallbackRecoveryDone) {
+                            // Already moved the recorder to internal for this
+                            // outage. Belt-and-suspenders: if a NEW recording
+                            // somehow re-armed onto the dead SD path since then
+                            // (e.g. a mode toggle), the writer-abort branch below
+                            // would have caught it — but in steady state there's
+                            // nothing to do. Stay quiet.
+                            logDebug("SD card watchdog: internal-fallback recovery already applied "
+                                + "this outage — skipping recorder re-push (idempotent)");
+                        } else {
                         try {
                             com.overdrive.app.surveillance.GpuSurveillancePipeline pipeline =
                                 com.overdrive.app.daemon.CameraDaemon.getGpuPipeline();
@@ -5687,9 +7108,13 @@ public class StorageManager {
                                 java.io.File internalFallbackDir = rFallback.dir;
                                 if (internalFallbackDir != null) {
                                     pipeline.getRecorder().setOutputDir(internalFallbackDir);
+                                    // Latch: recovery applied for this outage.
+                                    // Reset on a successful remount (below).
+                                    sdFallbackRecoveryDone = true;
                                     logWarn("SD card watchdog: remount FAILED — pushed pano recorder dir "
                                         + "to INTERNAL fallback " + internalFallbackDir.getAbsolutePath()
-                                        + " (future segments land on internal until SD recovers)");
+                                        + " (future segments land on internal until SD recovers; "
+                                        + "recovery latched — won't re-disrupt recording on later failed ticks)");
 
                                     // FIX (audit R7, HIGH): kick RMM resync to
                                     // re-arm recording on the internal fallback
@@ -5712,6 +7137,7 @@ public class StorageManager {
                             logWarn("SD card watchdog: remount-failure setOutputDir push threw: "
                                 + t.getMessage());
                         }
+                        }  // end if (!sdFallbackRecoveryDone)
 
                         if (shouldLog) {
                             logError("SD card watchdog: remount FAILED - surveillance may use internal fallback");
@@ -5767,6 +7193,9 @@ public class StorageManager {
                         logInfo("USB watchdog: remounted successfully after " +
                             usbWatchdogConsecutiveFailures + " attempts");
                         usbWatchdogConsecutiveFailures = 0;
+                        // Re-arm the one-time internal-fallback recovery (see SD
+                        // branch): drive is back, so a later drop recovers again.
+                        usbFallbackRecoveryDone = false;
                         initUsbDirectories();
                         updateActiveDirectories();
                         try {
@@ -5861,6 +7290,15 @@ public class StorageManager {
                         // a USB-only configuration that loses the stick mid-
                         // segment continues to write to the vanished mount
                         // until ACC OFF/ON or daemon restart.
+                        //
+                        // IDEMPOTENCY: one-time transition action, latched on
+                        // usbFallbackRecoveryDone — see the SD branch + the field
+                        // doc for why re-running this every 15s zeroes out
+                        // continuous recording. Reset on a successful remount.
+                        if (usbFallbackRecoveryDone) {
+                            logDebug("USB watchdog: internal-fallback recovery already applied "
+                                + "this outage — skipping recorder re-push (idempotent)");
+                        } else {
                         try {
                             com.overdrive.app.surveillance.GpuSurveillancePipeline pipeline =
                                 com.overdrive.app.daemon.CameraDaemon.getGpuPipeline();
@@ -5897,9 +7335,11 @@ public class StorageManager {
                                 java.io.File internalFallbackDir = rFallback.dir;
                                 if (internalFallbackDir != null) {
                                     pipeline.getRecorder().setOutputDir(internalFallbackDir);
+                                    usbFallbackRecoveryDone = true;
                                     logWarn("USB watchdog: remount FAILED — pushed pano recorder dir "
                                         + "to INTERNAL fallback " + internalFallbackDir.getAbsolutePath()
-                                        + " (future segments land on internal until USB recovers)");
+                                        + " (future segments land on internal until USB recovers; "
+                                        + "recovery latched — won't re-disrupt recording on later failed ticks)");
 
                                     // FIX (audit R7, HIGH): kick RMM resync to
                                     // re-arm recording on the internal fallback
@@ -5922,6 +7362,7 @@ public class StorageManager {
                             logWarn("USB watchdog: remount-failure setOutputDir push threw: "
                                 + t.getMessage());
                         }
+                        }  // end if (!usbFallbackRecoveryDone)
 
                         if (shouldLogUsb) {
                             logError("USB watchdog: remount FAILED - surveillance may use internal fallback");
@@ -6029,6 +7470,17 @@ public class StorageManager {
      */
     public void setActiveTripFile(File file) {
         activeTripFilePath = (file != null) ? file.getAbsolutePath() : null;
+    }
+
+    /**
+     * Absolute path of the telemetry file for the trip CURRENTLY being recorded,
+     * or null if no trip is active. Used by trip recovery to skip the in-flight
+     * file — it has no DB row yet (the row is inserted only at trip end), so
+     * recovery would otherwise rebuild a phantom duplicate that the real
+     * trip-end insert then duplicates. Mirrors the reaper's protectedTripPath.
+     */
+    public String getActiveTripFilePath() {
+        return activeTripFilePath;
     }
     
     /**
@@ -6144,6 +7596,13 @@ public class StorageManager {
             for (File dir : dirs) {
                 if (dir == null || !dir.exists() || !dir.isDirectory()) continue;
                 File[] files = dir.listFiles();
+                if (files == null) {
+                    // FUSE-bridged SD/USB returns null under daemon UID 2000. Without
+                    // this fallback a user "delete all" on an SD-configured category
+                    // silently deletes ZERO files while reporting success — the SD
+                    // bytes remain. Mirror getDirectoriesTotalSize's shell-ls fallback.
+                    files = listFilesViaShell(dir);
+                }
                 if (files == null) continue;
                 for (File f : files) {
                     if (f.isFile()) {
@@ -6171,7 +7630,9 @@ public class StorageManager {
                             skippedActive++;
                             continue;
                         }
-                        if (f.delete()) {
+                        boolean wiped = f.delete();
+                        if (!wiped) wiped = deleteFileViaShell(f);
+                        if (wiped) {
                             deleted++;
                             // Drop the H2 row eagerly so the next
                             // /api/recordings call doesn't return a phantom
@@ -6203,8 +7664,18 @@ public class StorageManager {
                     File thumbs = new File(baseDir, "thumbs");
                     if (thumbs.exists() && thumbs.isDirectory()) {
                         File[] thumbFiles = thumbs.listFiles();
+                        if (thumbFiles == null) {
+                            // FUSE-bridged SD/USB returns null here too. The thumbs
+                            // cache is reaped by nothing else (it isn't scoped by any
+                            // category limit), so without the shell-ls fallback an
+                            // external "delete all" leaves every cached JPEG on the
+                            // card. Mirror the main wipe loop above.
+                            thumbFiles = listFilesViaShell(thumbs);
+                        }
                         if (thumbFiles != null) {
-                            for (File t : thumbFiles) if (t.isFile()) t.delete();
+                            for (File t : thumbFiles) {
+                                if (t.isFile() && !t.delete()) deleteFileViaShell(t);
+                            }
                         }
                     }
                 }

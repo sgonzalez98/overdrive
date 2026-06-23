@@ -358,6 +358,22 @@ public class TripAnalyticsManager {
             samples = recorder.getSamplesForScoring();
         }
 
+        // stopRecording() clears the in-flight marker, but the DB row for this
+        // trip isn't inserted until step 4 below. In that gap the <startTime>
+        // .jsonl.gz file is on disk with NO row and NO active-file marker, so a
+        // concurrent /api/trips/recover would rebuild a phantom duplicate.
+        // Re-assert the marker over the file until the row exists; cleared in
+        // the finally after insert+rename.
+        boolean reArmedMarker = false;
+        if (telemetryPath != null) {
+            try {
+                com.overdrive.app.storage.StorageManager.getInstance()
+                        .setActiveTripFile(new File(telemetryPath));
+                reArmedMarker = true;
+            } catch (Exception ignored) {}
+        }
+        try {
+
         // 2. Resolve trip energy (kWh) BEFORE scoring.
         //    The efficiency axis scores against a single kWh/km band, so
         //    trip.energyPerKm must be populated first — either from direct BMS
@@ -414,20 +430,47 @@ public class TripAnalyticsManager {
             }
             trip.electricCost = electricCost;
 
-            // Fuel leg (PHEV only). Δfuel% < 1 ⇒ below sensor resolution,
-            // floored to 0 to avoid phantom costs from integer flicker.
+            // Fuel leg (PHEV only).
+            //
+            // PRIMARY — hardware cumulative-fuel accumulator delta. The BYD
+            // statistic HAL exposes getTotalFuelConValue(), a lifetime
+            // litres-burned counter; (end - start) is the vehicle's own metered
+            // burn for this trip. This is independent of tank size and free of
+            // the 1%-resolution gauge quantisation, and it captures idle /
+            // charge-sustain burn the gauge barely moves on. Guarded on
+            // end >= start so a counter reset/rollover falls through to the
+            // estimate rather than emitting a negative volume. (This is the
+            // approach the BYD OEM "diplus" app uses; we add the reset guard.)
+            //
+            // FALLBACK — legacy fuelPct×tank estimate, for trips logged before
+            // the accumulator was captured, or trims that don't report it.
+            // Δfuel% < 1 ⇒ below sensor resolution, floored to 0 to avoid
+            // phantom costs from integer flicker; requires user-set tankL.
             double fuelCost = 0;
             if (trip.isPhev) {
-                double tankL = config.getTankCapacityL();
                 double pricePerL = config.getFuelPricePerL();
                 trip.fuelPricePerL = pricePerL;
-                if (trip.fuelPctStart >= 0 && trip.fuelPctEnd >= 0
-                        && trip.fuelPctStart >= trip.fuelPctEnd
-                        && (trip.fuelPctStart - trip.fuelPctEnd) >= 1.0
-                        && tankL > 0) {
-                    trip.litresUsed = ((trip.fuelPctStart - trip.fuelPctEnd) / 100.0) * tankL;
+
+                double litres = 0;
+                if (trip.fuelConStart >= 0 && trip.fuelConEnd >= 0
+                        && trip.fuelConEnd >= trip.fuelConStart) {
+                    // Metered burn — preferred. A flat counter (EV-only leg)
+                    // correctly yields 0 litres.
+                    litres = trip.fuelConEnd - trip.fuelConStart;
+                } else {
+                    double tankL = config.getTankCapacityL();
+                    if (trip.fuelPctStart >= 0 && trip.fuelPctEnd >= 0
+                            && trip.fuelPctStart >= trip.fuelPctEnd
+                            && (trip.fuelPctStart - trip.fuelPctEnd) >= 1.0
+                            && tankL > 0) {
+                        litres = ((trip.fuelPctStart - trip.fuelPctEnd) / 100.0) * tankL;
+                    }
+                }
+
+                if (litres > 0) {
+                    trip.litresUsed = litres;
                     if (pricePerL > 0) {
-                        fuelCost = trip.litresUsed * pricePerL;
+                        fuelCost = litres * pricePerL;
                     }
                 }
             }
@@ -524,6 +567,15 @@ public class TripAnalyticsManager {
         if (rangeEstimator != null) {
             rangeEstimator.onTripCompleted(trip);
         }
+        } finally {
+            // Row now exists (or insert failed) — drop the in-flight marker so
+            // the file is reapable again and recovery treats it normally.
+            if (reArmedMarker) {
+                try {
+                    com.overdrive.app.storage.StorageManager.getInstance().setActiveTripFile(null);
+                } catch (Exception ignored) {}
+            }
+        }
     }
 
     /**
@@ -555,8 +607,10 @@ public class TripAnalyticsManager {
                     // ~1500 cycles, so 100% is a fair default until a live
                     // estimate seeds. Log when SOH is unseeded so a wrong number
                     // can be traced back to this branch.
-                    boolean hasSoh = soh.hasEstimate();
-                    double sohPercent = hasSoh ? soh.getCurrentSoh() : 100.0;
+                    // Use the DISPLAYED SOH (capped, anchored) so trip energy is in
+                    // the same frame as the live remaining-kWh / SOH the user sees.
+                    boolean hasSoh = soh.hasDisplaySoh();
+                    double sohPercent = hasSoh ? soh.getDisplaySoh() : 100.0;
                     double usableKwh = nominalKwh * (sohPercent / 100.0);
                     energyUsed = ((trip.socStart - trip.socEnd) / 100.0) * usableKwh;
                     logger.info(String.format("Energy estimated from SoC: %.1f%% → %.1f%% = %.2f kWh (nominal=%.1f, SOH=%.1f%%%s)",

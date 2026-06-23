@@ -580,10 +580,11 @@ public class RangeEstimator {
     private double computeUsableEnergy(double currentSocPercent) {
         double nominalKwh = sohEstimator.getNominalCapacityKwh();
 
-        // Apply SoH if available — a battery at 85% SoH has 85% of nominal capacity
+        // Apply SoH if available — a battery at 85% SoH has 85% of nominal capacity.
+        // Use the DISPLAYED (capped, anchored) SOH so range math matches the UI.
         double actualCapacityKwh;
-        if (sohEstimator.hasEstimate()) {
-            double sohFraction = sohEstimator.getCurrentSoh() / 100.0;
+        if (sohEstimator.hasDisplaySoh()) {
+            double sohFraction = sohEstimator.getDisplaySoh() / 100.0;
             actualCapacityKwh = nominalKwh * sohFraction;
         } else {
             // No SoH data — use nominal capacity (assume battery is healthy)
