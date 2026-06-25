@@ -309,6 +309,13 @@ public class GpuSurveillancePipeline {
         return recorder != null ? recorder.getEncoder() : null;
     }
 
+    public void updateSegmentDuration(int durationMinutes) {
+        HardwareEventRecorderGpu enc = encoder;
+        if (enc != null) {
+            enc.setSegmentDurationMs(java.util.concurrent.TimeUnit.MINUTES.toMillis(durationMinutes));
+        }
+    }
+
     /**
      * Set the recorder draw stride (Proximity Guard low-rate pre-record). A
      * stride of N makes the render loop feed the recording encoder only every
@@ -1255,6 +1262,13 @@ public class GpuSurveillancePipeline {
         // recorder.encoder still points at a freed instance.
         try {
             encoder = new HardwareEventRecorderGpu(encoderWidth, encoderHeight, fps, bitrate, codecMimeType);
+            try {
+                org.json.JSONObject recCfg = com.overdrive.app.config.UnifiedConfigManager.getRecording();
+                int durationMinutes = recCfg.optInt("segmentDurationMinutes", com.overdrive.app.util.Constants.SEGMENT_DURATION_MINUTES);
+                encoder.setSegmentDurationMs(java.util.concurrent.TimeUnit.MINUTES.toMillis(durationMinutes));
+            } catch (Throwable t) {
+                logger.warn("Failed to set segment duration on encoder reinit: " + t.getMessage());
+            }
         } catch (Throwable t) {
             logger.warn("New encoder allocation failed — clearing recorder's stale "
                 + "encoder ref so caller can stop() cleanly: " + t.getMessage());
@@ -1503,6 +1517,22 @@ public class GpuSurveillancePipeline {
             (codecMimeType.contains("hevc") ? "H.265" : "H.264") +
             " @ " + fps + "fps, " + (bitrate / 1_000_000) + " Mbps");
         encoder = new HardwareEventRecorderGpu(encoderWidth, encoderHeight, fps, bitrate, codecMimeType);
+        
+        org.json.JSONObject recCfg = null;
+        try {
+            recCfg = com.overdrive.app.config.UnifiedConfigManager.getRecording();
+        } catch (Throwable t) {
+            logger.warn("Failed to retrieve recording config for encoder init: " + t.getMessage());
+        }
+
+        if (recCfg != null) {
+            try {
+                int durationMinutes = recCfg.optInt("segmentDurationMinutes", com.overdrive.app.util.Constants.SEGMENT_DURATION_MINUTES);
+                encoder.setSegmentDurationMs(java.util.concurrent.TimeUnit.MINUTES.toMillis(durationMinutes));
+            } catch (Throwable t) {
+                logger.warn("Failed to set segment duration on encoder init: " + t.getMessage());
+            }
+        }
 
         // Pre-load saved pre-record duration BEFORE encoder.init() so the
         // byte ring is sized correctly on first allocation. Mode-aware:
@@ -1519,14 +1549,14 @@ public class GpuSurveillancePipeline {
             // isn't yet constructed at this point in init()). UnifiedConfigManager
             // exposes the persisted mode under recording.mode.
             try {
-                org.json.JSONObject recCfg =
-                    com.overdrive.app.config.UnifiedConfigManager.getRecording();
-                String persistedMode = recCfg.optString("mode", "");
-                if ("PROXIMITY_GUARD".equals(persistedMode)) {
-                    org.json.JSONObject pgCfg =
-                        com.overdrive.app.config.UnifiedConfigManager.getProximityGuard();
-                    int v = pgCfg.optInt("preRecordSeconds", -1);
-                    if (v > 0) preRecordSec = v;
+                if (recCfg != null) {
+                    String persistedMode = recCfg.optString("mode", "");
+                    if ("PROXIMITY_GUARD".equals(persistedMode)) {
+                        org.json.JSONObject pgCfg =
+                            com.overdrive.app.config.UnifiedConfigManager.getProximityGuard();
+                        int v = pgCfg.optInt("preRecordSeconds", -1);
+                        if (v > 0) preRecordSec = v;
+                    }
                 }
             } catch (Throwable t) {
                 logger.debug("Cold-boot mode-aware pre-record lookup failed: " + t.getMessage());

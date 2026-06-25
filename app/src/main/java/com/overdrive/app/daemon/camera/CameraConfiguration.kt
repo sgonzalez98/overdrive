@@ -30,7 +30,6 @@ object CameraConfiguration {
     const val FRAME_RATE = 25
     const val BITRATE = 4_000_000
     const val KEYFRAME_INTERVAL = 2
-    const val SEGMENT_DURATION_MS = 2 * 60 * 1000L
     
     // Streaming config (SIM-optimized)
     const val STREAM_WIDTH = 640

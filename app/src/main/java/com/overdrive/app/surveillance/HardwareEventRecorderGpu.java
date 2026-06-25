@@ -1058,7 +1058,7 @@ public class HardwareEventRecorderGpu {
     
     // Segment rotation
     private long segmentStartTime = 0;
-    private static final long SEGMENT_DURATION_MS = 2 * 60 * 1000;  // 2 minutes
+    private volatile long segmentDurationMs = com.overdrive.app.util.Constants.SEGMENT_DURATION_MS;
     // Debounce window for forceSegmentRotation: if the current segment was
     // started less than this many ms ago, a force-rotation is treated as a
     // no-op. Prevents the natural-rotation path (drainer thread, no
@@ -1613,6 +1613,16 @@ public class HardwareEventRecorderGpu {
                 }
             }
         }
+    }
+
+    public void setSegmentDurationMs(long durationMs) {
+        if (durationMs > 0) {
+            this.segmentDurationMs = durationMs;
+        }
+    }
+
+    public long getSegmentDurationMs() {
+        return this.segmentDurationMs;
     }
 
     /**
@@ -3714,7 +3724,7 @@ public class HardwareEventRecorderGpu {
         if (isWritingToFile && segmentStartTime > 0 && drainerRunning && diskWriterRunning
                 && !writerAbortedCorrupt) {
             long elapsed = System.currentTimeMillis() - segmentStartTime;
-            if (elapsed >= SEGMENT_DURATION_MS) {
+            if (elapsed >= segmentDurationMs) {
                 if (savedFormat == null) {
                     // Encoder hasn't published its format yet — no frames have
                     // been encoded since segment start. Rotation would bail
@@ -3731,7 +3741,7 @@ public class HardwareEventRecorderGpu {
                             + "s) but encoder has not published format — frames are not flowing");
                         lastNoFormatRotationLogMs = now;
                     }
-                    segmentStartTime = now - SEGMENT_DURATION_MS + 5_000;
+                    segmentStartTime = now - segmentDurationMs + 5_000;
                 } else {
                     logger.info("Segment duration reached (" + (elapsed / 1000) + "s), rotating to new file...");
                     rotateSegment();

@@ -377,6 +377,7 @@ object UnifiedConfigManager {
         if (!recording.has("recordingQuality")) recording.put("recordingQuality", "STANDARD")
         if (!recording.has("quality")) recording.put("quality", recording.optString("recordingQuality", "STANDARD"))
         if (!recording.has("codec")) recording.put("codec", "H264")
+        if (!recording.has("segmentDurationMinutes")) recording.put("segmentDurationMinutes", com.overdrive.app.util.Constants.SEGMENT_DURATION_MINUTES)
         // Recording-side dewarp strength (Fitzgibbon division model). 0..100,
         // 0 = off (default). Single source of truth for both ACC-on dashcam
         // and ACC-off surveillance flows — both pipelines read the same key
