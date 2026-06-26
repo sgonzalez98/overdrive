@@ -525,6 +525,21 @@
                                 </div>
                             </div>
                         </div>
+                        <div class="setting-row">
+                            <div class="setting-info">
+                                <div class="setting-name">
+                                    <span data-i18n="recording.clip_duration">Clip Duration</span>
+                                </div>
+                                <div class="setting-desc" data-i18n="recording.clip_duration_desc">Length of each recorded video segment. Applies on next segment rotation.</div>
+                            </div>
+                            <div class="setting-control">
+                                <div class="btn-group" id="clipDurationBtns">
+                                    <button class="btn-toggle active" data-value="2" onclick="RecSettings.setClipDuration(2)">2 min</button>
+                                    <button class="btn-toggle" data-value="5" onclick="RecSettings.setClipDuration(5)">5 min</button>
+                                    <button class="btn-toggle" data-value="10" onclick="RecSettings.setClipDuration(10)">10 min</button>
+                                </div>
+                            </div>
+                        </div>
                         <div class="info-box">
                             <div class="info-row">
                                 <span class="label" data-i18n="recording.active_estimate">At your settings</span>

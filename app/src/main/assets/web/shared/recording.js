@@ -17,6 +17,7 @@ BYD.recording = {
         // index.html — recording settings page no longer renders it.
         recordingCodec: 'H264',
         cameraFps: 15,
+        segmentDurationMinutes: 2,
         // Server-supplied for UI dynamic rendering (filled by loadConfig):
         cameraFpsActual: null,
         cameraFpsClampNote: null,
@@ -234,6 +235,7 @@ BYD.recording = {
                 this.config.recordingQuality = data.recordingQuality || 'STANDARD';
                 this.config.recordingCodec = data.recordingCodec || 'H264';
                 this.config.cameraFps = data.cameraFps || 15;
+                this.config.segmentDurationMinutes = data.segmentDurationMinutes || 2;
                 this.config.cameraFpsActual = data.cameraFpsActual || null;
                 this.config.cameraFpsClampNote = data.cameraFpsClampNote || null;
                 this.config.recordingQualityOptions = data.recordingQualityOptions || {};
@@ -880,7 +882,7 @@ BYD.recording = {
      */
     _recTabFieldMap: {
         capture: ['recordingMode', 'proximityGuard'],
-        quality: ['recordingQuality', 'recordingCodec', 'cameraFps', 'rectifyStrength'],
+        quality: ['recordingQuality', 'recordingCodec', 'cameraFps', 'rectifyStrength', 'segmentDurationMinutes'],
         oem:     ['oemRecordingMode'],
         storage: ['recordingsLimitMb', 'recordingsStorageType']
     },
@@ -928,6 +930,8 @@ BYD.recording = {
             btn.classList.toggle('active', btn.dataset.value === this.config.recordingCodec));
         document.querySelectorAll('#fpsBtns .btn-toggle').forEach(btn =>
             btn.classList.toggle('active', btn.dataset.value === String(this.config.cameraFps)));
+        document.querySelectorAll('#clipDurationBtns .btn-toggle').forEach(btn =>
+            btn.classList.toggle('active', btn.dataset.value === String(this.config.segmentDurationMinutes || 2)));
 
         // Tier metadata (Mbps, GB/hr, qualityEquivalent) comes from the
         // recordingQualityOptions block in /api/quality. UI re-renders the
@@ -1062,6 +1066,16 @@ BYD.recording = {
         this.markChanged();
     },
 
+    setClipDuration(minutes) {
+        const parsed = parseInt(minutes, 10);
+        if (this.config.segmentDurationMinutes === parsed) return;
+        this.config.segmentDurationMinutes = parsed;
+        document.querySelectorAll('#clipDurationBtns .btn-toggle').forEach(btn =>
+            btn.classList.toggle('active', btn.dataset.value === String(minutes)));
+        this.renderActiveEstimate();
+        this.markChanged();
+    },
+
     /** Pick the matching tier entry from the server-supplied options table.
      *  All math (bitrate, MB/2min, qualityEquivalent for the active codec+fps)
      *  is precomputed there; we just look it up. Returns null if the tier
@@ -1089,7 +1103,13 @@ BYD.recording = {
     formatEstimate(est) {
         if (!est) return '—';
         const parts = [BYD.i18n.t('recording.unit_mbps', {n: (est.bitrateMbps != null ? est.bitrateMbps : '—')})];
-        if (est.mbPer2Min != null) parts.push(BYD.i18n.t('recording.unit_mb_per_2min', {n: est.mbPer2Min}));
+        const durationMin = this.config.segmentDurationMinutes || 2;
+        if (est.mbPerMinute != null) {
+            const mbPerSegment = Math.round(est.mbPerMinute * durationMin * 10) / 10;
+            parts.push(BYD.i18n.t('recording.unit_mb_per_segment', {n: mbPerSegment, min: durationMin}));
+        } else if (est.mbPer2Min != null) {
+            parts.push(BYD.i18n.t('recording.unit_mb_per_2min', {n: est.mbPer2Min}));
+        }
         if (est.qualityEquivalent) parts.push(est.qualityEquivalent);
         return parts.join(' · ');
     },
@@ -1191,7 +1211,8 @@ BYD.recording = {
                     body: JSON.stringify({
                         recordingQuality: this.config.recordingQuality,
                         recordingCodec: this.config.recordingCodec,
-                        cameraFps: this.config.cameraFps
+                        cameraFps: this.config.cameraFps,
+                        segmentDurationMinutes: this.config.segmentDurationMinutes
                     })
                 });
                 if (!qResp.ok) throw new Error('quality ' + qResp.status);
@@ -1224,7 +1245,8 @@ BYD.recording = {
                             codec: this.config.recordingCodec,
                             quality: this.config.recordingQuality,
                             recordingQuality: this.config.recordingQuality,
-                            rectifyStrength: rectifyToSave
+                            rectifyStrength: rectifyToSave,
+                            segmentDurationMinutes: this.config.segmentDurationMinutes
                         }
                     })
                 });

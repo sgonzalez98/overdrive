@@ -122,6 +122,7 @@ public class OemDashcamPipeline {
     private int bitrate = DEFAULT_BITRATE;
     private String codecMimeType = MediaFormat.MIMETYPE_VIDEO_AVC;
     private int oemDashcamCameraId = -1;
+    private int segmentDurationMinutes = com.overdrive.app.util.Constants.SEGMENT_DURATION_MINUTES;
 
     // EGL + GL
     private EGLCore eglCore;
@@ -473,6 +474,14 @@ public class OemDashcamPipeline {
      */
     public HardwareEventRecorderGpu getEncoder() {
         return encoder;
+    }
+
+    public void updateSegmentDuration(int durationMinutes) {
+        this.segmentDurationMinutes = durationMinutes;
+        HardwareEventRecorderGpu enc = encoder;
+        if (enc != null) {
+            enc.setSegmentDurationMs(java.util.concurrent.TimeUnit.MINUTES.toMillis(durationMinutes));
+        }
     }
 
     /** Trigger a continuous-recording segment. Filename is {@code dvr_*}.
@@ -862,6 +871,9 @@ public class OemDashcamPipeline {
             bitrate = bitrateForQuality(quality);
 
             bitrate = applyBitrateBudgetCap(bitrate, oem, rec, cam);
+            int requestedDuration = rec.optInt("segmentDurationMinutes", com.overdrive.app.util.Constants.SEGMENT_DURATION_MINUTES);
+            segmentDurationMinutes = Math.max(com.overdrive.app.util.Constants.MIN_SEGMENT_DURATION_MINUTES,
+                Math.min(com.overdrive.app.util.Constants.MAX_SEGMENT_DURATION_MINUTES, requestedDuration));
         } catch (Throwable t) {
             logger.warn("applyRecordingConfigFromUcm failed: " + t.getMessage());
         }
@@ -1048,6 +1060,7 @@ public class OemDashcamPipeline {
         runOnGlThreadAndWait(() -> {
             try {
                 encoder = new HardwareEventRecorderGpu(width, height, fps, bitrate, codecMimeType);
+                encoder.setSegmentDurationMs(java.util.concurrent.TimeUnit.MINUTES.toMillis(segmentDurationMinutes));
                 // Skip KEY_OPERATING_RATE so we don't over-subscribe the
                 // single Venus H.264 block when pano is also encoding.
                 // Pano keeps its pin (it's the primary recorder); OEM

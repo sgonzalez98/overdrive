@@ -33,6 +33,7 @@ public class QualitySettingsApiHandler {
     @Deprecated
     private static String recordingBitrate = "STANDARD";
     private static String recordingCodec = "H264";      // H264 or H265
+    private static int segmentDurationMinutes = com.overdrive.app.util.Constants.SEGMENT_DURATION_MINUTES;       // Clip segment duration in minutes
     
     private static final String UNIFIED_CONFIG_FILE = "/data/local/tmp/overdrive_config.json";
     private static final String LEGACY_SETTINGS_FILE = "/data/local/tmp/camera_settings.json";
@@ -772,6 +773,9 @@ public class QualitySettingsApiHandler {
                         recordingQuality = "STANDARD";
                         recordingBitrate = "STANDARD";
                     }
+                    if (recording.has("segmentDurationMinutes")) {
+                        segmentDurationMinutes = recording.getInt("segmentDurationMinutes");
+                    }
                     currentBitrate = recordingBitrate;
                 }
                 
@@ -805,6 +809,7 @@ public class QualitySettingsApiHandler {
         response.put("recordingQuality", activeTier.name());
         response.put("streamingQuality", currentStreamQuality);
         response.put("recordingCodec", currentCodec);
+        response.put("segmentDurationMinutes", segmentDurationMinutes);
         response.put("lastModified", lastModified);
         
         // Camera FPS setting
@@ -1043,6 +1048,37 @@ public class QualitySettingsApiHandler {
                 }
             }
 
+            if (settings.has("segmentDurationMinutes")) {
+                int duration = settings.getInt("segmentDurationMinutes");
+                if (duration != 2 && duration != 5 && duration != 10) {
+                    CameraDaemon.log("Rejecting segmentDurationMinutes=" + duration + " — must be 2, 5, or 10");
+                    rejected.put(new JSONObject()
+                        .put("field", "segmentDurationMinutes").put("value", duration)
+                        .put("reason", "must be 2, 5, or 10"));
+                } else {
+                    segmentDurationMinutes = duration;
+                    CameraDaemon.log("Segment duration set to: " + duration + " minutes");
+                    
+                    try {
+                        com.overdrive.app.surveillance.GpuSurveillancePipeline pano = CameraDaemon.getGpuPipeline();
+                        if (pano != null) {
+                            pano.updateSegmentDuration(duration);
+                        }
+                    } catch (Throwable t) {
+                        CameraDaemon.log("Failed to update live pano segment duration: " + t.getMessage());
+                    }
+                    
+                    try {
+                        com.overdrive.app.camera.OemDashcamPipeline oemPipe = CameraDaemon.getOemDashcamPipeline();
+                        if (oemPipe != null) {
+                            oemPipe.updateSegmentDuration(duration);
+                        }
+                    } catch (Throwable t) {
+                        CameraDaemon.log("Failed to update live OEM segment duration: " + t.getMessage());
+                    }
+                }
+            }
+
             // Mirror recording quality / codec / fps into the OEM Dashcam
             // section. Without this, the new oem.recordingQuality slot is
             // never written by the existing recording.html UI and OEM falls
@@ -1260,6 +1296,10 @@ public class QualitySettingsApiHandler {
                             CameraDaemon.log("Restored recording codec from unified: " + codec);
                         }
                     }
+                    if (recording.has("segmentDurationMinutes")) {
+                        segmentDurationMinutes = recording.getInt("segmentDurationMinutes");
+                        CameraDaemon.log("Restored segment duration from unified: " + segmentDurationMinutes + " minutes");
+                    }
                 }
                 
                 JSONObject streaming = unified.optJSONObject("streaming");
@@ -1346,20 +1386,48 @@ public class QualitySettingsApiHandler {
      */
     public static void persistSettings() {
         try {
-            org.json.JSONObject recording = new org.json.JSONObject();
-            // Canonical tier; `quality` is the legacy mirror. We deliberately
-            // do NOT write `bitrate` (LOW/MEDIUM/HIGH) — that's the field
-            // that historically drifted out of sync with the active tier.
-            recording.put("recordingQuality", recordingQuality);
-            recording.put("quality", recordingQuality);
-            recording.put("codec", recordingCodec);
-            com.overdrive.app.config.UnifiedConfigManager.updateSection("recording", recording);
+            boolean recChanged = true;
+            try {
+                org.json.JSONObject currentRec = com.overdrive.app.config.UnifiedConfigManager.getRecording();
+                if (currentRec != null) {
+                    recChanged = !recordingQuality.equals(currentRec.optString("recordingQuality", ""))
+                            || !recordingQuality.equals(currentRec.optString("quality", ""))
+                            || !recordingCodec.equals(currentRec.optString("codec", ""))
+                            || segmentDurationMinutes != currentRec.optInt("segmentDurationMinutes", -1);
+                }
+            } catch (Exception ignored) {}
 
-            org.json.JSONObject streaming = new org.json.JSONObject();
-            streaming.put("quality", StreamingApiHandler.getStreamingQuality());
-            com.overdrive.app.config.UnifiedConfigManager.updateSection("streaming", streaming);
+            boolean streamChanged = true;
+            try {
+                org.json.JSONObject currentStream = com.overdrive.app.config.UnifiedConfigManager.getStreaming();
+                if (currentStream != null) {
+                    streamChanged = !StreamingApiHandler.getStreamingQuality().equals(currentStream.optString("quality", ""));
+                }
+            } catch (Exception ignored) {}
 
-            CameraDaemon.log("Settings persisted via UnifiedConfigManager");
+            boolean persistedAny = false;
+            if (recChanged) {
+                org.json.JSONObject recording = new org.json.JSONObject();
+                recording.put("recordingQuality", recordingQuality);
+                recording.put("quality", recordingQuality);
+                recording.put("codec", recordingCodec);
+                recording.put("segmentDurationMinutes", segmentDurationMinutes);
+                com.overdrive.app.config.UnifiedConfigManager.updateSection("recording", recording);
+                persistedAny = true;
+            }
+
+            if (streamChanged) {
+                org.json.JSONObject streaming = new org.json.JSONObject();
+                streaming.put("quality", StreamingApiHandler.getStreamingQuality());
+                com.overdrive.app.config.UnifiedConfigManager.updateSection("streaming", streaming);
+                persistedAny = true;
+            }
+
+            if (persistedAny) {
+                CameraDaemon.log("Settings persisted via UnifiedConfigManager");
+            } else {
+                CameraDaemon.log("No settings changes detected, skipping persistence write");
+            }
         } catch (Exception e) {
             CameraDaemon.log("Could not persist settings: " + e.getMessage());
         }
@@ -1369,6 +1437,15 @@ public class QualitySettingsApiHandler {
     public static String getRecordingQuality() { return recordingQuality; }
     public static String getRecordingBitrate() { return recordingBitrate; }
     public static String getRecordingCodec() { return recordingCodec; }
+    public static int getSegmentDurationMinutes() { return segmentDurationMinutes; }
+    
+    public static void setSegmentDurationMinutes(int durationMinutes) {
+        if (durationMinutes >= com.overdrive.app.util.Constants.MIN_SEGMENT_DURATION_MINUTES 
+                && durationMinutes <= com.overdrive.app.util.Constants.MAX_SEGMENT_DURATION_MINUTES) {
+            segmentDurationMinutes = durationMinutes;
+            persistSettings();
+        }
+    }
     
     // Static setters for app UI and IPC. recordingQuality accepts the new
     // tier names (ECONOMY..MAX); legacy names are migrated to STANDARD per

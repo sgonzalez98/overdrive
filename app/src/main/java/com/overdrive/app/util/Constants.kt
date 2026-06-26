@@ -28,7 +28,10 @@ object Constants {
     const val FRAME_RATE = 25
     const val BITRATE = 4_000_000
     const val KEYFRAME_INTERVAL = 2
-    const val SEGMENT_DURATION_MS = 2 * 60 * 1000L
+    const val SEGMENT_DURATION_MINUTES = 2
+    const val SEGMENT_DURATION_MS = SEGMENT_DURATION_MINUTES * 60 * 1000L
+    const val MIN_SEGMENT_DURATION_MINUTES = 2
+    const val MAX_SEGMENT_DURATION_MINUTES = 10
     
     // Streaming Configuration
     const val STREAM_WIDTH = 640

@@ -23,6 +23,7 @@ BYD.surveillance = {
         // LOW/MEDIUM/HIGH). Server rebuilds the encoder live on change.
         recordingQuality: 'STANDARD',
         recordingCodec: 'H264',
+        segmentDurationMinutes: 2,
         // Server-supplied for UI (filled by load):
         recordingQualityOptions: {},
         activeRecordingEstimate: null,
@@ -899,13 +900,18 @@ BYD.surveillance = {
             const uResp = await fetch('/api/settings/unified');
             const uData = await uResp.json();
             if (uData.success && uData.config) {
-                if (uData.config.recording &&
-                    typeof uData.config.recording.rectifyStrength === 'number') {
-                    var rs = uData.config.recording.rectifyStrength;
-                    if (rs < 0) rs = 0; if (rs > 100) rs = 100;
-                    this.config.rectifyStrength = rs;
-                } else {
-                    this.config.rectifyStrength = 0;
+                    if (typeof uData.config.recording.rectifyStrength === 'number') {
+                        var rs = uData.config.recording.rectifyStrength;
+                        if (rs < 0) rs = 0; if (rs > 100) rs = 100;
+                        this.config.rectifyStrength = rs;
+                    } else {
+                        this.config.rectifyStrength = 0;
+                    }
+                    if (typeof uData.config.recording.segmentDurationMinutes === 'number') {
+                        this.config.segmentDurationMinutes = uData.config.recording.segmentDurationMinutes;
+                    } else {
+                        this.config.segmentDurationMinutes = 2;
+                    }
                 }
                 try {
                     var mode = uData.config.camera && uData.config.camera.cameraMode;
@@ -1201,7 +1207,13 @@ BYD.surveillance = {
     formatEstimate(est) {
         if (!est) return '—';
         const parts = [BYD.i18n.t('recording.unit_mbps', {n: (est.bitrateMbps != null ? est.bitrateMbps : '—')})];
-        if (est.mbPer2Min != null) parts.push(BYD.i18n.t('recording.unit_mb_per_2min', {n: est.mbPer2Min}));
+        const durationMin = this.config.segmentDurationMinutes || 2;
+        if (est.mbPerMinute != null) {
+            const mbPerSegment = Math.round(est.mbPerMinute * durationMin * 10) / 10;
+            parts.push(BYD.i18n.t('recording.unit_mb_per_segment', {n: mbPerSegment, min: durationMin}));
+        } else if (est.mbPer2Min != null) {
+            parts.push(BYD.i18n.t('recording.unit_mb_per_2min', {n: est.mbPer2Min}));
+        }
         if (est.qualityEquivalent) parts.push(est.qualityEquivalent);
         return parts.join(' · ');
     },

@@ -67,7 +67,6 @@ public class CameraDaemon {
     public static final int FRAME_RATE = 25;
     public static final int BITRATE = 4_000_000;
     public static final int KEYFRAME_INTERVAL = 2;
-    public static final long SEGMENT_DURATION_MS = 2 * 60 * 1000;
     
     // Streaming config (SIM-optimized)
     public static final int STREAM_WIDTH = 640;
