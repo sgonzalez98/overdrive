@@ -28,11 +28,16 @@ public class TelemetryDiffer {
     /** key -> stable quantized representation of the last sent value. */
     private final Map<String, String> lastSent = new HashMap<>();
     private long lastSendTimeMs = 0;
+    // Time of the last FULL resync (every discoverable key sent), tracked separately from
+    // lastSendTimeMs so the heartbeat can fire on its own fixed cadence without being reset
+    // by intervening change-only partial publishes.
+    private long lastFullSyncMs = 0;
 
     /** Forget all history — forces a full resend on the next cycle. */
     public void reset() {
         lastSent.clear();
         lastSendTimeMs = 0;
+        lastFullSyncMs = 0;
     }
 
     public long lastSendTimeMs() { return lastSendTimeMs; }
@@ -40,6 +45,14 @@ public class TelemetryDiffer {
     public long elapsedMs(long nowMs) {
         return lastSendTimeMs == 0 ? Long.MAX_VALUE : nowMs - lastSendTimeMs;
     }
+
+    /** Time since the last full resync (every key sent). MAX_VALUE if never. */
+    public long fullSyncElapsedMs(long nowMs) {
+        return lastFullSyncMs == 0 ? Long.MAX_VALUE : nowMs - lastFullSyncMs;
+    }
+
+    /** Record that a full resync (every discoverable key) was just transmitted. */
+    public void markFullSync(long nowMs) { lastFullSyncMs = nowMs; }
 
     /** Keys whose quantized value differs from what we last sent (excludes time keys). */
     public Set<String> changedKeys(JSONObject snapshot) {

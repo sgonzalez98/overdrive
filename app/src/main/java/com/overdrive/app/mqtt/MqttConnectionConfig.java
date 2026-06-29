@@ -35,6 +35,18 @@ public class MqttConnectionConfig {
     public int maxIntervalSeconds;       // Heartbeat ceiling: always publish at least this often
     public boolean changeOnly;           // If true, only publish when a backing value changed
 
+    // Full-resync options. Both re-publish EVERY discoverable key, not just changed ones,
+    // so state lost to a connection drop (e.g. a gear→P transition dropped at a WiFi↔cellular
+    // handoff) gets corrected — a state-based send profile (full snapshot at transitions).
+    // NOTE: in HA mode each key is its own retained topic, so a full sync is one message per
+    // discoverable key. At a 1s interval that is heavy; prefer a larger interval.
+    public boolean heartbeatSendAll;     // Heartbeat always full-syncs on its own fixed cadence
+                                         // (maxIntervalSeconds), independent of intervening
+                                         // change-only publishes (no starvation).
+    public boolean flushOnStateChange;   // Flush a full snapshot on every mode transition (ACC
+                                         // on/off, charging start/stop) so the new state survives
+                                         // a publish lost at a network handoff. Light (edges only).
+
     // Home Assistant discovery
     public boolean homeAssistantDiscovery; // If true: device-bundle discovery + per-field retained topics
     public String discoveryPrefix;         // HA discovery prefix (default "homeassistant")
@@ -56,6 +68,8 @@ public class MqttConnectionConfig {
     private static final boolean DEFAULT_HA_DISCOVERY = false;
     private static final String DEFAULT_DISCOVERY_PREFIX = "homeassistant";
     private static final boolean DEFAULT_ALLOW_CONTROL = false;
+    private static final boolean DEFAULT_HEARTBEAT_SEND_ALL = false;
+    private static final boolean DEFAULT_FLUSH_ON_STATE_CHANGE = true;
 
     /**
      * Create a new connection config with defaults.
@@ -81,6 +95,8 @@ public class MqttConnectionConfig {
         this.homeAssistantDiscovery = DEFAULT_HA_DISCOVERY;
         this.discoveryPrefix = DEFAULT_DISCOVERY_PREFIX;
         this.allowControl = DEFAULT_ALLOW_CONTROL;
+        this.heartbeatSendAll = DEFAULT_HEARTBEAT_SEND_ALL;
+        this.flushOnStateChange = DEFAULT_FLUSH_ON_STATE_CHANGE;
     }
 
     /** True when this connection should accept inbound control commands and discover control entities. */
@@ -195,6 +211,8 @@ public class MqttConnectionConfig {
             json.put("homeAssistantDiscovery", homeAssistantDiscovery);
             json.put("discoveryPrefix", discoveryPrefix);
             json.put("allowControl", allowControl);
+            json.put("heartbeatSendAll", heartbeatSendAll);
+            json.put("flushOnStateChange", flushOnStateChange);
         } catch (Exception ignored) {}
         return json;
     }
@@ -238,6 +256,8 @@ public class MqttConnectionConfig {
         config.homeAssistantDiscovery = json.optBoolean("homeAssistantDiscovery", DEFAULT_HA_DISCOVERY);
         config.discoveryPrefix = json.optString("discoveryPrefix", DEFAULT_DISCOVERY_PREFIX);
         config.allowControl = json.optBoolean("allowControl", DEFAULT_ALLOW_CONTROL);
+        config.heartbeatSendAll = json.optBoolean("heartbeatSendAll", DEFAULT_HEARTBEAT_SEND_ALL);
+        config.flushOnStateChange = json.optBoolean("flushOnStateChange", DEFAULT_FLUSH_ON_STATE_CHANGE);
         if (config.minIntervalSeconds < 1) config.minIntervalSeconds = 1;
         if (config.maxIntervalSeconds < config.minIntervalSeconds) {
             config.maxIntervalSeconds = config.minIntervalSeconds;

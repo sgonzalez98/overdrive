@@ -189,6 +189,8 @@ public class MqttConnectionStore {
             if (updates.has("homeAssistantDiscovery")) existing.homeAssistantDiscovery = updates.optBoolean("homeAssistantDiscovery");
             if (updates.has("discoveryPrefix")) existing.discoveryPrefix = updates.optString("discoveryPrefix");
             if (updates.has("allowControl")) existing.allowControl = updates.optBoolean("allowControl");
+            if (updates.has("heartbeatSendAll")) existing.heartbeatSendAll = updates.optBoolean("heartbeatSendAll");
+            if (updates.has("flushOnStateChange")) existing.flushOnStateChange = updates.optBoolean("flushOnStateChange");
             // Keep the window coherent after a partial update.
             if (existing.minIntervalSeconds < 1) existing.minIntervalSeconds = 1;
             if (existing.maxIntervalSeconds < existing.minIntervalSeconds) {

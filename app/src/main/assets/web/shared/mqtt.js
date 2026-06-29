@@ -199,6 +199,8 @@ const MQTT = {
         document.getElementById('formChangeOnly').checked = true;
         document.getElementById('formHaDiscovery').checked = false;
         document.getElementById('formDiscoveryPrefix').value = 'homeassistant';
+        var hb0 = document.getElementById('formHeartbeatSendAll'); if (hb0) hb0.checked = false;
+        var fs0 = document.getElementById('formFlushOnStateChange'); if (fs0) fs0.checked = true;
         document.getElementById('formAllowControl').checked = false;
         document.getElementById('formRetain').checked = false;
         document.getElementById('formEnabled').checked = true;
@@ -230,6 +232,8 @@ const MQTT = {
         document.getElementById('formChangeOnly').checked = conn.changeOnly !== false;
         document.getElementById('formHaDiscovery').checked = conn.homeAssistantDiscovery || false;
         document.getElementById('formDiscoveryPrefix').value = conn.discoveryPrefix || 'homeassistant';
+        var hbE = document.getElementById('formHeartbeatSendAll'); if (hbE) hbE.checked = conn.heartbeatSendAll || false;
+        var fsE = document.getElementById('formFlushOnStateChange'); if (fsE) fsE.checked = conn.flushOnStateChange !== false;
         document.getElementById('formAllowControl').checked = conn.allowControl || false;
         document.getElementById('formRetain').checked = conn.retainMessages || false;
         document.getElementById('formEnabled').checked = conn.enabled || false;
@@ -271,8 +275,12 @@ const MQTT = {
         var on = ha && ha.checked;
         var prefixRow = document.getElementById('formDiscoveryPrefixRow');
         var controlRow = document.getElementById('formAllowControlRow');
+        var hbRow = document.getElementById('formHeartbeatSendAllRow');
+        var fsRow = document.getElementById('formFlushOnStateChangeRow');
         if (prefixRow) prefixRow.style.display = on ? '' : 'none';
         if (controlRow) controlRow.style.display = on ? 'flex' : 'none';
+        if (hbRow) hbRow.style.display = on ? 'flex' : 'none';
+        if (fsRow) fsRow.style.display = on ? 'flex' : 'none';
     },
 
     async saveForm() {
@@ -290,6 +298,8 @@ const MQTT = {
             changeOnly: document.getElementById('formChangeOnly').checked,
             homeAssistantDiscovery: document.getElementById('formHaDiscovery').checked,
             discoveryPrefix: (document.getElementById('formDiscoveryPrefix').value || 'homeassistant').trim(),
+            heartbeatSendAll: (function(){ var e=document.getElementById('formHeartbeatSendAll'); return e ? e.checked : false; })(),
+            flushOnStateChange: (function(){ var e=document.getElementById('formFlushOnStateChange'); return e ? e.checked : true; })(),
             allowControl: document.getElementById('formAllowControl').checked,
             retainMessages: document.getElementById('formRetain').checked,
             enabled: document.getElementById('formEnabled').checked

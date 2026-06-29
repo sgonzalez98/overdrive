@@ -298,6 +298,26 @@
                                 <label data-i18n="mqtt.ha_prefix">Discovery prefix</label>
                                 <input type="text" id="formDiscoveryPrefix" value="homeassistant" placeholder="homeassistant">
                             </div>
+                            <div id="formHeartbeatSendAllRow" style="display:none;align-items:center;justify-content:space-between;">
+                                <div>
+                                    <div style="font-size:14px;color:var(--text-primary);font-weight:500;" data-i18n="mqtt.heartbeat_send_all">Full-sync at heartbeat</div>
+                                    <div style="font-size:12px;color:var(--text-muted);margin-top:2px;" data-i18n="mqtt.heartbeat_send_all_desc">Re-send every value at the heartbeat interval even if nothing changed. Recovers state lost to a connection drop.</div>
+                                </div>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="formHeartbeatSendAll">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
+                            <div id="formFlushOnStateChangeRow" style="display:none;align-items:center;justify-content:space-between;">
+                                <div>
+                                    <div style="font-size:14px;color:var(--text-primary);font-weight:500;" data-i18n="mqtt.flush_on_state_change">Flush on mode change</div>
+                                    <div style="font-size:12px;color:var(--text-muted);margin-top:2px;" data-i18n="mqtt.flush_on_state_change_desc">Re-send every value when the car changes mode (engine on/off, charging start/stop), so the new state always reaches HA even if a single update is lost at a network handoff. Light — fires only on transitions.</div>
+                                </div>
+                                <label class="toggle-switch">
+                                    <input type="checkbox" id="formFlushOnStateChange">
+                                    <span class="toggle-slider"></span>
+                                </label>
+                            </div>
                             <div id="formAllowControlRow" style="display:none;align-items:center;justify-content:space-between;">
                                 <div>
                                     <div style="font-size:14px;color:var(--text-primary);font-weight:500;" data-i18n="mqtt.allow_control">Allow vehicle control</div>

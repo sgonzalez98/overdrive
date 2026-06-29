@@ -62,6 +62,13 @@ public class MqttPublisherService implements MqttCallback {
     private final TelemetryDiffer differ = new TelemetryDiffer();
     private volatile boolean forceFullResend = false;
     private volatile boolean discoveryAnnounced = false;
+    // State-transition flush. On any mode edge (ACC on/off, charging start/stop) we flush a
+    // full snapshot for a few cycles so the new state survives a single lost publish. Owned
+    // by the publish thread, same as the differ.
+    private boolean stateInit = false;
+    private boolean prevAccOn = false;
+    private boolean prevCharging = false;
+    private int stateFlushCycles = 0;
     private volatile MqttCommandRouter commandRouter;
     private volatile String haVin = null;
     private volatile String haModel = null;
@@ -351,11 +358,26 @@ public class MqttPublisherService implements MqttCallback {
 
         Set<String> changed = differ.changedKeys(snapshot);
         boolean first = differ.lastSendTimeMs() == 0;
-        boolean heartbeat = differ.elapsedMs(now) >= maxMs;
+        // Heartbeat: with heartbeatSendAll, fire on a fixed cadence since the last FULL sync
+        // (immune to change-only partial publishes resetting the clock — the starvation bug).
+        boolean heartbeat = (config.heartbeatSendAll ? differ.fullSyncElapsedMs(now)
+                                                     : differ.elapsedMs(now)) >= maxMs;
 
-        // Rate-limit floor: never transmit more often than the min interval,
-        // unless this is the very first publish or the heartbeat is due.
-        if (!first && !heartbeat && differ.elapsedMs(now) < minMs) {
+        // Full-sync on every state-mode transition (ACC on↔off, charging start↔stop) so the new
+        // state survives even if a single change-publish is lost at a network handoff. Cheap:
+        // fires only on edges, a few full sends each. Inert until the monitors first report.
+        boolean carOn = prevAccOn, charging = prevCharging;
+        try { carOn = com.overdrive.app.monitor.AccMonitor.isAccOn(); } catch (Throwable ignored) {}
+        try { charging = com.overdrive.app.monitor.ChargingDetector.getInstance().isCharging(); } catch (Throwable ignored) {}
+        if (config.flushOnStateChange && stateInit && (carOn != prevAccOn || charging != prevCharging)) {
+            stateFlushCycles = 5;
+        }
+        prevAccOn = carOn; prevCharging = charging; stateInit = true;
+        boolean flushNow = stateFlushCycles > 0;
+
+        // Rate-limit floor: never transmit more often than the min interval, unless this is the
+        // first publish, a heartbeat, or a state-transition flush.
+        if (!first && !heartbeat && !flushNow && differ.elapsedMs(now) < minMs) {
             return true;
         }
 
@@ -363,8 +385,9 @@ public class MqttPublisherService implements MqttCallback {
             if (!ensureConnected()) return false;
             if (!discoveryAnnounced) announceDiscovery(snapshot);
 
-            boolean sendAll = first || heartbeat || !config.changeOnly;
+            boolean sendAll = first || heartbeat || !config.changeOnly || flushNow;
             Set<String> keys = sendAll ? discoverableKeys(snapshot) : changed;
+            if (flushNow && stateFlushCycles > 0) stateFlushCycles--;
             if (!sendAll && keys.isEmpty()) return true;
 
             boolean ok = true;
@@ -382,17 +405,24 @@ public class MqttPublisherService implements MqttCallback {
                     && (sendAll || changed.contains("lat") || changed.contains("lon"))) {
                 publishLocation(snapshot);
             }
-            if (ok) differ.markKeysSent(snapshot, keys, now);
+            if (ok) {
+                differ.markKeysSent(snapshot, keys, now);
+                if (sendAll) differ.markFullSync(now);
+            }
             return ok;
         }
 
-        // Aggregate mode — full snapshot, change-gated.
-        boolean shouldSend = differ.shouldPublish(!changed.isEmpty(), config.changeOnly, now, minMs, maxMs);
+        // Aggregate mode — full snapshot. Honour the same full-sync triggers (heartbeat /
+        // state-flush) so a parked snapshot still goes out even under changeOnly.
+        boolean shouldSend = first || heartbeat || flushNow
+                || differ.shouldPublish(!changed.isEmpty(), config.changeOnly, now, minMs, maxMs);
+        if (flushNow && stateFlushCycles > 0) stateFlushCycles--;
         if (!shouldSend) return true;
         if (!publishString(config.topic, snapshot.toString(), config.retainMessages, config.qos)) {
             return false;
         }
         differ.markAllSent(snapshot, now);
+        differ.markFullSync(now);
         return true;
     }
 
