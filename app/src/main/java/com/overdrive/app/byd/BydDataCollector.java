@@ -2050,6 +2050,18 @@ public class BydDataCollector {
             // Anything above 50 from a getter that's supposed to be kW is the
             // hectowatt scale — divide. Below 50, trust the value as-is.
             // The 104857.5 BYD sentinel falls cleanly above the 50000 cap.
+
+            // Charge power into the pack (kW), direct from the instrument cluster.
+            // getChargePower() reads the real DC charge rate (e.g. 2.9 kW on a 15 A/230 V AC
+            // charge, matches the BYD app / cloud battery_power), unlike getExternalChargingPower()
+            // which returns the 104857.5 sentinel on this trim. Returns 0 / sentinel when idle —
+            // bound to a plausible kW range so a sentinel can't leak.
+            Object chgPower = BydDeviceHelper.callGetter(instrumentDevice, "getChargePower");
+            if (chgPower instanceof Number) {
+                double kw = ((Number) chgPower).doubleValue();
+                if (kw >= 0 && kw <= 500) b.chargePowerKw(kw);
+            }
+
             Object extPower = BydDeviceHelper.callGetter(instrumentDevice, "getExternalChargingPower");
             if (extPower instanceof Number) {
                 double raw = ((Number) extPower).doubleValue();

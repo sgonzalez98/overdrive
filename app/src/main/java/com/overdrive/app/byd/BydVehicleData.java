@@ -72,6 +72,7 @@ public class BydVehicleData {
     public final int chargingMode;        // SDK getChargingMode() raw (AC vs DC vs wireless — model-specific)
     public final double chargingPowerKw;
     public final double externalChargingPowerKw;
+    public final double chargePowerKw;    // DC charge power into pack (kW), InstrumentDevice.getChargePower()
     public final double hvPackVoltage;    // HV battery pack voltage (V), from CAN event
 
     // ==================== GEAR ====================
@@ -237,6 +238,7 @@ public class BydVehicleData {
         this.chargingMode = b.chargingMode;
         this.chargingPowerKw = b.chargingPowerKw;
         this.externalChargingPowerKw = b.externalChargingPowerKw;
+        this.chargePowerKw = b.chargePowerKw;
         this.hvPackVoltage = b.hvPackVoltage;
         this.gearMode = b.gearMode;
         this.tyrePressure = b.tyrePressure;
@@ -639,6 +641,7 @@ public class BydVehicleData {
         b.chargingGunState = chargingGunState; b.chargerWorkState = chargerWorkState;
         b.chargingMode = chargingMode;
         b.chargingPowerKw = chargingPowerKw; b.externalChargingPowerKw = externalChargingPowerKw;
+        b.chargePowerKw = chargePowerKw;
         b.hvPackVoltage = hvPackVoltage;
         b.gearMode = gearMode; b.tyrePressure = tyrePressure;
         b.tyrePressureState = tyrePressureState; b.tyreAirLeakState = tyreAirLeakState;
@@ -703,7 +706,7 @@ public class BydVehicleData {
         int totalMileageKm = UNAVAILABLE, evMileageKm = UNAVAILABLE;
         int chargingState = UNAVAILABLE, chargingGunState = UNAVAILABLE, chargerWorkState = UNAVAILABLE;
         int chargingMode = UNAVAILABLE;
-        double chargingPowerKw = NaN, externalChargingPowerKw = NaN, hvPackVoltage = NaN;
+        double chargingPowerKw = NaN, externalChargingPowerKw = NaN, chargePowerKw = NaN, hvPackVoltage = NaN;
         int gearMode = UNAVAILABLE;
         int[] tyrePressure, doorLockStatus, windowOpenPercent, seatbeltStatus, radarDistances;
         int[] seatHeat, seatCool;
@@ -797,6 +800,7 @@ public class BydVehicleData {
         public Builder chargingMode(int v) { chargingMode = v; return this; }
         public Builder chargingPowerKw(double v) { chargingPowerKw = v; return this; }
         public Builder externalChargingPowerKw(double v) { externalChargingPowerKw = v; return this; }
+        public Builder chargePowerKw(double v) { chargePowerKw = v; return this; }
         public Builder hvPackVoltage(double v) { hvPackVoltage = v; return this; }
         public Builder gearMode(int v) { gearMode = v; return this; }
         public Builder tyrePressure(int[] v) { tyrePressure = v; return this; }

@@ -76,6 +76,7 @@ public final class TelemetryFieldCatalog {
         // ---------- Core driving / energy ----------
         add("soc",        "State of Charge", SENSOR, "battery",     MEAS, "%",    "mdi:battery",            false, 0.1);
         add("power",      "Power",           SENSOR, "power",       MEAS, "kW",   "mdi:flash",              false, 0.1);
+        add("charge_power","Charge Power",   SENSOR, "power",       MEAS, "kW",   "mdi:battery-charging",   false, 0.1);
         add("speed",      "Speed",           SENSOR, "speed",       MEAS, "km/h", "mdi:speedometer",        false, 0.1);
         add("lat",        "Latitude",        SENSOR, null,          MEAS, "°",    "mdi:latitude",           true,  0.00001);
         add("lon",        "Longitude",       SENSOR, null,          MEAS, "°",    "mdi:longitude",          true,  0.00001);

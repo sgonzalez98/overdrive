@@ -476,34 +476,19 @@ public class MqttConnectionManager {
             }
             if (soc >= 0) payload.put("soc", soc);
 
-            // power — sign convention: positive = discharge, negative = charge.
-            // Sources: enginePowerKw while driving, then negated charging power.
+            // power — motor/propulsion power (kW). Positive = consuming, negative = regen.
+            // Only meaningful while the car is on: the motor signal idles at ~-2 kW noise when
+            // parked, so force 0 when ACC is off. Charge power is reported separately as
+            // charge_power — the motor signal does not see the OBC→pack charge path.
             try {
-                boolean powerSet = false;
-                if (vd != null && !Double.isNaN(vd.enginePowerKw)
-                        && Math.abs(vd.enginePowerKw) > 0.1
+                boolean accOn = false;
+                try { accOn = com.overdrive.app.monitor.AccMonitor.isAccOn(); } catch (Throwable ignored) {}
+                double motorKw = 0;
+                if (accOn && vd != null && !Double.isNaN(vd.enginePowerKw)
                         && Math.abs(vd.enginePowerKw) <= 300) {
-                    payload.put("power", vd.enginePowerKw);
-                    powerSet = true;
+                    motorKw = vd.enginePowerKw;
                 }
-                if (!powerSet) {
-                    // Prefer externalChargingPowerKw (InstrumentDevice) — real charger-reported power.
-                    // ChargingDevice.getChargingPower() is broken on most BYD models (returns 0).
-                    // Threshold 0.15 kW filters phantom readings when charger is unplugged.
-                    double chargingPower = 0;
-                    if (vd != null && !Double.isNaN(vd.externalChargingPowerKw) && vd.externalChargingPowerKw > 0.15) {
-                        chargingPower = vd.externalChargingPowerKw;
-                    } else if (vd != null && !Double.isNaN(vd.chargingPowerKw) && vd.chargingPowerKw > 0.15) {
-                        chargingPower = vd.chargingPowerKw;
-                    }
-
-                    ChargingStateData chargingData = vehicleDataMonitor.getChargingState();
-                    boolean isChg = (chargingData != null && chargingData.status == ChargingStateData.ChargingStatus.CHARGING)
-                                    || chargingPower > 0.15;
-                    double monitorPower = chargingPower > 0 ? chargingPower
-                            : (chargingData != null ? chargingData.chargingPowerKW : 0);
-                    payload.put("power", isChg && monitorPower > 0.1 ? -monitorPower : 0);
-                }
+                payload.put("power", motorKw);
             } catch (Exception e) {
                 payload.put("power", 0);
             }
@@ -538,10 +523,22 @@ public class MqttConnectionManager {
             payload.put("is_charging", isCharging ? 1 : 0);
 
             // is_dcfc
+            boolean v2l = false;
             if (vd != null && vd.chargingGunState != BydVehicleData.UNAVAILABLE) {
                 payload.put("is_dcfc", vd.chargingGunState == 3 ? 1 : 0);
-                if (vd.chargingGunState == 4) payload.put("is_charging", 0); // V2L
+                if (vd.chargingGunState == 4) { payload.put("is_charging", 0); v2l = true; } // V2L
             }
+
+            // charge_power — DC charge power into the pack (kW), from InstrumentDevice.getChargePower().
+            // Only meaningful while charging: getChargePower() returns garbage (~359) when idle, so
+            // gate on the charging state and a sane upper bound; 0 otherwise. This is the real charge
+            // rate (matches the BYD app / cloud battery_power, e.g. 2.9 kW on a 15 A AC charge).
+            double chargeKw = 0;
+            if (isCharging && !v2l && vd != null && !Double.isNaN(vd.chargePowerKw)
+                    && vd.chargePowerKw > 0.1 && vd.chargePowerKw <= 300) {
+                chargeKw = vd.chargePowerKw;
+            }
+            payload.put("charge_power", chargeKw);
 
             // is_parked
             boolean isParked = false;
